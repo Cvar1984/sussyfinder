@@ -206,8 +206,9 @@ $tokenNeedles = array(
     'goto',
     'implode',
     'strtr',
-    //'substr',
-    //'mb_substr',
+    'extract',
+    'substr',
+    'mb_substr',
     'substr_replace',
     'preg_replace',
     // Shell / Process
@@ -350,7 +351,7 @@ $tokenNeedles = array(
         <table align="center" width="30%">
             <tr>
                 <th>
-                    Susy Finder
+                    Sussy Finder
                 </th>
             </tr>
             <tr>
