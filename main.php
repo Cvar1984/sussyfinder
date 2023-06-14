@@ -201,16 +201,23 @@ $tokenNeedles = array(
     'convert_uu',
     'htmlspecialchars_decode',
     'bin2hex',
+    'hex2bin',
+    'hexdec',
     'chr',
     'strrev',
     'goto',
     'implode',
     'strtr',
     'extract',
+    'parse_str', //works like extract if only one argument is given.
     'substr',
     'mb_substr',
+    'str_replace',
     'substr_replace',
-    'preg_replace',
+    'preg_replace', // able to do eval on match
+    'exif_read_data',
+    'readgzfile',
+
     // Shell / Process
     'eval',
     'exec',
@@ -221,12 +228,34 @@ $tokenNeedles = array(
     'fsockopen',
     'proc_open',
     'popen ',
+    'assert', // identical to eval
+    'posix_kill',
+    'posix_setpgid',
+    'posix_setsid',
+    'posix_setuid',
+    'proc_nice',
+    'proc_close',
+    'proc_terminate',
+    'apache_child_terminate',
+
     // Server Information
     'posix_getuid',
     'posix_geteuid',
     'posix_getegid',
     'posix_getpwuid',
     'posix_getgrgid',
+    'posix_mkfifo',
+    'posix_getlogin',
+    'posix_ttyname',
+    'getenv',
+    'proc_get_status',
+    'get_cfg_var',
+    'disk_free_space',
+    'disk_total_space',
+    'diskfreespace',
+    'getlastmo',
+    'getmyinode',
+    'getmypid',
     'getmyuid',
     'getmygid',
     'fileowner',
@@ -236,29 +265,42 @@ $tokenNeedles = array(
     'getcwd',
     'sys_get_temp_dir',
     'basename',
+    'phpinfo',
+
     // Database
     'mysql_connect',
     'mysqli_connect',
     'mysqli_query',
     'mysql_query',
+
     // I/O
     'fopen',
+    'fsockopen',
     'file_put_contents',
     'file_get_contents',
     'url_get_contents',
+    'stream_get_meta_data',
     'move_uploaded_file',
     '$_files',
     'copy',
+    'include',
+    'include_once',
+    'require',
+    'require_once',
+    '__file__',
+
     // Miscellaneous
+    'mail',
+    'putenv',
+    'curl_init',
+    'tmpfile',
     'allow_url_fopen',
     'ini_set',
+    'set_time_limit',
     'session_start',
     'symlink',
     '__halt_compiler',
     '__compiler_halt_offset__',
-    'set_time_limit',
-    'memory_limit',
-    'max_execution_time',
     'error_reporting',
     'create_function',
     'get_magic_quotes_gpc',
@@ -339,8 +381,7 @@ $tokenNeedles = array(
 
 <body>
     <script type="text/javascript">
-        function copytable(el) {
-            var urlField = document.getElementById(el)
+        function copytable(el) {var urlField = document.getElementById(el)
             var range = document.createRange()
             range.selectNode(urlField)
             window.getSelection().addRange(range)
