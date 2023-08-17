@@ -3,6 +3,7 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://makeapullrequest.com) 
 
 Pocket size PHP malware/webshell/backdoor scanner excelent for real fight
+>i personally use this daily
 ## Features
 - token based comparison (ignore some obfuscation)
 - recent times sorted result (make your hunt easier)
