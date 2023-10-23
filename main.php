@@ -17,7 +17,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-$minute = 15;
+$minute = 60;
 $limit = (60 * $minute); // 60 (seconds) = 1 Minutes
 ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
@@ -29,28 +29,54 @@ set_time_limit($limit);
  * @param array $entries_array optional
  * @return array of files
  */
-function recursiveScan($directory, &$entries_array = array())
+function recursiveScan($directory, &$entries_array = array()) // :array
 {
-    // link can cause endless loop
-    $handle = @opendir($directory);
-    if ($handle) {
-        while (($entry = readdir($handle)) !== false) {
-            if ($entry == '.' || $entry == '..') {
-                continue;
-            }
-            $entry = $directory . DIRECTORY_SEPARATOR . $entry;
-            if (is_dir($entry) && is_readable($directory) && !is_link($directory)) {
-                $entries_array = recursiveScan($entry, $entries_array);
-            } elseif (is_file($entry) && is_readable($entry)) {
-                $entries_array['file_writable'][] = $entry;
-            } else {
-                $entries_array['file_not_writable'][] = $entry;
-            }
-        }
-        closedir($handle);
+    // Check if the directory exists and is readable
+    if (!is_dir($directory) || !is_readable($directory)) {
+        return $entries_array;
     }
+
+    // Open the directory
+    $handle = opendir($directory);
+    if (!$handle) {
+        return $entries_array;
+    }
+
+    // Iterate over the directory contents
+    while (($entry = readdir($handle)) !== false) {
+        // Skip the current directory and parent directory
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+
+        // Get the full path to the entry
+        $entryPath = $directory . DIRECTORY_SEPARATOR . $entry;
+
+        // Check if the entry is a symlink
+        if (is_link($entryPath)) {
+            continue;
+        }
+
+        // Check if the entry is a directory
+        if (is_dir($entryPath)) {
+            // Recursively scan the directory
+            $entries_array = recursiveScan($entryPath, $entries_array);
+        } elseif (is_readable($entryPath)) {
+            // Add the file to the writable array
+            $entries_array['file_writable'][] = $entryPath;
+        } else {
+            // Add the file to the non-writable array
+            $entries_array['file_not_writable'][] = $entryPath;
+        }
+    }
+
+    // Close the directory
+    closedir($handle);
+
+    // Return the entries array
     return $entries_array;
 }
+
 /**
  *
  * Sort array of list file by lastest modified time
@@ -74,18 +100,24 @@ function sortByLastModified($files)
  * @return array
  *
  */
-function getSortedByTime($path)
-{
-    $result = recursiveScan($path);
-    $fileWritable = $result['file_writable'];
-    $fileNotWritable = isset($result['file_not_writable']) ? !$result['file_not_writable'] : false;
-    $fileWritable = sortByLastModified($fileWritable);
 
+function getSortedByTime($path)// :array
+{
+    // Get the writable and non-writable files from the directory
+    $result = recursiveScan($path);
+    $writableFiles = $result['file_writable'];
+    $nonWritableFiles = isset($result['file_not_writable']) ? $result['file_not_writable'] : array();
+
+    // Sort the writable files by their last modified time
+    $writableFiles = sortByLastModified($writableFiles);
+
+    // Return the sorted files
     return array(
-        'file_writable' => $fileWritable,
-        'file_not_writable' => $fileNotWritable
+        'file_writable' => $writableFiles,
+        'file_not_writable' => $nonWritableFiles,
     );
 }
+
 /**
  * Recurisively list a file by array of extension
  *
@@ -132,28 +164,27 @@ function getSortedByExtension($path, $ext)
  */
 function getFileTokens($filename)
 {
-    /*
-    token_get_all() This function not support :
-    - Old notation :  "<?  ?>" and "<% %>"
-    - heredoc syntax
-    - nowdoc syntax (since PHP 5.3.0)
-    */
+    // Replace short PHP tags with PHP tags
     $fileContent = file_get_contents($filename);
-    $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent); // replace old php tags
-    $token = token_get_all($fileContent);
-    $output = array();
-    $tokenCount = count($token);
+    $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
 
-    if ($token > 0) {
-        for ($i = 0; $i < $tokenCount; $i++) {
-            if (isset($token[$i][1])) {
-                $output[] .= strtolower($token[$i][1]);
-            }
+    // Get the file tokens
+    $token = token_get_all($fileContent);
+
+    // Create an output array
+    $output = array();
+
+    // Iterate over the tokens and add the token types to the output array
+    foreach ($token as $item) {
+        if (isset($item[1])) {
+            $output[] = strtolower($item[1]);
         }
     }
-    $output = array_values(
-        array_unique(array_filter(array_map("trim", $output)))
-    );
+
+    // Remove any duplicate or empty tokens from the output array
+    $output = array_values(array_unique(array_filter(array_map("trim", $output))));
+
+    // Return the output array
     return $output;
 }
 /**
@@ -181,12 +212,14 @@ $ext = array(
     'phps',
     'pht',
     'phpt',
+    'phtm',
     'phtml',
     'phar',
     'php3',
     'php4',
     'php5',
     'php7',
+    'shtml',
     'suspected'
 );
 
