@@ -339,6 +339,7 @@ $tokenNeedles = array(
     'get_magic_quotes_gpc',
     '$auth_pass',
     '$password',
+    '$pass',
 );
 
 $blacklistMD5Sums = array(
