@@ -63,10 +63,10 @@ function recursiveScan($directory, &$entries_array = array()) // :array
             $entries_array = recursiveScan($entryPath, $entries_array);
         } elseif (is_readable($entryPath)) {
             // Add the file to the writable array
-            $entries_array['file_writable'][] = $entryPath;
+            $entries_array['file_readable'][] = $entryPath;
         } else {
             // Add the file to the non-writable array
-            $entries_array['file_not_writable'][] = $entryPath;
+            $entries_array['file_not_readable'][] = $entryPath;
         }
     }
 
@@ -105,16 +105,16 @@ function getSortedByTime($path)// :array
 {
     // Get the writable and non-writable files from the directory
     $result = recursiveScan($path);
-    $writableFiles = $result['file_writable'];
-    $nonWritableFiles = isset($result['file_not_writable']) ? $result['file_not_writable'] : array();
+    $readable = $result['file_readable'];
+    $notReadable = isset($result['file_not_read_able']) ? $result['file_not_read_able'] : array();
 
     // Sort the writable files by their last modified time
-    $writableFiles = sortByLastModified($writableFiles);
+    $readable = sortByLastModified($readable);
 
     // Return the sorted files
     return array(
-        'file_writable' => $writableFiles,
-        'file_not_writable' => $nonWritableFiles,
+        'file_readable' => $readable,
+        'file_not_readable' => $notReadable,
     );
 }
 
@@ -128,10 +128,10 @@ function getSortedByTime($path)// :array
 function getSortedByExtension($path, $ext)
 {
     $result = getSortedByTime($path);
-    $fileWritable = $result['file_writable'];
-    isset($result['file_not_writable']) ? $result['file_not_writable'] : false;
+    $fileReadable = $result['file_readable'];
+    isset($result['file_not_readable']) ? $result['file_not_readable'] : false;
 
-    foreach ($fileWritable as $entry) {
+    foreach ($fileReadable as $entry) {
         $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
         $pathinfo = strtolower($pathinfo);
 
@@ -152,8 +152,8 @@ function getSortedByExtension($path, $ext)
         $sortedNotWritableFile = false;
     }
     return array(
-        'file_writable' => $sortedWritableFile,
-        'file_not_writable' => $sortedNotWritableFile
+        'file_readable' => $sortedWritableFile,
+        'file_not_readable' => $sortedNotWritableFile
     );
 }
 /**
@@ -340,6 +340,10 @@ $tokenNeedles = array(
     '$auth_pass',
     '$password',
 );
+
+$blacklistMD5Sums = array(
+    'da18ee332089bc79e5906d254e05da85', // adminer
+);
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -452,19 +456,25 @@ $tokenNeedles = array(
                 $path = $_POST['dir'];
                 $result = getSortedByExtension($path, $ext);
 
-                $fileWritable = $result['file_writable'];
-                $fileNotWritable = $result['file_not_writable'];
-                $fileWritable = sortByLastModified($fileWritable);
+                $fileReadable = $result['file_readable'];
+                $fileNotWritable = $result['file_not_readable'];
+                $fileReadable = sortByLastModified($fileReadable);
 
-                foreach ($fileWritable as $file) {
+                foreach ($fileReadable as $file) {
                     $filePath = str_replace('\\', '/', $file);
+
+                    if (in_array(md5_file($filePath), $blacklistMD5Sums)) {
+                        echo sprintf('<tr><td><span style="color:red;">%s</span></td></tr>', $filePath);
+                        //unlink($filePath);
+                        continue;
+                    }
+
                     $tokens = getFileTokens($filePath);
                     $cmp = compareTokens($tokenNeedles, $tokens);
                     $cmp = implode(', ', $cmp);
 
                     if (!empty($cmp)) {
-                        echo sprintf('<tr><td><span style="color:red;">%s (%s)</span></td></tr>', $filePath, $cmp);
-                        //unlink($filePath);
+                        echo sprintf('<tr><td><span style="color:orange;">%s (%s)</span></td></tr>', $filePath, $cmp);
                     }
                 }
             }
