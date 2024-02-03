@@ -344,7 +344,11 @@ $tokenNeedles = array(
 
 $blacklistMD5Sums = array(
     'da18ee332089bc79e5906d254e05da85', // adminer
+    'd68181147fd360e501a8c47a8f11db12',
+    'cde87e013ff1042438a61eba13a8b84f',
 );
+$content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/wordpress-6.4.3.txt');
+$whitelist1 = explode("\n", $content);
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -463,10 +467,12 @@ $blacklistMD5Sums = array(
 
                 foreach ($fileReadable as $file) {
                     $filePath = str_replace('\\', '/', $file);
+                    $fileSum = md5_file($filePath);
 
-                    if (in_array(md5_file($filePath), $blacklistMD5Sums)) {
-                        echo sprintf('<tr><td><span style="color:red;">%s</span></td></tr>', $filePath);
-                        //unlink($filePath);
+                    if (in_array($fileSum, $whitelist1)) {
+                        continue;
+                    } elseif (in_array($fileSum, $blacklistMD5Sums)) {
+                        echo sprintf('<tr><td><span style="color:green;">%s (Blacklist)</span></td></tr>', $filePath);
                         continue;
                     }
 
