@@ -472,7 +472,7 @@ $whitelist1 = explode("\n", $content);
                     if (in_array($fileSum, $whitelist1)) {
                         continue;
                     } elseif (in_array($fileSum, $blacklistMD5Sums)) {
-                        echo sprintf('<tr><td><span style="color:green;">%s (Blacklist)</span></td></tr>', $filePath);
+                        echo sprintf('<tr><td><span style="color:red;">%s (Blacklist)</span></td></tr>', $filePath);
                         continue;
                     }
 
