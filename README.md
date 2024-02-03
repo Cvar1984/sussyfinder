@@ -6,10 +6,13 @@ Pocket size PHP malware/webshell/backdoor scanner excelent for real fight
 >i personally use this daily
 ## Features
 - token based comparison (ignore some obfuscation)
+- support "<?" and "<%" notations
+- md5 hash based comparison (whitelist & blacklist)
 - recent times sorted result (make your hunt easier)
-- support old notation "<?" and "<%"
+- highlight result by color
+- copy paste result
 
-![ss](https://i.postimg.cc/zv7ZVYLg/Screenshot-20230605-105034.png)
+![ss](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo.jpg)
 >clone webshells submodule for testing
 
 Keep in mind that not every single obfuscated webshell can be detected using token_get_all and not every webshell showed on top there is some on the bottom and middle depends on their skills at hiding leaves in a tree
