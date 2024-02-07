@@ -346,9 +346,22 @@ $blacklistMD5Sums = array(
     'da18ee332089bc79e5906d254e05da85', // adminer
     'd68181147fd360e501a8c47a8f11db12',
     'cde87e013ff1042438a61eba13a8b84f',
+    '984a207fe749cf6c3ae5def462b25cb8',
+    '5ecdefd3914452f29dc01b53af1dae62',
+    '52282a4579f6c97c0ea26b153bbaedfc',
+    '0e631fea018d9acbea134a89fb89ed9d',
 );
+
+$whitelistMD5Sums = array(// just for a test please remove this on production
+    '6a471006c59396e1cae973d2ecfef7f7',
+    '3381f2be249d08ebd3dfd13549f8e3b9',
+    'b97ffd7664b3ed8fb756dca57f7549f8',
+    '244e751ea8f56cac3044695d5a0f4665',
+);
+
 $content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/wordpress-6.4.3.txt');
-$whitelist1 = explode("\n", $content);
+$remoteWhitelist = explode("\n", $content);
+$whitelsitMD5Sums = array_merge($remoteWhitelist, $whitelistMD5Sums);
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -469,12 +482,13 @@ $whitelist1 = explode("\n", $content);
                     $filePath = str_replace('\\', '/', $file);
                     $fileSum = md5_file($filePath);
 
-                    if (in_array($fileSum, $whitelist1)) {
+                    if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
                         continue;
-                    } elseif (in_array($fileSum, $blacklistMD5Sums)) {
+                    } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
                         echo sprintf('<tr><td><span style="color:red;">%s (Blacklist)</span></td></tr>', $filePath);
+                        unlink($filePath);
                         continue;
-                    }
+                    } // else check the token
 
                     $tokens = getFileTokens($filePath);
                     $cmp = compareTokens($tokenNeedles, $tokens);
