@@ -106,7 +106,7 @@ function getSortedByTime($path)// :array
     // Get the writable and non-writable files from the directory
     $result = recursiveScan($path);
     $readable = $result['file_readable'];
-    $notReadable = isset($result['file_not_read_able']) ? $result['file_not_read_able'] : array();
+    $notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
 
     // Sort the writable files by their last modified time
     $readable = sortByLastModified($readable);
@@ -350,6 +350,7 @@ $blacklistMD5Sums = array(
     '5ecdefd3914452f29dc01b53af1dae62',
     '52282a4579f6c97c0ea26b153bbaedfc',
     '0e631fea018d9acbea134a89fb89ed9d',
+    '9cef8472ff468b3c36ae04cdc2ff5e57',
 );
 
 $whitelistMD5Sums = array(// just for a test please remove this on production
