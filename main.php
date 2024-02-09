@@ -351,6 +351,9 @@ $blacklistMD5Sums = array(
     '52282a4579f6c97c0ea26b153bbaedfc',
     '0e631fea018d9acbea134a89fb89ed9d',
     '9cef8472ff468b3c36ae04cdc2ff5e57',
+    '23f5c862d6b537bbd220cab81cfde3e9',
+    '810bcc06123b712c67120c00bc1f97ea',
+    '11b4c780f460b91be40d1bf831c8dabd',
 );
 
 $whitelistMD5Sums = array(// just for a test please remove this on production
