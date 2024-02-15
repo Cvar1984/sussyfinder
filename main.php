@@ -354,13 +354,26 @@ $blacklistMD5Sums = array(
     '23f5c862d6b537bbd220cab81cfde3e9',
     '810bcc06123b712c67120c00bc1f97ea',
     '11b4c780f460b91be40d1bf831c8dabd',
+    'e5327e50ab0e5805a91ca4bb844178df',
+    '06fe42819e916f85df5e330c168f43dc',
+    '37e729fadce14aab41ad45c4b9adb76e',
+    '7c58272b434fd8ffda14ce21a9df34b5',
+    'a2b5342a539fb9d65f90a4c501160774',
+    'ab767da87df14fe0850717c02848d190',
+    '445e63fa6adf1de27cae31aefca7e1d0',
+    '4753c4379a6f7204e343ad83d3ffebcf',
+    '261b87beaa63e785d94a002630184c1e',
+    '4de688d75d5659c57a193a1bdbd5ab14',
+    '9cef8472ff468b3c36ae04cdc2ff5e57', //jfu
 );
 
 $whitelistMD5Sums = array(// just for a test please remove this on production
+    '7115beeb147343ef831c1dc1d8f0c491',
     '6a471006c59396e1cae973d2ecfef7f7',
     '3381f2be249d08ebd3dfd13549f8e3b9',
     'b97ffd7664b3ed8fb756dca57f7549f8',
     '244e751ea8f56cac3044695d5a0f4665',
+    'ff2d70eb05227cef6b8bde85e67ad42c', //mpdf
 );
 
 $content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/wordpress-6.4.3.txt');
