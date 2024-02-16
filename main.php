@@ -100,7 +100,6 @@ function sortByLastModified($files)
  * @return array
  *
  */
-
 function getSortedByTime($path)// :array
 {
     // Get the writable and non-writable files from the directory
@@ -365,6 +364,9 @@ $blacklistMD5Sums = array(
     '261b87beaa63e785d94a002630184c1e',
     '4de688d75d5659c57a193a1bdbd5ab14',
     '9cef8472ff468b3c36ae04cdc2ff5e57', //jfu
+    '6ebc6f001db13eb0ba353c8dae2d2de4',
+    'b43c94ea8e371f08cec65f78b9b7cc3d',
+    'd36a7ca98675a5efb2f21987b7d82bf7',
 );
 
 $whitelistMD5Sums = array(// just for a test please remove this on production
