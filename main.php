@@ -375,6 +375,8 @@ $blacklistMD5Sums = array(
 
 $content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
 $whitelistMD5Sums = explode("\n", $content);
+//$content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+//$blacklistMD5Sums = explode("\n", $content);
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
