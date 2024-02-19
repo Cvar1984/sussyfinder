@@ -372,8 +372,9 @@ $blacklistMD5Sums = array(
     '179af89c89370dcc3d6c8832eb394042',
 );
 
+
 $content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
-$remoteWhitelist = explode("\n", $content);
+$whitelistMD5Sums = explode("\n", $content);
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
