@@ -367,20 +367,13 @@ $blacklistMD5Sums = array(
     '6ebc6f001db13eb0ba353c8dae2d2de4',
     'b43c94ea8e371f08cec65f78b9b7cc3d',
     'd36a7ca98675a5efb2f21987b7d82bf7',
+    'f8518441192a31c0461a79233c19c0d1',
+    '77dbc95f089574059ea71fbec588060d',
+    '179af89c89370dcc3d6c8832eb394042',
 );
 
-$whitelistMD5Sums = array(// just for a test please remove this on production
-    '7115beeb147343ef831c1dc1d8f0c491',
-    '6a471006c59396e1cae973d2ecfef7f7',
-    '3381f2be249d08ebd3dfd13549f8e3b9',
-    'b97ffd7664b3ed8fb756dca57f7549f8',
-    '244e751ea8f56cac3044695d5a0f4665',
-    'ff2d70eb05227cef6b8bde85e67ad42c', //mpdf
-);
-
-$content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/wordpress-6.4.3.txt');
+$content = file_get_contents('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
 $remoteWhitelist = explode("\n", $content);
-$whitelsitMD5Sums = array_merge($remoteWhitelist, $whitelistMD5Sums);
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
