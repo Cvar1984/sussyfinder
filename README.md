@@ -20,5 +20,4 @@ Whitelist hash i provide is harvested from common frameworks and libraries, its 
 
 Blacklist system exist also to speed up the scanning progress and make it easier to spot the malware.
 
-## hash pr
-please provide the source files if you want to make pr to add your own hash data
+please provide the source files if you want to make pr to add your own hash data.
