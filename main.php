@@ -399,6 +399,15 @@ $blacklistMD5Sums = array(
     'b83ffbfceb357ba882e4fb99ce16321f',
     '521acf9fd3a5409fea57789b14d62105',
     '6b5bd3739b8613dde9542d18e7dc49b7',
+    'c8a2e1635ebcf68467bd6bfa735402a5',
+    'd22b34adf16fdc550919305d9ee91d60',
+    'af4d38c2252f9202b7e2a6ccab4060dc',
+    'ba10786b2cc4e20c1c293d1548e3c7ff', // jfu
+    '1e8b306adec8018dfb69d5e8e3729824',
+    '53b3f24e14b70630be42997fb3936c29',
+    '99c57b96fb57dc0db53d9c08175aa046',
+    '0be7021455370311604dd1d8897eece5', // eval-slider
+    '9967ff7859969ed44a9c7e657a8c0a68',
 );
 
 
