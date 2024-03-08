@@ -168,16 +168,15 @@ function getFileTokens($filename)
     $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
 
     // Get the file tokens
-    $token = token_get_all($fileContent);
+    $tokens = token_get_all($fileContent);
 
     // Create an output array
     $output = array();
 
     // Iterate over the tokens and add the token types to the output array
-    foreach ($token as $item) {
-        if (isset($item[1])) {
-            $output[] = strtolower($item[1]);
-        }
+
+    foreach ($tokens as $token) {
+        $output[] = strtolower(is_array($token) ? $token[1] : $token);
     }
 
     // Remove any duplicate or empty tokens from the output array
@@ -185,6 +184,27 @@ function getFileTokens($filename)
 
     // Return the output array
     return $output;
+}
+/**
+ * inStringArray
+ *
+ * @param array $needle
+ * @param array $haystack
+ * @return bool
+ */
+function inStringArray($needle, $haystack) {
+    // Ensure both needle and haystack elements are string type
+    $needle = (string) $needle;
+
+    foreach ($haystack as $string) {
+        $string = (string) $string;
+
+        if (strpos($string, $needle) !== false) {
+            return true;
+        }
+    }
+
+    return false;
 }
 /**
  * Compare tokens and return array of matched tokens
@@ -199,7 +219,7 @@ function compareTokens($tokenNeedles, $tokenHaystack)
 
     $output = array();
     foreach ($tokenNeedles as $tokenNeedle) {
-        if (in_array($tokenNeedle, $tokenHaystack)) {
+        if (inStringArray($tokenNeedle, $tokenHaystack)) {
             $output[] = $tokenNeedle;
         }
     }
@@ -269,6 +289,7 @@ $tokenNeedles = array(
     'proc_close',
     'proc_terminate',
     'apache_child_terminate',
+    '`',
 
     // Server Information
     'posix_getuid',
@@ -298,6 +319,7 @@ $tokenNeedles = array(
     'sys_get_temp_dir',
     'basename',
     'phpinfo',
+    'php_uname',
 
     // Database
     'mysql_connect',
