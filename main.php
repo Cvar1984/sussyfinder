@@ -168,16 +168,15 @@ function getFileTokens($filename)
     $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
 
     // Get the file tokens
-    $token = token_get_all($fileContent);
+    $tokens = token_get_all($fileContent);
 
     // Create an output array
     $output = array();
 
     // Iterate over the tokens and add the token types to the output array
-    foreach ($token as $item) {
-        if (isset($item[1])) {
-            $output[] = strtolower($item[1]);
-        }
+
+    foreach ($tokens as $token) {
+        $output[] = strtolower(is_array($token) ? $token[1] : $token);
     }
 
     // Remove any duplicate or empty tokens from the output array
@@ -185,6 +184,27 @@ function getFileTokens($filename)
 
     // Return the output array
     return $output;
+}
+/**
+ * inStringArray
+ *
+ * @param array $needle
+ * @param array $haystack
+ * @return bool
+ */
+function inStringArray($needle, $haystack) {
+    // Ensure both needle and haystack elements are string type
+    $needle = (string) $needle;
+
+    foreach ($haystack as $string) {
+        $string = (string) $string;
+
+        if (strpos($string, $needle) !== false) {
+            return true;
+        }
+    }
+
+    return false;
 }
 /**
  * Compare tokens and return array of matched tokens
@@ -199,7 +219,7 @@ function compareTokens($tokenNeedles, $tokenHaystack)
 
     $output = array();
     foreach ($tokenNeedles as $tokenNeedle) {
-        if (in_array($tokenNeedle, $tokenHaystack)) {
+        if (inStringArray($tokenNeedle, $tokenHaystack)) {
             $output[] = $tokenNeedle;
         }
     }
@@ -269,6 +289,7 @@ $tokenNeedles = array(
     'proc_close',
     'proc_terminate',
     'apache_child_terminate',
+    '`',
 
     // Server Information
     'posix_getuid',
@@ -298,6 +319,7 @@ $tokenNeedles = array(
     'sys_get_temp_dir',
     'basename',
     'phpinfo',
+    'php_uname',
 
     // Database
     'mysql_connect',
@@ -411,6 +433,23 @@ $blacklistMD5Sums = array(
     'dceb28731bd44e3f4acdc09ede08ced5',
     '1248c6d7450e632c765274d083160c83',
     '61e04d4a141040e112eb5be90831f5bc',
+    'a958bac7f0bbaa3880677c843037f51c',
+    'b667546965367d935dde09515530e998',
+    'b3d010e0ed5bba85dc3dc8114ded7330',
+    'fd2ceb9c377f5c23113d04f44b7d7bf2',
+    '16554688742da2c942305f7ef48fec1a',
+    '96fa26c5790989be62ffef973fffd263',
+    '5a51b652b05e1dc0c32570cdaffc2c25',
+    'd0bd5e748d0c02ddb0f352142e611b6b',
+    '63748eae2a329943e6315f5d0e5c3f08',
+    'd1318c1f43c320b2d8e90cea167caf37',
+    '6dc97fa3d07d04c3a265138f3b818bae',
+    'd98801325e39e340ea5c78ecca56d28b',
+    'f3d691e85be610619479f84a08e3ce72',
+    '1eb47a031a5fb689294c75eeecd56059',
+    'c0d5e2072dee638d0ac4fb175b361d70',
+    'ec1c429f0df7788c45ea069d00da0164',
+    '7ff09f23ae964d98218e833cbb724879',
 );
 
 
