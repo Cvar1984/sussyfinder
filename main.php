@@ -446,6 +446,10 @@ $blacklistMD5Sums = array(
     '6dc97fa3d07d04c3a265138f3b818bae',
     'd98801325e39e340ea5c78ecca56d28b',
     'f3d691e85be610619479f84a08e3ce72',
+    '1eb47a031a5fb689294c75eeecd56059',
+    'c0d5e2072dee638d0ac4fb175b361d70',
+    'ec1c429f0df7788c45ea069d00da0164',
+    '7ff09f23ae964d98218e833cbb724879',
 );
 
 
