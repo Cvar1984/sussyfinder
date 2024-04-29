@@ -192,7 +192,8 @@ function getFileTokens($filename)
  * @param array $haystack
  * @return bool
  */
-function inStringArray($needle, $haystack) {
+function inStringArray($needle, $haystack)
+{
     // Ensure both needle and haystack elements are string type
     $needle = (string) $needle;
 
@@ -224,6 +225,67 @@ function compareTokens($tokenNeedles, $tokenHaystack)
         }
     }
     return $output;
+}
+
+function urlFileArray($url) {
+    if (function_exists('file')) {
+        $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES); // Use error suppression for cleaner handling
+
+        // If file() fails, return false
+        if ($content === false) {
+            trigger_error("Failed to fetch URL using file", E_USER_WARNING);
+            return false;
+        }
+
+        return $content;
+    }
+
+    else if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, TRUE);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, FALSE); // Disable strict peer verification (caution in production)
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, FALSE);
+
+        // Handle potential cURL errors
+        if (curl_errno($ch)) {
+            $error_msg = curl_error($ch);
+            curl_close($ch);
+            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
+            return false;
+        }
+
+        $content = curl_exec($ch);
+        curl_close($ch);
+        return explode("\n", $content);
+    }
+
+    else if (function_exists('file_get_contents')) {
+        $context = stream_context_create(
+            array(
+                'http' => array(
+                    'ignore_errors' => true, // Handle potential errors gracefully
+                ),
+                'ssl' => array(
+                    'verify_peer' => false,
+                    'verify_peer_name' => false,
+                )
+            )
+        );
+
+        $content = @file_get_contents($url, false, $context); // Use error suppression for cleaner handling
+
+        // If file_get_contents fails, return false
+        if ($content === false) {
+            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
+            return false;
+        }
+
+        return explode("\n", $content);
+    }
+
+    trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
+    return false;
 }
 
 $ext = array(
@@ -363,8 +425,8 @@ $tokenNeedles = array(
     '$pass',
 );
 
-$whitelistMD5Sums = file('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-$blacklistMD5Sums = file('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+$whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
+$blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -439,7 +501,8 @@ $blacklistMD5Sums = file('https://raw.githubusercontent.com/Cvar1984/sussyfinder
 
 <body>
     <script type="text/javascript">
-        function copytable(el) {var urlField = document.getElementById(el)
+        function copytable(el) {
+            var urlField = document.getElementById(el)
             var range = document.createRange()
             range.selectNode(urlField)
             window.getSelection().addRange(range)
@@ -492,7 +555,7 @@ $blacklistMD5Sums = file('https://raw.githubusercontent.com/Cvar1984/sussyfinder
                         unlink($filePath);
                         continue;
                     } // else check the token
-
+            
                     $tokens = getFileTokens($filePath);
                     $cmp = compareTokens($tokenNeedles, $tokens);
                     $cmp = implode(', ', $cmp);
