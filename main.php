@@ -22,6 +22,7 @@ $limit = (60 * $minute); // 60 (seconds) = 1 Minutes
 ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
 set_time_limit($limit);
+ini_set('display_errors', 1); // debug
 /**
  * Recursive listing files
  *
