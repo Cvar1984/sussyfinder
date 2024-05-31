@@ -189,24 +189,31 @@ function getFileTokens($filename)
 /**
  * inStringArray
  *
- * @param array $needle
+ * @param string $needle
  * @param array $haystack
  * @return bool
  */
 function inStringArray($needle, $haystack)
 {
-    // Ensure both needle and haystack elements are string type
-    $needle = (string) $needle;
-
-    foreach ($haystack as $string) {
-        $string = (string) $string;
-
-        if (strpos($string, $needle) !== false) {
-            return true;
+    $matches = [];
+    foreach ($haystack as $key => $value) {
+        if (is_string($value)) {
+            // Check if string is found
+            if (strpos($value, $needle) !== false) {
+                $matches[] = $key; // Add key to matches
+            }
+        } elseif (is_array($value)) {
+            // Recursively search within sub-arrays
+            $subMatches = inStringArray($needle, $value);
+            if (!empty($subMatches)) {
+                // Prepend current key to sub-matches
+                foreach ($subMatches as $subMatch) {
+                    $matches[] = $key . '[' . $subMatch . ']';
+                }
+            }
         }
     }
-
-    return false;
+    return $matches;
 }
 /**
  * Compare tokens and return array of matched tokens
@@ -289,6 +296,30 @@ function urlFileArray($url)
 
     trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
     return false;
+}
+/**
+ * Get Online Vibes check, return gyatt if fail
+ *
+ * @param string $hashSum
+ * @return array|null
+ */
+function vTotalCheckHash($hashSum)
+{
+    $APIKey = '';
+
+    if (!function_exists('curl_init') || empty($APIKey)) {
+        return false;
+    }
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, sprintf('https://www.virustotal.com/api/v3/files/%s', $hashSum));
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array(sprintf('x-apikey: %s', $APIKey)));
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $result = curl_exec($ch);
+    curl_close($ch);
+
+    return json_decode($result, true);
+
 }
 
 $ext = array(
@@ -433,6 +464,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
+
     <head>
         <title>Sussy Finder</title>
         <style type="text/css">
@@ -558,6 +590,18 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                             continue;
                         } // else check the token
 
+                        $vTotalRes = @vTotalCheckHash($fileSum);
+
+                        if (isset($vTotalRes['data'])) {
+                            if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
+                                echo sprintf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
+                                continue;
+                            } else if (!empty(inStringArray('webshells', $vTotalRes))) {
+                                echo sprintf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
+                                continue;
+                            }
+                        }
+
                         $tokens = getFileTokens($filePath);
                         $cmp = compareTokens($tokenNeedles, $tokens);
                         $cmp = implode(', ', $cmp);
@@ -571,4 +615,5 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
             </table>
         </form>
     </body>
+
 </html>
