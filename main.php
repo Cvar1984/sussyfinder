@@ -129,7 +129,7 @@ function getSortedByExtension($path, $ext)
 {
     $result = getSortedByTime($path);
     $fileReadable = $result['file_readable'];
-    isset($result['file_not_readable']) ? $result['file_not_readable'] : false;
+    //isset($result['file_not_readable']) ? $result['file_not_readable'] : false;
 
     foreach ($fileReadable as $entry) {
         $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
@@ -177,7 +177,13 @@ function getFileTokens($filename)
     // Iterate over the tokens and add the token types to the output array
 
     foreach ($tokens as $token) {
-        $output[] = strtolower(is_array($token) ? $token[1] : $token);
+        //$output[] = strtolower(is_array($token) ? $token[1] : $token);
+
+        if (is_array($token)) {
+            $output[] = strtolower($token[1]);
+        } else {
+            $output[] = strtolower($token);
+        }
     }
 
     // Remove any duplicate or empty tokens from the output array
@@ -191,7 +197,7 @@ function getFileTokens($filename)
  *
  * @param string $needle
  * @param array $haystack
- * @return bool
+ * @return array
  */
 function inStringArray($needle, $haystack)
 {
@@ -224,8 +230,6 @@ function inStringArray($needle, $haystack)
  */
 function compareTokens($tokenNeedles, $tokenHaystack)
 {
-
-
     $output = array();
     foreach ($tokenNeedles as $tokenNeedle) {
         if (inStringArray($tokenNeedle, $tokenHaystack)) {
@@ -301,7 +305,7 @@ function urlFileArray($url)
  * Get Online Vibes check, return gyatt if fail
  *
  * @param string $hashSum
- * @return array|null
+ * @return array|bool|null
  */
 function vTotalCheckHash($hashSum)
 {
@@ -315,11 +319,16 @@ function vTotalCheckHash($hashSum)
     curl_setopt($ch, CURLOPT_URL, sprintf('https://www.virustotal.com/api/v3/files/%s', $hashSum));
     curl_setopt($ch, CURLOPT_HTTPHEADER, array(sprintf('x-apikey: %s', $APIKey)));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    if (curl_errno($ch)) {
+        $error_msg = curl_error($ch);
+        curl_close($ch);
+        trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
+        return false;
+    }
     $result = curl_exec($ch);
     curl_close($ch);
 
     return json_decode($result, true);
-
 }
 
 $ext = array(
@@ -590,7 +599,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                             continue;
                         } // else check the token
 
-                        $vTotalRes = @vTotalCheckHash($fileSum);
+                        $vTotalRes = vTotalCheckHash($fileSum);
 
                         if (isset($vTotalRes['data'])) {
                             if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
