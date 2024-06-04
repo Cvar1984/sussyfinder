@@ -3,7 +3,9 @@
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://makeapullrequest.com)
 
 PHP web application that scans a directory for files with specific extensions (e.g., PHP scripts) and checks for suspicious tokens or patterns within the files. The application uses various PHP functions and techniques to achieve this, including recursive directory scanning, file token extraction, and token comparison.
-
+## Requirements
+- PHP4/PHP5/PHP7/PHP8
+- VirusTotal APIKey (Optional)
 ## Features
 - token based comparison (ignore some obfuscation technique)
 - support "<?" and "<%" notations
