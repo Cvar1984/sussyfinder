@@ -166,6 +166,7 @@ function getFileTokens($filename)
 {
     // Replace short PHP tags with PHP tags
     $fileContent = file_get_contents($filename);
+    $fileContent = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $fileContent);
     $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
 
     // Get the file tokens
