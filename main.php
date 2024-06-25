@@ -202,7 +202,7 @@ function getFileTokens($filename)
  */
 function inStringArray($needle, $haystack)
 {
-    $matches = [];
+    $matches = array();
     foreach ($haystack as $key => $value) {
         if (is_string($value)) {
             // Check if string is found
@@ -595,7 +595,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                         if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
                             continue;
                         } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
-                            echo sprintf('<tr><td><span style="color:red;">%s (Blacklist)</span></td></tr>', $filePath);
+                            printf('<tr><td><span style="color:red;">%s (Blacklist)</span></td></tr>', $filePath);
                             unlink($filePath);
                             continue;
                         } // else check the token
@@ -604,10 +604,10 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 
                         if (isset($vTotalRes['data'])) {
                             if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                                echo sprintf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
+                                printf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
                                 continue;
                             } else if (!empty(inStringArray('webshells', $vTotalRes))) {
-                                echo sprintf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
+                                printf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
                                 continue;
                             }
                         }
@@ -617,7 +617,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                         $cmp = implode(', ', $cmp);
 
                         if (!empty($cmp)) {
-                            echo sprintf('<tr><td><span style="color:orange;">%s (%s)</span></td></tr>', $filePath, $cmp);
+                            printf('<tr><td><span style="color:orange;">%s (%s)</span></td></tr>', $filePath, $cmp);
                         }
                     }
                 }
