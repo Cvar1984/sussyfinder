@@ -106,7 +106,12 @@ function getSortedByTime($path)// :array
     // Get the writable and non-writable files from the directory
     $result = recursiveScan($path);
     $readable = $result['file_readable'];
-    $notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
+    //$notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
+    if (isset($result['file_not_readable'])) {
+        $notReadable = $result['file_not_readable'];
+    } else {
+        $notReadable = array();
+    }
 
     // Sort the writable files by their last modified time
     $readable = sortByLastModified($readable);
