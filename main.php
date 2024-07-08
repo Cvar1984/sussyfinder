@@ -608,10 +608,11 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                         $vTotalRes = vTotalCheckHash($fileSum);
 
                         if (isset($vTotalRes['data'])) {
+                            $matchedString = inStringArray('webshells', $vTotalRes);
                             if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
                                 printf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
                                 continue;
-                            } else if (!empty(inStringArray('webshells', $vTotalRes))) {
+                            } else if (!empty($matchedString)) {
                                 printf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
                                 continue;
                             }
