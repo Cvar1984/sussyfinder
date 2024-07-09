@@ -600,7 +600,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                         if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
                             continue;
                         } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
-                            printf('<tr><td><span style="color:red;">%s (Blacklist)</span></td></tr>', $filePath);
+                            printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
                             unlink($filePath);
                             continue;
                         } // else check the token
