@@ -124,11 +124,12 @@ function getSortedByTime($path)// :array
 }
 
 /**
- * Recurisively list a file by array of extension
+ * Recursively list a file by descending modified time and extension.
  *
- * @param string $path
- * @param array $ext
- * @return array of files
+ * @param string $path The directory path to scan.
+ * @param array $ext An array of file extensions to filter.
+ * @return array An associative array containing two keys: 'file_readable' and 'file_not_readable'.
+ *               Each key contains an array of file paths, sorted by their last modified time.
  */
 function getSortedByExtension($path, $ext)
 {
@@ -138,7 +139,6 @@ function getSortedByExtension($path, $ext)
 
     foreach ($fileReadable as $entry) {
         $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
-        $pathinfo = strtolower($pathinfo);
 
         if (in_array($pathinfo, $ext)) {
             $sortedWritableFile[] = $entry;
@@ -147,7 +147,6 @@ function getSortedByExtension($path, $ext)
     if (isset($fileNotWritable)) {
         foreach ($fileNotWritable as $entry) {
             $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
-            $pathinfo = strtolower($pathinfo);
 
             if (in_array($pathinfo, $ext)) {
                 $sortedNotWritableFile[] = $entry;
@@ -183,12 +182,12 @@ function getFileTokens($filename)
     // Iterate over the tokens and add the token types to the output array
 
     foreach ($tokens as $token) {
-        //$output[] = strtolower(is_array($token) ? $token[1] : $token);
+        //$output[] = is_array($token) ? $token[1] : $token;
 
         if (is_array($token)) {
-            $output[] = strtolower($token[1]);
+            $output[] = $token[1];
         } else {
-            $output[] = strtolower($token);
+            $output[] = $token;
         }
     }
 
@@ -210,9 +209,9 @@ function inStringArray($needle, $haystack)
     $matches = array();
     foreach ($haystack as $key => $value) {
         if (is_string($value)) {
-            // Check if string is found
-            if (strpos($value, $needle) !== false) {
-                $matches[] = $key; // Add key to matches
+            // Check if string is found using strcasecmp
+            if (strcasecmp($value, $needle) === 0) {
+                $matches[] = $key;
             }
         } elseif (is_array($value)) {
             // Recursively search within sub-arrays
@@ -611,15 +610,17 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                             $matchedString = inStringArray('webshells', $vTotalRes);
                             if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
                                 printf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
+                                unlink($filePath);
                                 continue;
                             } else if (!empty($matchedString)) {
                                 printf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
+                                unlink($filePath);
                                 continue;
                             }
                         }
 
                         $tokens = getFileTokens($filePath);
-                        $cmp = compareTokens($tokenNeedles, $tokens);
+                        $cmp = compareTokens($tokens, $tokenNeedles);
                         $cmp = implode(', ', $cmp);
 
                         if (!empty($cmp)) {
