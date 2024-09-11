@@ -1,4 +1,5 @@
 <?php
+
 /**
 Written by Cvar1984 <Cvar1984@pm.me>, November 2022
 Copyright (C) 2022  Cvar1984
@@ -15,7 +16,7 @@ GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
-*/
+ */
 
 $minute = 60;
 $limit = (60 * $minute); // 60 (seconds) = 1 Minutes
@@ -101,7 +102,7 @@ function sortByLastModified($files)
  * @return array
  *
  */
-function getSortedByTime($path)// :array
+function getSortedByTime($path) // :array
 {
     // Get the writable and non-writable files from the directory
     $result = recursiveScan($path);
@@ -310,11 +311,11 @@ function urlFileArray($url)
  * Get Online Vibes check, return gyatt if fail
  *
  * @param string $hashSum
+ * @param string $APIKey
  * @return array|bool|null
  */
-function vTotalCheckHash($hashSum)
+function vTotalCheckHash($hashSum, $APIKey)
 {
-    $APIKey = '';
 
     if (!function_exists('curl_init') || empty($APIKey)) {
         return false;
@@ -335,6 +336,10 @@ function vTotalCheckHash($hashSum)
 
     return json_decode($result, true);
 }
+
+$APIKey = array(
+    '',
+);
 
 $ext = array(
     'php',
@@ -479,158 +484,170 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 <!DOCTYPE html>
 <html lang="en-us">
 
-    <head>
-        <title>Sussy Finder</title>
-        <style type="text/css">
-            @import url('https://fonts.googleapis.com/css?family=Ubuntu+Mono&display=swap');
+<head>
+    <title>Sussy Finder</title>
+    <style type="text/css">
+        @import url('https://fonts.googleapis.com/css?family=Ubuntu+Mono&display=swap');
 
-            body {
-                font-family: 'Ubuntu Mono', monospace;
-                color: #8a8a8a;
-            }
+        body {
+            font-family: 'Ubuntu Mono', monospace;
+            color: #8a8a8a;
+        }
 
-            table {
-                border-spacing: 0;
-                padding: 10px;
-                border-radius: 7px;
-                border: 3px solid #d6d6d6;
-            }
+        table {
+            border-spacing: 0;
+            padding: 10px;
+            border-radius: 7px;
+            border: 3px solid #d6d6d6;
+        }
 
-            tr,
-            td {
-                padding: 7px;
-            }
+        tr,
+        td {
+            padding: 7px;
+        }
 
-            th {
-                color: #8a8a8a;
-                padding: 7px;
-                font-size: 25px;
-            }
+        th {
+            color: #8a8a8a;
+            padding: 7px;
+            font-size: 25px;
+        }
 
-            input[type=submit]:focus {
-                background: #ff9999;
-                color: #fff;
-                border: 3px solid #ff9999;
-            }
+        input[type=submit]:focus {
+            background: #ff9999;
+            color: #fff;
+            border: 3px solid #ff9999;
+        }
 
-            input[type=submit]:hover {
-                border: 3px solid #ff9999;
-                cursor: pointer;
-            }
+        input[type=submit]:hover {
+            border: 3px solid #ff9999;
+            cursor: pointer;
+        }
 
-            input[type=text]:hover {
-                border: 3px solid #ff9999;
-            }
+        input[type=text]:hover {
+            border: 3px solid #ff9999;
+        }
 
-            input {
-                font-family: 'Ubuntu Mono', monospace;
-            }
+        input {
+            font-family: 'Ubuntu Mono', monospace;
+        }
 
-            input[type=text] {
-                border: 3px solid #d6d6d6;
-                outline: none;
-                padding: 7px;
-                color: #8a8a8a;
-                width: 100%;
-                border-radius: 7px;
-            }
+        input[type=text] {
+            border: 3px solid #d6d6d6;
+            outline: none;
+            padding: 7px;
+            color: #8a8a8a;
+            width: 100%;
+            border-radius: 7px;
+        }
 
-            input[type=submit] {
-                color: #8a8a8a;
-                border: 3px solid #d6d6d6;
-                outline: none;
-                background: none;
-                padding: 7px;
-                width: 100%;
-                border-radius: 7px;
-            }
-        </style>
-    </head>
+        input[type=submit] {
+            color: #8a8a8a;
+            border: 3px solid #d6d6d6;
+            outline: none;
+            background: none;
+            padding: 7px;
+            width: 100%;
+            border-radius: 7px;
+        }
+    </style>
+</head>
 
-    <body>
-        <script type="text/javascript">
-            function copytable(el) {
-                var urlField = document.getElementById(el)
-                var range = document.createRange()
-                range.selectNode(urlField)
-                window.getSelection().addRange(range)
-                document.execCommand('copy')
-            }
-        </script>
-        <form method="post">
-            <table align="center" width="30%">
-                <tr>
-                    <th>
-                        Sussy Finder
-                    </th>
-                </tr>
+<body>
+    <script type="text/javascript">
+        function copytable(el) {
+            var urlField = document.getElementById(el)
+            var range = document.createRange()
+            range.selectNode(urlField)
+            window.getSelection().addRange(range)
+            document.execCommand('copy')
+        }
+    </script>
+    <form method="post">
+        <table align="center" width="30%">
+            <tr>
+                <th>
+                    Sussy Finder
+                </th>
+            </tr>
+            <tr>
+                <td>
+                    <input type="text" name="dir" value="<?= getcwd() ?>">
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <input type="submit" name="submit" value="SEARCH">
+                </td>
+            </tr>
+
+            <?php if (isset($_POST['submit'])) { ?>
                 <tr>
                     <td>
-                        <input type="text" name="dir" value="<?= getcwd() ?>">
+                        <span style="font-weight:bold;font-size:25px;">RESULT</span>
+                        <input type=button value="Copy to Clipboard" onClick="copytable('result')">
                     </td>
                 </tr>
-                <tr>
-                    <td>
-                        <input type="submit" name="submit" value="SEARCH">
-                    </td>
-                </tr>
+        </table>
+        <table id="result" align="center" width="30%">
+        <?php
+                $path = $_POST['dir'];
+                $result = getSortedByExtension($path, $ext);
 
-                <?php if (isset($_POST['submit'])) { ?>
-                    <tr>
-                        <td>
-                            <span style="font-weight:bold;font-size:25px;">RESULT</span>
-                            <input type=button value="Copy to Clipboard" onClick="copytable('result')">
-                        </td>
-                    </tr>
-                </table>
-                <table id="result" align="center" width="30%">
-                    <?php
-                    $path = $_POST['dir'];
-                    $result = getSortedByExtension($path, $ext);
+                $fileReadable = $result['file_readable'];
+                $fileNotWritable = $result['file_not_readable'];
+                $fileReadable = sortByLastModified($fileReadable);
 
-                    $fileReadable = $result['file_readable'];
-                    $fileNotWritable = $result['file_not_readable'];
-                    $fileReadable = sortByLastModified($fileReadable);
+                $currentKeyIndex = 0;
+                $actionCount = 0;
 
-                    foreach ($fileReadable as $file) {
-                        $filePath = str_replace('\\', '/', $file);
-                        $fileSum = md5_file($filePath);
+                foreach ($fileReadable as $file) {
+                    $filePath = str_replace('\\', '/', $file);
+                    $fileSum = md5_file($filePath);
 
-                        if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
-                            continue;
-                        } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
-                            printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
+                    if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
+                        continue;
+                    } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
+                        printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
+                        unlink($filePath);
+                        continue;
+                    } // else check the token
+
+                    $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
+
+                    $actionCount++;
+
+                    // keep track of the number of actions performed within a loop
+                    //if ($actionCount >= 240) {
+                    if ($actionCount >= 1) {
+                        $currentKeyIndex = ($currentKeyIndex + 1) % count($APIKey);
+                        $actionCount = 0;
+                    }
+
+                    if (isset($vTotalRes['data'])) {
+                        $matchedString = inStringArray('webshells', $vTotalRes);
+                        if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
+                            printf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
                             unlink($filePath);
                             continue;
-                        } // else check the token
-
-                        $vTotalRes = vTotalCheckHash($fileSum);
-
-                        if (isset($vTotalRes['data'])) {
-                            $matchedString = inStringArray('webshells', $vTotalRes);
-                            if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                                printf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
-                                unlink($filePath);
-                                continue;
-                            } else if (!empty($matchedString)) {
-                                printf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
-                                unlink($filePath);
-                                continue;
-                            }
-                        }
-
-                        $tokens = getFileTokens($filePath);
-                        $cmp = compareTokens($tokens, $tokenNeedles);
-                        $cmp = implode(', ', $cmp);
-
-                        if (!empty($cmp)) {
-                            printf('<tr><td><span style="color:orange;">%s (%s)</span></td></tr>', $filePath, $cmp);
+                        } else if (!empty($matchedString)) {
+                            printf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
+                            unlink($filePath);
+                            continue;
                         }
                     }
+
+                    $tokens = getFileTokens($filePath);
+                    $cmp = compareTokens($tokens, $tokenNeedles);
+                    $cmp = implode(', ', $cmp);
+
+                    if (!empty($cmp)) {
+                        printf('<tr><td><span style="color:orange;">%s (%s)</span></td></tr>', $filePath, $cmp);
+                    }
                 }
-                ?>
-            </table>
-        </form>
-    </body>
+            }
+        ?>
+        </table>
+    </form>
+</body>
 
 </html>
