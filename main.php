@@ -199,7 +199,7 @@ function getFileTokens($filename)
     return $output;
 }
 /**
- * inStringArray
+ * recursively search for a specific case within an array, including nested arrays.
  *
  * @param string $needle
  * @param array $haystack
@@ -624,14 +624,14 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                     }
 
                     if (isset($vTotalRes['data'])) {
-                        $matchedString = inStringArray('webshells', $vTotalRes);
-                        if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                            printf('<tr><td><span style="color:red;">%s (VTotal Malicious)</span></td></tr>', $filePath);
+                        $matchedString = inStringArray('gen_webshells', $vTotalRes); // matching casecmp
+                        if (!empty($matchedString)) {
+                            printf('<tr><td><span style="color:red;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
                             unlink($filePath);
                             continue;
-                        } else if (!empty($matchedString)) {
-                            printf('<tr><td><span style="color:red;">%s (VTotal Webshell)</span></td></tr>', $filePath);
-                            unlink($filePath);
+                        } else if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
+                            printf('<tr><td><span style="color:orange;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
+                            //unlink($filePath);
                             continue;
                         }
                     }
