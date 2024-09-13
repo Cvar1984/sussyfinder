@@ -24,6 +24,14 @@ ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
+
+if(function_exists('curl_init')) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false); // Disable strict peer verification (caution in production)
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+}
 /**
  * Recursive listing files
  *
@@ -252,23 +260,18 @@ function compareTokens($tokenNeedles, $tokenHaystack)
  */
 function urlFileArray($url)
 {
-    if (function_exists('curl_init')) {
-        $ch = curl_init($url);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, TRUE);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, FALSE); // Disable strict peer verification (caution in production)
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, FALSE);
-
+    if ($GLOBALS['ch']) {
+        curl_setopt($GLOBALS['ch'], CURLOPT_URL, $url);
         // Handle potential cURL errors
-        if (curl_errno($ch)) {
-            $error_msg = curl_error($ch);
-            curl_close($ch);
+        if (curl_errno($GLOBALS['ch'])) {
+            $error_msg = curl_error($GLOBALS['ch']);
+            //curl_close($GLOBALS['ch']);
             trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
             return false;
         }
 
-        $content = curl_exec($ch);
-        curl_close($ch);
+        $content = curl_exec($GLOBALS['ch']);
+        //curl_close($GLOBALS['ch']);
         return explode("\n", $content);
     } else if (function_exists('file_get_contents')) {
         $context = stream_context_create(
@@ -317,25 +320,22 @@ function urlFileArray($url)
 function vTotalCheckHash($hashSum, $APIKey)
 {
 
-    if (!function_exists('curl_init') || empty($APIKey)) {
+    if (!$GLOBALS['ch'] || empty($APIKey)) {
         return false;
     }
 
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, sprintf('https://www.virustotal.com/api/v3/files/%s', $hashSum));
-    curl_setopt($ch, CURLOPT_HTTPHEADER, array(sprintf('x-apikey: %s', $APIKey)));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    if (curl_errno($ch)) {
-        $error_msg = curl_error($ch);
-        curl_close($ch);
+    curl_setopt($GLOBALS['ch'], CURLOPT_URL, sprintf('https://www.virustotal.com/api/v3/files/%s', $hashSum));
+    curl_setopt($GLOBALS['ch'], CURLOPT_HTTPHEADER, array(sprintf('x-apikey: %s', $APIKey)));
+    if (curl_errno($GLOBALS['ch'])) {
+        $error_msg = curl_error($GLOBALS['ch']);
+        //curl_close($GLOBALS['ch']);
         trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
         return false;
     }
-    $result = curl_exec($ch);
-    curl_close($ch);
-
+    $result = curl_exec($GLOBALS['ch']);
     return json_decode($result, true);
 }
+
 
 $APIKey = array(
     '',
@@ -626,11 +626,11 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                     if (isset($vTotalRes['data'])) {
                         $matchedString = inStringArray('gen_webshells', $vTotalRes); // matching casecmp
                         if (!empty($matchedString)) {
-                            printf('<tr><td><span style="color:red;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
+                            printf('<tr><td><span style="color:#ff0000;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
                             unlink($filePath);
                             continue;
                         } else if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                            printf('<tr><td><span style="color:orange;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
+                            printf('<tr><td><span style="color:#eed202;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
                             //unlink($filePath);
                             continue;
                         }
@@ -641,7 +641,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                     $cmp = implode(', ', $cmp);
 
                     if (!empty($cmp)) {
-                        printf('<tr><td><span style="color:orange;">%s (%s)</span></td></tr>', $filePath, $cmp);
+                        printf('<tr><td><span style="color:#3f3f3f;">%s (%s)</span></td></tr>', $filePath, $cmp);
                     }
                 }
             }
