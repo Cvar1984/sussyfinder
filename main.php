@@ -25,7 +25,7 @@ ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
 
-if(function_exists('curl_init')) {
+if (function_exists('curl_init')) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -476,6 +476,7 @@ $tokenNeedles = array(
     '$auth_pass',
     '$password',
     '$pass',
+    '$SISTEMIT_COM_ENC',
 );
 
 $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
