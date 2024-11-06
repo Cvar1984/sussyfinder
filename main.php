@@ -625,7 +625,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                     }
 
                     if (isset($vTotalRes['data'])) {
-                        $matchedString = inStringArray('gen_webshells', $vTotalRes); // matching casecmp
+                        $matchedString = inStringArray('malicious', $vTotalRes); // matching casecmp
                         if (!empty($matchedString)) {
                             printf('<tr><td><span style="color:#ff0000;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
                             unlink($filePath);
