@@ -260,7 +260,7 @@ function compareTokens($tokenNeedles, $tokenHaystack)
  */
 function urlFileArray($url)
 {
-    if ($GLOBALS['ch']) {
+    if (isset($GLOBALS['ch'])) {
         curl_setopt($GLOBALS['ch'], CURLOPT_URL, $url);
         // Handle potential cURL errors
         if (curl_errno($GLOBALS['ch'])) {
@@ -320,7 +320,7 @@ function urlFileArray($url)
 function vTotalCheckHash($hashSum, $APIKey)
 {
 
-    if (!$GLOBALS['ch'] || empty($APIKey)) {
+    if (!isset($GLOBALS['ch']) || empty($APIKey)) {
         return false;
     }
 
