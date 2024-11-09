@@ -600,10 +600,21 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 
                 $currentKeyIndex = 0;
                 $actionCount = 0;
+                $duplicateHashes = array();
+                $duplicatePaths = array();
 
                 foreach ($fileReadable as $file) {
                     $filePath = str_replace('\\', '/', $file);
+                    $filePath = str_replace('//', '/', $file);
                     $fileSum = md5_file($filePath);
+
+                    if (in_array($fileSum, $duplicateHashes)) {
+                        printf('<tr><td><span style="color:#99C3FF;">%s (Duplicate of %s)(%s)</span></td></tr>', $filePath, $duplicatePaths[$fileSum], $fileSum);
+                        continue;
+                    }
+
+                    $duplicateHashes[] = $fileSum;
+                    $duplicatePaths[$fileSum] = $filePath;
 
                     if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
                         continue;
