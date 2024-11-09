@@ -608,6 +608,14 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                     $filePath = str_replace('//', '/', $file);
                     $fileSum = md5_file($filePath);
 
+                    if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
+                        continue;
+                    } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
+                        printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
+                        unlink($filePath);
+                        continue;
+                    }
+
                     if (in_array($fileSum, $duplicateHashes)) {
                         printf('<tr><td><span style="color:#99C3FF;">%s (Duplicate of %s)(%s)</span></td></tr>', $filePath, $duplicatePaths[$fileSum], $fileSum);
                         continue;
@@ -615,14 +623,6 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 
                     $duplicateHashes[] = $fileSum;
                     $duplicatePaths[$fileSum] = $filePath;
-
-                    if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
-                        continue;
-                    } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
-                        printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
-                        unlink($filePath);
-                        continue;
-                    } // else check the token
 
                     $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
 
