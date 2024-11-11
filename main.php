@@ -617,7 +617,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                     }
 
                     if (in_array($fileSum, $duplicateHashes)) {
-                        printf('<tr><td><span style="color:#99C3FF;">%s (Duplicate of %s)(%s)</span></td></tr>', $filePath, $duplicatePaths[$fileSum], $fileSum);
+                        printf('<tr><td><span style="color:#212121;">%s (Duplicate of %s)(%s)</span></td></tr>', $filePath, $duplicatePaths[$fileSum], $fileSum);
                         continue;
                     }
 
