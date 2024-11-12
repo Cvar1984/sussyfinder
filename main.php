@@ -600,8 +600,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 
                 $currentKeyIndex = 0;
                 $actionCount = 0;
-                $duplicateHashes = array();
-                $duplicatePaths = array();
+                $duplicateFiles = array();
 
                 foreach ($fileReadable as $file) {
                     $filePath = str_replace('\\', '/', $file);
@@ -614,15 +613,12 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                         printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
                         unlink($filePath);
                         continue;
-                    }
-
-                    if (in_array($fileSum, $duplicateHashes)) {
-                        printf('<tr><td><span style="color:#212121;">%s (Duplicate of %s)(%s)</span></td></tr>', $filePath, $duplicatePaths[$fileSum], $fileSum);
+                    } elseif (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+                        printf('<tr><td><span style="color:#212121;">%s -> %s(%s)</span></td></tr>', $filePath, $duplicatePath, $fileSum);
                         continue;
                     }
 
-                    $duplicateHashes[] = $fileSum;
-                    $duplicatePaths[$fileSum] = $filePath;
+                    $duplicateFiles[$filePath] = $fileSum;
 
                     $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
 
