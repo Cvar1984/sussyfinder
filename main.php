@@ -25,7 +25,27 @@ ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
 
-if (function_exists('curl_init')) {
+/**
+ * Check if function is available
+ *
+ * @param callable $callback
+ * @return boolean
+ */
+function isWorking($callback)
+{
+    $securityDisabled = ini_get('disable_functions');
+    $securityDisabled = explode(',', $securityDisabled);
+
+    if(in_array($callback, $securityDisabled)) {
+        return false;
+    }
+    if(!function_exists($callback)) {
+        return false;
+    }
+    return true;
+}
+
+if (isWorking('curl_exec')) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -256,7 +276,7 @@ function compareTokens($tokenNeedles, $tokenHaystack)
  * Return array of string from url
  *
  * @param string $url
- * @return array|false
+ * @return array
  */
 function urlFileArray($url)
 {
@@ -267,13 +287,13 @@ function urlFileArray($url)
             $error_msg = curl_error($GLOBALS['ch']);
             //curl_close($GLOBALS['ch']);
             trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
-            return false;
+            return array();
         }
 
         $content = curl_exec($GLOBALS['ch']);
         //curl_close($GLOBALS['ch']);
         return explode("\n", $content);
-    } else if (function_exists('file_get_contents')) {
+    } else if (isWorking('file_get_contents')) {
         $context = stream_context_create(
             array(
                 'http' => array(
@@ -286,29 +306,29 @@ function urlFileArray($url)
             )
         );
 
-        $content = @file_get_contents($url, false, $context); // Use error suppression for cleaner handling
+        $content = file_get_contents($url, false, $context); // Use error suppression for cleaner handling
 
         // If file_get_contents fails, return false
         if ($content === false) {
             trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
-            return false;
+            return array();
         }
 
         return explode("\n", $content);
-    } else if (function_exists('file')) {
+    } else if (isWorking('file')) {
         $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES); // Use error suppression for cleaner handling
 
         // If file() fails, return false
         if ($content === false) {
             trigger_error("Failed to fetch URL using file", E_USER_WARNING);
-            return false;
+            return array();
         }
 
         return $content;
     }
 
     trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
-    return false;
+    return array();
 }
 /**
  * Get Online Vibes check, return gyatt if fail
