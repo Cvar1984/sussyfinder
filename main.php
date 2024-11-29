@@ -80,8 +80,7 @@ function recursiveScan($directory, &$entries_array = array()) // :array
         }
 
         // Get the full path to the entry
-        $entryPath = $directory . DIRECTORY_SEPARATOR . $entry;
-
+        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $directory . '/' . $entry);
         // Check if the entry is a symlink
         if (is_link($entryPath)) {
             continue;
@@ -331,7 +330,7 @@ function urlFileArray($url)
     return array();
 }
 /**
- * Get Online Vibes check, return gyatt if fail
+ * Get Online Vibes check fr, return gyatt if L
  *
  * @param string $hashSum
  * @param string $APIKey
@@ -622,9 +621,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
                 $actionCount = 0;
                 $duplicateFiles = array();
 
-                foreach ($fileReadable as $file) {
-                    $filePath = str_replace('\\', '/', $file);
-                    $filePath = str_replace('//', '/', $file);
+                foreach ($fileReadable as $filePath) {
                     $fileSum = md5_file($filePath);
 
                     if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
