@@ -61,6 +61,7 @@ if (isWorking('curl_exec')) {
  */
 function recursiveScan($directory, &$entries_array = array()) // :array
 {
+    $directory = rtrim($directory, DIRECTORY_SEPARATOR);
     // Check if the directory exists and is readable
     if (!is_dir($directory) || !is_readable($directory)) {
         return $entries_array;
