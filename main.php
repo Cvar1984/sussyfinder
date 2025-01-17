@@ -211,7 +211,7 @@ function getSortedByPattern($path, $patterns)
         $patterns;
 
         foreach ($patterns as $pattern) {
-            $regex = "/^$pattern$/";
+            $regex = "/^$pattern$/i";
             if (preg_match($regex, $extension)) {
                 $sortedReadableFiles[] = $entry;
                 break;
@@ -224,7 +224,7 @@ function getSortedByPattern($path, $patterns)
             $extension = pathinfo($entry, PATHINFO_EXTENSION);
 
             foreach ($patterns as $pattern) {
-                $regex = "/^$pattern$/";
+                $regex = "/^$pattern$/i";
                 if (preg_match($regex, $extension)) {
                     $sortedNotReadableFiles[] = $entry;
                     break;
