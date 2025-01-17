@@ -36,10 +36,10 @@ function isWorking($callback)
     $securityDisabled = ini_get('disable_functions');
     $securityDisabled = explode(',', $securityDisabled);
 
-    if(in_array($callback, $securityDisabled)) {
+    if (in_array($callback, $securityDisabled)) {
         return false;
     }
-    if(!function_exists($callback)) {
+    if (!function_exists($callback)) {
         return false;
     }
     return true;
@@ -188,6 +188,55 @@ function getSortedByExtension($path, $ext)
         'file_readable' => $sortedWritableFile,
         'file_not_readable' => $sortedNotWritableFile
     );
+}
+/**
+ * Recursively list a file by descending modified time and pattern matching.
+ *
+ * @param string $path The directory path to scan.
+ * @param array $patterns An array of glob-like patterns to filter (e.g., '*.php[0-9][0-9]').
+ * @return array An associative array containing two keys: 'file_readable' and 'file_not_readable'.
+ */
+function getSortedByPattern($path, $patterns)
+{
+    $result = getSortedByTime($path);
+    $fileReadable = $result['file_readable'];
+    $fileNotReadable = $result['file_not_readable'];
+
+    $sortedReadableFiles = [];
+    $sortedNotReadableFiles = [];
+
+
+    foreach ($fileReadable as $entry) {
+        $extension = pathinfo($entry, PATHINFO_EXTENSION);
+        $patterns;
+
+        foreach ($patterns as $pattern) {
+            $regex = "/^$pattern$/";
+            if (preg_match($regex, $extension)) {
+                $sortedReadableFiles[] = $entry;
+                break;
+            }
+        }
+    }
+
+    if ($fileNotReadable) {
+        foreach ($fileNotReadable as $entry) {
+            $extension = pathinfo($entry, PATHINFO_EXTENSION);
+
+            foreach ($patterns as $pattern) {
+                $regex = "/^$pattern$/";
+                if (preg_match($regex, $extension)) {
+                    $sortedNotReadableFiles[] = $entry;
+                    break;
+                }
+            }
+        }
+    }
+
+    return [
+        'file_readable' => $sortedReadableFiles,
+        'file_not_readable' => $sortedNotReadableFiles,
+    ];
 }
 /**
  * Get lowercase Array of tokens in a file
@@ -375,6 +424,11 @@ $ext = array(
     'php7',
     'shtml',
     'suspected'
+);
+
+$pattern = array(
+    'ph.+',
+    'sh.+',
 );
 
 $tokenNeedles = array(
@@ -612,7 +666,7 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
         <table id="result" align="center" width="30%">
         <?php
                 $path = $_POST['dir'];
-                $result = getSortedByExtension($path, $ext);
+                $result = getSortedByPattern($path, $pattern);
 
                 $fileReadable = $result['file_readable'];
                 $fileNotWritable = $result['file_not_readable'];
