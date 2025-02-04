@@ -72,12 +72,12 @@ function recursiveScan($directory, &$entries, &$visited) // :array
     $visited[$realPath] = true;
 
     // Check if the directory exists and is readable
-    if (!is_dir($directory) || !is_readable($directory)) {
+    if (!is_dir($realPath) || !is_readable($realPath)) {
         return $entries;
     }
 
     // Open the directory
-    $handle = opendir($directory);
+    $handle = opendir($realPath);
     if (!$handle) {
         return $entries;
     }
@@ -90,7 +90,7 @@ function recursiveScan($directory, &$entries, &$visited) // :array
         }
 
         // Get Nix style to the full path to the entry
-        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $directory . '/' . $entry);
+        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $entry);
 
         // Check if it's a symlink
         if (is_link($entryPath)) {
