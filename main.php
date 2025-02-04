@@ -56,16 +56,16 @@ if (isWorking('curl_exec')) {
  * Recursive listing files
  *
  * @param string $directory
- * @param array $entries_array
+ * @param array $entries
  * @param array $visited
  * @return array of files
  */
-function recursiveScan($directory, &$entries_array = array(), &$visited = array()) // :array
+function recursiveScan($directory, &$entries, &$visited) // :array
 {
     // Resolve the real path to handle symlink loops
     $realPath = realpath($directory);
     if (!$realPath || isset($visited[$realPath])) {
-        return $entries_array; // Prevent infinite loops
+        return $entries; // Prevent infinite loops
     }
 
     // Mark this directory as visited
@@ -73,13 +73,13 @@ function recursiveScan($directory, &$entries_array = array(), &$visited = array(
 
     // Check if the directory exists and is readable
     if (!is_dir($directory) || !is_readable($directory)) {
-        return $entries_array;
+        return $entries;
     }
 
     // Open the directory
     $handle = opendir($directory);
     if (!$handle) {
-        return $entries_array;
+        return $entries;
     }
 
     // Iterate over the directory contents
@@ -94,11 +94,11 @@ function recursiveScan($directory, &$entries_array = array(), &$visited = array(
 
         // Check if it's a symlink
         if (is_link($entryPath)) {
-            $entries_array['symlink'][] = $entryPath;
+            $entries['symlink'][] = $entryPath;
             // Follow the symlink if it points to a directory
             $symlinkTarget = realpath($entryPath);
             if ($symlinkTarget && is_dir($symlinkTarget) && !isset($visited[$symlinkTarget])) {
-                $entries_array = recursiveScan($symlinkTarget, $entries_array, $visited);
+                $entries = recursiveScan($symlinkTarget, $entries, $visited);
             }
             continue; // Continue processing other files
         }
@@ -106,13 +106,13 @@ function recursiveScan($directory, &$entries_array = array(), &$visited = array(
         // Check if the entry is a directory
         if (is_dir($entryPath)) {
             // Recursively scan the directory
-            $entries_array = recursiveScan($entryPath, $entries_array, $visited);
+            $entries = recursiveScan($entryPath, $entries, $visited);
         } elseif (is_readable($entryPath)) {
             // Add the file to the readable array
-            $entries_array['file_readable'][] = $entryPath;
+            $entries['file_readable'][] = $entryPath;
         } else {
             // Add the file to the non-readable array
-            $entries_array['file_not_readable'][] = $entryPath;
+            $entries['file_not_readable'][] = $entryPath;
         }
     }
 
@@ -120,7 +120,7 @@ function recursiveScan($directory, &$entries_array = array(), &$visited = array(
     closedir($handle);
 
     // Return the entries array
-    return $entries_array;
+    return $entries;
 }
 
 /**
@@ -128,7 +128,6 @@ function recursiveScan($directory, &$entries_array = array(), &$visited = array(
  * Sort array of list file by lastest modified time
  *
  * @param array  $files Array of files
- *
  * @return array
  *
  */
@@ -142,14 +141,15 @@ function sortByLastModified($files)
  * Recurisively list a file by descending modified time
  *
  * @param string $path
- *
  * @return array
  *
  */
-function getSortedByTime($path) // :array
+function getSortedByTime($path)
 {
     // Get the writable and non-writable files from the directory
-    $result = recursiveScan($path);
+    $entries = array();
+    $visited = array();
+    $result = recursiveScan($path, $entries, $visited);
     $readable = $result['file_readable'];
     //$notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
     if (isset($result['file_not_readable'])) {
@@ -218,8 +218,8 @@ function getSortedByPattern($path, $patterns)
     $fileReadable = $result['file_readable'];
     $fileNotReadable = $result['file_not_readable'];
 
-    $sortedReadableFiles = [];
-    $sortedNotReadableFiles = [];
+    $sortedReadableFiles = array();
+    $sortedNotReadableFiles = array();
 
 
     foreach ($fileReadable as $entry) {
@@ -249,10 +249,10 @@ function getSortedByPattern($path, $patterns)
         }
     }
 
-    return [
+    return array(
         'file_readable' => $sortedReadableFiles,
         'file_not_readable' => $sortedNotReadableFiles,
-    ];
+    );
 }
 /**
  * Get lowercase Array of tokens in a file
@@ -371,7 +371,7 @@ function urlFileArray($url)
             )
         );
 
-        $content = file_get_contents($url, false, $context); // Use error suppression for cleaner handling
+        $content = @file_get_contents($url, false, $context); // Use error suppression for cleaner handling
 
         // If file_get_contents fails, return false
         if ($content === false) {
