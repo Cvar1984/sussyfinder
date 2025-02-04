@@ -56,12 +56,21 @@ if (isWorking('curl_exec')) {
  * Recursive listing files
  *
  * @param string $directory
- * @param array $entries_array optional
+ * @param array $entries_array
+ * @param array $visited
  * @return array of files
  */
-function recursiveScan($directory, &$entries_array = array()) // :array
+function recursiveScan($directory, &$entries_array = array(), &$visited = array()) // :array
 {
-    $directory = rtrim($directory, DIRECTORY_SEPARATOR);
+    // Resolve the real path to handle symlink loops
+    $realPath = realpath($directory);
+    if (!$realPath || isset($visited[$realPath])) {
+        return $entries_array; // Prevent infinite loops
+    }
+
+    // Mark this directory as visited
+    $visited[$realPath] = true;
+
     // Check if the directory exists and is readable
     if (!is_dir($directory) || !is_readable($directory)) {
         return $entries_array;
@@ -80,22 +89,29 @@ function recursiveScan($directory, &$entries_array = array()) // :array
             continue;
         }
 
-        // Get the full path to the entry
+        // Get Nix style to the full path to the entry
         $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $directory . '/' . $entry);
-        // Check if the entry is a symlink
+
+        // Check if it's a symlink
         if (is_link($entryPath)) {
-            continue;
+            $entries_array['symlink'][] = $entryPath;
+            // Follow the symlink if it points to a directory
+            $symlinkTarget = realpath($entryPath);
+            if ($symlinkTarget && is_dir($symlinkTarget) && !isset($visited[$symlinkTarget])) {
+                $entries_array = recursiveScan($symlinkTarget, $entries_array, $visited);
+            }
+            continue; // Continue processing other files
         }
 
         // Check if the entry is a directory
         if (is_dir($entryPath)) {
             // Recursively scan the directory
-            $entries_array = recursiveScan($entryPath, $entries_array);
+            $entries_array = recursiveScan($entryPath, $entries_array, $visited);
         } elseif (is_readable($entryPath)) {
-            // Add the file to the writable array
+            // Add the file to the readable array
             $entries_array['file_readable'][] = $entryPath;
         } else {
-            // Add the file to the non-writable array
+            // Add the file to the non-readable array
             $entries_array['file_not_readable'][] = $entryPath;
         }
     }
