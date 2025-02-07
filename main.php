@@ -60,7 +60,7 @@ if (isWorking('curl_exec')) {
  * @param array $visited
  * @return array of files
  */
-function recursiveScan($directory, &$entries, &$visited) // :array
+function recursiveScan($directory, &$entries, &$visited)
 {
     // Resolve the real path to handle symlink loops
     $realPath = realpath($directory);
@@ -89,29 +89,35 @@ function recursiveScan($directory, &$entries, &$visited) // :array
             continue;
         }
 
-        // Get Nix style to the full path to the entry
+        // Get Nix-style full path
         $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $entry);
 
         // Check if it's a symlink
         if (is_link($entryPath)) {
             $entries['symlink'][] = $entryPath;
-            // Follow the symlink if it points to a directory
-            $symlinkTarget = realpath($entryPath);
-            if ($symlinkTarget && is_dir($symlinkTarget) && !isset($visited[$symlinkTarget])) {
-                $entries = recursiveScan($symlinkTarget, $entries, $visited);
+
+            // Get the actual symlink target
+            $symlinkTarget = readlink($entryPath);
+            $resolvedTarget = realpath($symlinkTarget);
+
+            // Follow the symlink only if it's a directory and hasn't been visited
+            if ($resolvedTarget && is_dir($resolvedTarget) && !isset($visited[$resolvedTarget])) {
+                recursiveScan($resolvedTarget, $entries, $visited);
             }
             continue; // Continue processing other files
         }
 
-        // Check if the entry is a directory
-        if (is_dir($entryPath)) {
-            // Recursively scan the directory
-            $entries = recursiveScan($entryPath, $entries, $visited);
+        // Store whether it's a directory to avoid redundant calls
+        $isDir = is_dir($entryPath);
+
+        // If it's a directory, recursively scan it
+        if ($isDir) {
+            recursiveScan($entryPath, $entries, $visited);
         } elseif (is_readable($entryPath)) {
-            // Add the file to the readable array
+            // Add readable files
             $entries['file_readable'][] = $entryPath;
         } else {
-            // Add the file to the non-readable array
+            // Add non-readable files
             $entries['file_not_readable'][] = $entryPath;
         }
     }
