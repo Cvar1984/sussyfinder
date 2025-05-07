@@ -445,7 +445,7 @@ $ext = array(
     'php5',
     'php7',
     'shtml',
-    'suspected'
+    'inc',
 );
 
 $pattern = array(
