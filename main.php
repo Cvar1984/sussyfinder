@@ -432,25 +432,26 @@ $APIKey = array(
     '',
 );
 
-$ext = array(
-    'php',
-    'phps',
-    'pht',
-    'phpt',
-    'phtm',
-    'phtml',
-    'phar',
-    'php3',
-    'php4',
-    'php5',
-    'php7',
-    'shtml',
-    'inc',
-);
+// $ext = array(
+//     'php',
+//     'phps',
+//     'pht',
+//     'phpt',
+//     'phtm',
+//     'phtml',
+//     'phar',
+//     'php3',
+//     'php4',
+//     'php5',
+//     'php7',
+//     'shtml',
+//     'inc',
+// );
 
 $pattern = array(
     'ph.+',
     'sh.+',
+    'inc',
 );
 
 $tokenNeedles = array(
