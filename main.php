@@ -24,6 +24,10 @@ ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
+define('_DEBUG_', true);
+define('_WHITELIST_', false);
+define('_BLACKLIST_', true);
+define('_VTOTAL_', false);
 
 /**
  * Check if function is available
@@ -576,8 +580,14 @@ $tokenNeedles = array(
     '$SISTEMIT_COM_ENC',
 );
 
-$whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
-$blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+$whitelistMD5Sums = array();
+$blacklistMD5Sums = array();
+if (_WHITELIST_) {
+    $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
+}
+if (_BLACKLIST_) {
+    $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+}
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -715,27 +725,29 @@ $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sus
 
                     $duplicateFiles[$filePath] = $fileSum;
 
-                    $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
+                    if (_VTOTAL_) {
+                        $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
 
-                    $actionCount++;
+                        $actionCount++;
 
-                    // keep track of the number of actions performed within a loop
-                    //if ($actionCount >= 240) {
-                    if ($actionCount >= 1) {
-                        $currentKeyIndex = ($currentKeyIndex + 1) % count($APIKey);
-                        $actionCount = 0;
-                    }
+                        // keep track of the number of actions performed within a loop
+                        //if ($actionCount >= 240) {
+                        if ($actionCount >= 1) {
+                            $currentKeyIndex = ($currentKeyIndex + 1) % count($APIKey);
+                            $actionCount = 0;
+                        }
 
-                    if (isset($vTotalRes['data'])) {
-                        $matchedString = inStringArray('malicious', $vTotalRes); // matching casecmp
-                        if (!empty($matchedString)) {
-                            printf('<tr><td><span style="color:#ff0000;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
-                            unlink($filePath);
-                            continue;
-                        } else if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                            printf('<tr><td><span style="color:#eed202;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
-                            //unlink($filePath);
-                            continue;
+                        if (isset($vTotalRes['data'])) {
+                            $matchedString = inStringArray('malicious', $vTotalRes); // matching casecmp
+                            if (!empty($matchedString)) {
+                                printf('<tr><td><span style="color:#ff0000;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
+                                unlink($filePath);
+                                continue;
+                            } else if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
+                                printf('<tr><td><span style="color:#eed202;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
+                                //unlink($filePath);
+                                continue;
+                            }
                         }
                     }
 
