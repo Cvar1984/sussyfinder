@@ -278,7 +278,7 @@ function getFileTokens($filename)
     $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
 
     // Get the file tokens
-    $tokens = token_get_all($fileContent);
+    $tokens = @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
 
     // Create an output array
     $output = array();
@@ -719,7 +719,7 @@ if (_BLACKLIST_) {
                         unlink($filePath);
                         continue;
                     } elseif (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
-                        printf('<tr><td><span style="color:#212121;">%s -> %s(%s)</span></td></tr>', $filePath, $duplicatePath, $fileSum);
+                        printf('<tr><td><span style="color:#212121;">%s -> %s (%s)</span></td></tr>', $filePath, $duplicatePath, $fileSum);
                         continue;
                     }
 
@@ -752,11 +752,15 @@ if (_BLACKLIST_) {
                     }
 
                     $tokens = getFileTokens($filePath);
+                    // if(!$tokens) {
+                    //     printf('<tr><td><span style="color:#2b2b2b;">%s (%s)(%s)</span></td></tr>', $filePath, $fileSum, 'Failed');
+                    //     continue;
+                    // }
                     $cmp = compareTokens($tokens, $tokenNeedles);
                     $cmp = implode(', ', $cmp);
 
                     if (!empty($cmp)) {
-                        printf('<tr><td><span style="color:#3f3f3f;">%s (%s)</span></td></tr>', $filePath, $cmp);
+                        printf('<tr><td><span style="color:#3f3f3f;">%s (%s)(%s)</span></td></tr>', $filePath, $cmp, $fileSum);
                     }
                 }
             }
