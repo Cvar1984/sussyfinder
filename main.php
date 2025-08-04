@@ -25,7 +25,7 @@ ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
 define('_DEBUG_', true);
-define('_WHITELIST_', false);
+define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
 define('_VTOTAL_', false);
 
