@@ -27,7 +27,6 @@ ini_set('display_errors', 1); // debug
 define('_DEBUG_', true);
 define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
-define('_VTOTAL_', false);
 
 /**
  * Check if function is available
@@ -405,32 +404,6 @@ function urlFileArray($url)
     trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
     return array();
 }
-/**
- * Get Online Vibes check fr, return gyatt if L
- *
- * @param string $hashSum
- * @param string $APIKey
- * @return array|bool|null
- */
-function vTotalCheckHash($hashSum, $APIKey)
-{
-
-    if (!isset($GLOBALS['ch']) || empty($APIKey)) {
-        return false;
-    }
-
-    curl_setopt($GLOBALS['ch'], CURLOPT_URL, sprintf('https://www.virustotal.com/api/v3/files/%s', $hashSum));
-    curl_setopt($GLOBALS['ch'], CURLOPT_HTTPHEADER, array(sprintf('x-apikey: %s', $APIKey)));
-    if (curl_errno($GLOBALS['ch'])) {
-        $error_msg = curl_error($GLOBALS['ch']);
-        //curl_close($GLOBALS['ch']);
-        trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
-        return false;
-    }
-    $result = curl_exec($GLOBALS['ch']);
-    return json_decode($result, true);
-}
-
 
 $APIKey = array(
     '',
@@ -594,178 +567,157 @@ if (_BLACKLIST_) {
 
 <head>
     <title>Sussy Finder</title>
-    <style type="text/css">
-        @import url('https://fonts.googleapis.com/css?family=Ubuntu+Mono&display=swap');
-
+    <style>
         body {
             font-family: 'Ubuntu Mono', monospace;
             color: #8a8a8a;
+            font-size: 14px;
+            /* compact font */
         }
 
         table {
             border-spacing: 0;
-            padding: 10px;
-            border-radius: 7px;
-            border: 3px solid #d6d6d6;
+            padding: 5px;
+            border-radius: 5px;
+            border: 2px solid #d6d6d6;
+            width: 90%;
+            margin: auto;
         }
 
         tr,
         td {
-            padding: 7px;
+            padding: 5px;
         }
 
         th {
             color: #8a8a8a;
-            padding: 7px;
-            font-size: 25px;
+            padding: 5px;
+            font-size: 20px;
         }
 
-        input[type=submit]:focus {
-            background: #ff9999;
-            color: #fff;
-            border: 3px solid #ff9999;
+        input,
+        button {
+            font-family: 'Ubuntu Mono', monospace;
+            padding: 5px;
+            border-radius: 5px;
+            border: 1px solid #d6d6d6;
+            background: none;
+            color: #8a8a8a;
         }
 
-        input[type=submit]:hover {
-            border: 3px solid #ff9999;
+        button:hover,
+        input[type=submit]:hover,
+        input[type=text]:hover {
+            border-color: #ff9999;
+            color: #ff9999;
             cursor: pointer;
         }
 
-        input[type=text]:hover {
-            border: 3px solid #ff9999;
-        }
-
-        input {
-            font-family: 'Ubuntu Mono', monospace;
-        }
-
         input[type=text] {
-            border: 3px solid #d6d6d6;
-            outline: none;
-            padding: 7px;
-            color: #8a8a8a;
             width: 100%;
-            border-radius: 7px;
-        }
-
-        input[type=submit] {
-            color: #8a8a8a;
-            border: 3px solid #d6d6d6;
-            outline: none;
-            background: none;
-            padding: 7px;
-            width: 100%;
-            border-radius: 7px;
         }
     </style>
 </head>
 
 <body>
-    <script type="text/javascript">
-        function copytable(el) {
-            var urlField = document.getElementById(el)
-            var range = document.createRange()
-            range.selectNode(urlField)
-            window.getSelection().addRange(range)
-            document.execCommand('copy')
+    <script>
+        let results = []; // will be filled from PHP
+
+        function renderTable(list) {
+            let html = "";
+            for (let i = 0; i < list.length; i++) {
+                let r = list[i];
+                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
+                let color = r.cmp.includes("BLACKLIST") ? "#ff3333" : "#3f3f3f"; // red for blacklist
+                html += "<tr><td style='color:" + color + "; font-size:14px;'>" +
+                    r.file + cmp + " (" + r.sum + ")" +
+                    "</td></tr>";
+            }
+            document.getElementById("result").innerHTML = html;
+        }
+
+        function sortResults(mode) {
+            if (mode === "tokens") {
+                results.sort((a, b) => {
+                    if (b.cmp.length !== a.cmp.length) return b.cmp.length - a.cmp.length;
+                    return b.mtime - a.mtime;
+                });
+            } else if (mode === "mtime") {
+                results.sort((a, b) => b.mtime - a.mtime);
+            }
+            renderTable(results);
+        }
+
+        function copyResults() {
+            let text = results.map(r => {
+                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
+                return r.file + cmp + " (" + r.sum + ")";
+            }).join("\n");
+
+            navigator.clipboard.writeText(text)
+                .then(() => alert("Results copied to clipboard!"))
+                .catch(() => alert("Failed to copy results."));
         }
     </script>
+
     <form method="post">
         <table align="center" width="30%">
             <tr>
-                <th>
-                    Sussy Finder
-                </th>
+                <th>Sussy Finder</th>
             </tr>
             <tr>
-                <td>
-                    <input type="text" name="dir" value="<?= getcwd() ?>">
-                </td>
+                <td><input type="text" name="dir" value="<?= getcwd() ?>"></td>
             </tr>
             <tr>
-                <td>
-                    <input type="submit" name="submit" value="SEARCH">
-                </td>
+                <td><input type="submit" name="submit" value="SEARCH"></td>
             </tr>
-
             <?php if (isset($_POST['submit'])) { ?>
                 <tr>
                     <td>
-                        <span style="font-weight:bold;font-size:25px;">RESULT</span>
-                        <input type=button value="Copy to Clipboard" onClick="copytable('result')">
+                        <span style="font-weight:bold;font-size:25px;">RESULT</span><br>
+                        <button type="button" onclick="copyResults()">Copy Results</button>
+                        <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
+                        <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
                     </td>
                 </tr>
         </table>
-        <table id="result" align="center" width="30%">
-        <?php
-                $path = $_POST['dir'];
-                $result = getSortedByPattern($path, $pattern);
+        <table align="center">
+            <tbody id="result"></tbody>
+        </table>
+        <script>
+            results = <?php
+                        $path = $_POST['dir'];
+                        $result = getSortedByPattern($path, $pattern);
+                        $fileReadable = sortByLastModified($result['file_readable']);
+                        $duplicateFiles = array();
+                        $results = array();
 
-                $fileReadable = $result['file_readable'];
-                $fileNotWritable = $result['file_not_readable'];
-                $fileReadable = sortByLastModified($fileReadable);
+                        foreach ($fileReadable as $filePath) {
+                            $fileSum = md5_file($filePath);
+                            if (in_array($fileSum, $whitelistMD5Sums)) continue;
 
-                $currentKeyIndex = 0;
-                $actionCount = 0;
-                $duplicateFiles = array();
-
-                foreach ($fileReadable as $filePath) {
-                    $fileSum = md5_file($filePath);
-
-                    if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
-                        continue;
-                    } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
-                        printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
-                        unlink($filePath);
-                        continue;
-                    } elseif (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
-                        printf('<tr><td><span style="color:#212121;">%s -> %s (%s)</span></td></tr>', $filePath, $duplicatePath, $fileSum);
-                        continue;
-                    }
-
-                    $duplicateFiles[$filePath] = $fileSum;
-
-                    if (_VTOTAL_) {
-                        $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
-
-                        $actionCount++;
-
-                        // keep track of the number of actions performed within a loop
-                        //if ($actionCount >= 240) {
-                        if ($actionCount >= 1) {
-                            $currentKeyIndex = ($currentKeyIndex + 1) % count($APIKey);
-                            $actionCount = 0;
-                        }
-
-                        if (isset($vTotalRes['data'])) {
-                            $matchedString = inStringArray('malicious', $vTotalRes); // matching casecmp
-                            if (!empty($matchedString)) {
-                                printf('<tr><td><span style="color:#ff0000;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
+                            if (in_array($fileSum, $blacklistMD5Sums)) {
+                                $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => array('BLACKLIST'), 'mtime' => filemtime($filePath));
                                 unlink($filePath);
                                 continue;
-                            } else if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                                printf('<tr><td><span style="color:#eed202;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
-                                //unlink($filePath);
+                            }
+                            if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+                                $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => array("$duplicatePath"), 'mtime' => filemtime($filePath));
                                 continue;
                             }
+                            $duplicateFiles[$filePath] = $fileSum;
+
+                            $tokens = getFileTokens($filePath);
+                            $cmp = compareTokens($tokenNeedles, $tokens);
+
+                            $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => $cmp, 'mtime' => filemtime($filePath));
                         }
-                    }
-
-                    $tokens = getFileTokens($filePath);
-                    // if(!$tokens) {
-                    //     printf('<tr><td><span style="color:#2b2b2b;">%s (%s)(%s)</span></td></tr>', $filePath, $fileSum, 'Failed');
-                    //     continue;
-                    // }
-                    $cmp = compareTokens($tokens, $tokenNeedles);
-                    $cmp = implode(', ', $cmp);
-
-                    if (!empty($cmp)) {
-                        printf('<tr><td><span style="color:#3f3f3f;">%s (%s)(%s)</span></td></tr>', $filePath, $cmp, $fileSum);
-                    }
-                }
-            }
-        ?>
-        </table>
+                        echo json_encode($results);
+                        ?>;
+            // Default render: sort by mtime
+            sortResults('mtime');
+        </script>
+    <?php } ?>
     </form>
 </body>
 
