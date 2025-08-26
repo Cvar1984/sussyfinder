@@ -616,6 +616,31 @@ if (_BLACKLIST_) {
         input[type=text] {
             width: 100%;
         }
+
+        /* Compact style only for the results list */
+        #result td {
+            font-size: 12px;
+            /* smaller font */
+            padding: 3px 6px;
+            /* tighter padding */
+            line-height: 1.3em;
+            /* compact line spacing */
+            border-bottom: 1px solid #e0e0e0;
+            /* subtle row divider */
+            white-space: normal;
+            /* allow wrapping */
+            word-wrap: break-word;
+            /* break long words if needed */
+            overflow-wrap: anywhere;
+            /* modern wrap for very long paths */
+            max-width: 95vw;
+            /* prevent it from overflowing the viewport */
+        }
+
+        #result tr:nth-child(even) td {
+            background: #f9f9f9;
+            /* light zebra striping */
+        }
     </style>
 </head>
 
