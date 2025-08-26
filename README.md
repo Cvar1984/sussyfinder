@@ -19,6 +19,7 @@ This tool is designed to help identify potentially malicious PHP files in a web 
 - copy paste result
 
 ![ss](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo.jpg)
+![profile](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/profile.png)
 >clone webshells submodule for testing
 
 ## Whitelist & blacklist
@@ -29,31 +30,3 @@ Whitelist hash i provide is harvested from common frameworks and libraries, its 
 Blacklist system exist also to speed up the scanning progress and make it easier to spot the malware.
 
 please provide the source files if you want to make pr to add your own hash data.
-
-## Breakdown
-Here's a breakdown of the code:
-
-1.Helper Functions:
-* `recursiveScan`: Recursively scans a directory and returns an array of readable and non-readable files.
-* `sortByLastModified`: Sorts an array of files by their last modified time.
-* `getSortedByTime`: Combines recursive scanning and sorting by modified time.
-* `getSortedByExtension`: Filters files by specified extensions and sorts them.
-* `getFileTokens`: Tokenizes the content of a file and returns an array of tokens.
-* `inStringArray`: Searches for a string in an array (case-insensitive).
-* `compareTokens`: Compares two arrays of tokens and returns matches.
-* `urlFileArray`: Fetches content from a URL and returns it as an array.
-* `vTotalCheckHash`: Checks a file hash against the VirusTotal API.
-
-2.Configuration Arrays:
-* `$APIKey`: An array to store VirusTotal API keys.
-* `$ext`: An array of file extensions to scan.
-* `$tokenNeedles`: An array of potentially suspicious PHP functions and keywords to look for.
-
-3.Scanning Logic:
-* When the form is submitted, it scans the specified directory.
-* It checks each file against the whitelist, blacklist, and VirusTotal API.
-* It also performs token analysis to look for suspicious functions.
-* The results are displayed in an HTML table, with different colors indicating various levels of suspicion.
-
-4.File Operations:
-* The script can delete files that match the blacklist or are identified as malicious by VirusTotal.

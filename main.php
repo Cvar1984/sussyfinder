@@ -305,7 +305,7 @@ function getFileTokens($filename)
  *
  * @param string $needle
  * @param array $haystack
- * @return array
+ * @return array matching case within an array
  */
 function inStringArray($needle, $haystack)
 {
