@@ -645,15 +645,16 @@ if (_BLACKLIST_) {
 </head>
 
 <body>
+    <div id="errors"></div>
     <script>
-        let results = []; // will be filled from PHP
+        let results = [];
 
         function renderTable(list) {
             let html = "";
             for (let i = 0; i < list.length; i++) {
                 let r = list[i];
                 let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
-                let color = r.cmp.includes("BLACKLIST") ? "#ff3333" : "#3f3f3f"; // red for blacklist
+                let color = r.cmp.includes("BLACKLIST") ? "#ff3333" : "#3f3f3f";
                 html += "<tr><td style='color:" + color + "; font-size:14px;'>" +
                     r.file + cmp + " (" + r.sum + ")" +
                     "</td></tr>";
@@ -678,7 +679,6 @@ if (_BLACKLIST_) {
                 let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
                 return r.file + cmp + " (" + r.sum + ")";
             }).join("\n");
-
             navigator.clipboard.writeText(text)
                 .then(() => alert("Results copied to clipboard!"))
                 .catch(() => alert("Failed to copy results."));
@@ -710,37 +710,57 @@ if (_BLACKLIST_) {
             <tbody id="result"></tbody>
         </table>
         <script>
-            results = <?php
-                        $path = $_POST['dir'];
-                        $result = getSortedByPattern($path, $pattern);
-                        $fileReadable = sortByLastModified($result['file_readable']);
-                        $duplicateFiles = array();
-                        $results = array();
+            let response =
+                <?php
+                $path = $_POST['dir'];
+                $result = getSortedByPattern($path, $pattern);
+                $fileReadable = sortByLastModified($result['file_readable']);
+                $duplicateFiles = array();
+                $results = array();
+                $errors = array();
 
-                        foreach ($fileReadable as $filePath) {
-                            $fileSum = md5_file($filePath);
-                            if (in_array($fileSum, $whitelistMD5Sums)) continue;
+                foreach ($fileReadable as $filePath) {
+                    $fileSum = md5_file($filePath);
+                    if (in_array($fileSum, $whitelistMD5Sums)) continue;
 
-                            if (in_array($fileSum, $blacklistMD5Sums)) {
-                                $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => array('BLACKLIST'), 'mtime' => filemtime($filePath));
-                                unlink($filePath);
-                                continue;
-                            }
-                            if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
-                                $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => array("$duplicatePath"), 'mtime' => filemtime($filePath));
-                                continue;
-                            }
-                            $duplicateFiles[$filePath] = $fileSum;
+                    if (in_array($fileSum, $blacklistMD5Sums)) {
+                        $results[] = array(
+                            'file' => $filePath,
+                            'sum'  => $fileSum,
+                            'cmp'  => array('BLACKLIST'),
+                            'mtime' => filemtime($filePath)
+                        );
 
-                            $tokens = getFileTokens($filePath);
-                            $cmp = compareTokens($tokenNeedles, $tokens);
-
-                            $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => $cmp, 'mtime' => filemtime($filePath));
+                        if (!@unlink($filePath)) {
+                            $errors[] = "Failed to delete: $filePath";
                         }
-                        echo json_encode($results);
-                        ?>;
-            // Default render: sort by mtime
+                        continue;
+                    }
+
+                    if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+                        $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => array("$duplicatePath"), 'mtime' => filemtime($filePath));
+                        continue;
+                    }
+
+                    $duplicateFiles[$filePath] = $fileSum;
+                    $tokens = getFileTokens($filePath);
+                    $cmp = compareTokens($tokenNeedles, $tokens);
+                    $results[] = array('file' => $filePath, 'sum' => $fileSum, 'cmp' => $cmp, 'mtime' => filemtime($filePath));
+                }
+                echo json_encode(array('results' => $results, 'errors' => $errors));
+                ?>;
+
+            results = response.results || [];
             sortResults('mtime');
+
+            if (response.errors && response.errors.length) {
+                let errorHtml = "<ul>";
+                response.errors.forEach(e => {
+                    errorHtml += "<li style='color:red; font-size:13px;'>" + e + "</li>";
+                });
+                errorHtml += "</ul>";
+                document.getElementById("errors").innerHTML = "<h3 style='color:#d33;'>Errors</h3>" + errorHtml;
+            }
         </script>
     <?php } ?>
     </form>
