@@ -178,43 +178,6 @@ function getSortedByTime($path)
 }
 
 /**
- * Recursively list a file by descending modified time and extension.
- *
- * @param string $path The directory path to scan.
- * @param array $ext An array of file extensions to filter.
- * @return array An associative array containing two keys: 'file_readable' and 'file_not_readable'.
- *               Each key contains an array of file paths, sorted by their last modified time.
- */
-function getSortedByExtension($path, $ext)
-{
-    $result = getSortedByTime($path);
-    $fileReadable = $result['file_readable'];
-    //isset($result['file_not_readable']) ? $result['file_not_readable'] : false;
-
-    foreach ($fileReadable as $entry) {
-        $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
-
-        if (in_array($pathinfo, $ext)) {
-            $sortedWritableFile[] = $entry;
-        }
-    }
-    if (isset($fileNotWritable)) {
-        foreach ($fileNotWritable as $entry) {
-            $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
-
-            if (in_array($pathinfo, $ext)) {
-                $sortedNotWritableFile[] = $entry;
-            }
-        }
-    } else {
-        $sortedNotWritableFile = false;
-    }
-    return array(
-        'file_readable' => $sortedWritableFile,
-        'file_not_readable' => $sortedNotWritableFile
-    );
-}
-/**
  * Recursively list a file by descending modified time and pattern matching.
  *
  * @param string $path The directory path to scan.
@@ -429,6 +392,7 @@ $pattern = array(
     'ph.+',
     'sh.+',
     'inc',
+    'htaccess'
 );
 
 $tokenNeedles = array(
@@ -653,12 +617,36 @@ if (_BLACKLIST_) {
             for (let i = 0; i < list.length; i++) {
                 let r = list[i];
                 let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
-                let color = r.cmp.includes("BLACKLIST") ? "#ff3333" : "#3f3f3f"; // red for blacklist
+
+                let color = "#3f3f3f";
+                if (r.cmp.includes("BLACKLIST")) {
+                    color = "#ff3333";
+                } else if (r.cmp.includes("NOT_READABLE")) {
+                    color = "#990808ff";
+                } else if (r.cmp.includes("HTACCESS")) {
+                    color = "#0077cc"; // blue highlight for htaccess
+                }
+
+                // add filesize only if exists
+                let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
+
                 html += "<tr><td style='color:" + color + "; font-size:14px;'>" +
-                    r.file + cmp + " (" + r.sum + ")" +
+                    r.file + cmp + " (" + r.date + ")" + extra + " (" + r.sum + ")" +
                     "</td></tr>";
             }
             document.getElementById("result").innerHTML = html;
+        }
+
+        function copyResults() {
+            let text = results.map(r => {
+                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
+                let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
+                return r.file + cmp + " (" + r.date + ")" + extra + " (" + r.sum + ")";
+            }).join("\n");
+
+            navigator.clipboard.writeText(text)
+                .then(() => alert("Results copied to clipboard!"))
+                .catch(() => alert("Failed to copy results."));
         }
 
         function sortResults(mode) {
@@ -700,6 +688,7 @@ if (_BLACKLIST_) {
                 $path = $_POST['dir'];
                 $result = getSortedByPattern($path, $pattern);
                 $fileReadable = sortByLastModified($result['file_readable']);
+                $fileNotReadable = $result['file_not_readable'];
                 $duplicateFiles = array();
                 $results = array();
 
@@ -708,34 +697,70 @@ if (_BLACKLIST_) {
                     if (in_array($fileSum, $whitelistMD5Sums)) continue;
 
                     if (in_array($fileSum, $blacklistMD5Sums)) {
+                        $mtime = filemtime($filePath);
+                        $date = date("Y-m-d H:i:s", $mtime);
                         $results[] = array(
                             'file' => $filePath,
                             'sum' => $fileSum,
                             'cmp' => array('BLACKLIST'),
-                            'mtime' => filemtime($filePath)
+                            'mtime' => $mtime,
+                            'date' => $date
                         );
                         unlink($filePath);
                         continue;
                     }
                     if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+                        $mtime = filemtime($filePath);
+                        $date = date("Y-m-d H:i:s", $mtime);
                         $results[] = array(
                             'file' => $filePath,
                             'sum' => $fileSum,
                             'cmp' => array("$duplicatePath"),
-                            'mtime' => filemtime($filePath)
+                            'mtime' => $mtime,
+                            'date' => $date
                         );
                         continue;
                     }
                     $duplicateFiles[$filePath] = $fileSum;
 
+                    if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
+                        $mtime = filemtime($filePath);
+                        $date = date("Y-m-d H:i:s", $mtime);
+                        $filesize = filesize($filePath);
+                        $results[] = array(
+                            'file' => $filePath,
+                            'sum' => $fileSum,
+                            'cmp' => array('HTACCESS'),
+                            'mtime' => $mtime,
+                            'date' => $date,
+                            'filesize' => $filesize
+                        );
+                        continue;
+                    }
+
                     $tokens = getFileTokens($filePath);
                     $cmp = compareTokens($tokenNeedles, $tokens);
-
+                    $mtime = filemtime($filePath);
+                    $date = date("Y-m-d H:i:s", $mtime);
                     $results[] = array(
                         'file' => $filePath,
                         'sum' => $fileSum,
                         'cmp' => $cmp,
-                        'mtime' => filemtime($filePath)
+                        'mtime' => $mtime,
+                        'date' => $date
+                    );
+                }
+                foreach ($fileNotReadable as $filePath) {
+                    if (!($mtime = @filemtime($filePath))) {
+                        $mtime = 0;
+                    }
+                    $date = date("Y-m-d H:i:s", $mtime);
+                    $results[] = array(
+                        'file'  => $filePath,
+                        'sum'   => 'N/A',
+                        'cmp'   => array('NOT_READABLE'),
+                        'mtime' => $mtime,
+                        'date' => $date
                     );
                 } ?>
                 <tr>
