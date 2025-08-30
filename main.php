@@ -534,18 +534,23 @@ if (_BLACKLIST_) {
     <style>
         body {
             font-family: 'Ubuntu Mono', monospace;
-            color: #8a8a8a;
+            background-color: #1e1e1e;
+            /* dark gray background */
+            color: #d0d0d0;
+            /* light gray text */
             font-size: 14px;
-            /* compact font */
         }
 
         table {
             border-spacing: 0;
             padding: 5px;
             border-radius: 5px;
-            border: 2px solid #d6d6d6;
+            border: 1px solid #444;
+            /* subtle border */
             width: 90%;
             margin: auto;
+            background-color: #2a2a2a;
+            /* darker table background */
         }
 
         tr,
@@ -554,7 +559,8 @@ if (_BLACKLIST_) {
         }
 
         th {
-            color: #8a8a8a;
+            color: #f0f0f0;
+            /* brighter header text */
             padding: 5px;
             font-size: 20px;
         }
@@ -564,16 +570,17 @@ if (_BLACKLIST_) {
             font-family: 'Ubuntu Mono', monospace;
             padding: 5px;
             border-radius: 5px;
-            border: 1px solid #d6d6d6;
-            background: none;
-            color: #8a8a8a;
+            border: 1px solid #555;
+            background: #2a2a2a;
+            /* dark input bg */
+            color: #d0d0d0;
         }
 
         button:hover,
         input[type=submit]:hover,
         input[type=text]:hover {
-            border-color: #ff9999;
-            color: #ff9999;
+            border-color: #ff6666;
+            color: #ff6666;
             cursor: pointer;
         }
 
@@ -581,29 +588,22 @@ if (_BLACKLIST_) {
             width: 100%;
         }
 
-        /* Compact style only for the results list */
+        /* Results table */
         #result td {
             font-size: 12px;
-            /* smaller font */
             padding: 3px 6px;
-            /* tighter padding */
             line-height: 1.3em;
-            /* compact line spacing */
-            border-bottom: 1px solid #e0e0e0;
-            /* subtle row divider */
+            border-bottom: 1px solid #333;
+            /* subtle divider */
             white-space: normal;
-            /* allow wrapping */
             word-wrap: break-word;
-            /* break long words if needed */
             overflow-wrap: anywhere;
-            /* modern wrap for very long paths */
             max-width: 95vw;
-            /* prevent it from overflowing the viewport */
         }
 
         #result tr:nth-child(even) td {
-            background: #f9f9f9;
-            /* light zebra striping */
+            background: #242424;
+            /* zebra striping */
         }
     </style>
 </head>
@@ -611,27 +611,61 @@ if (_BLACKLIST_) {
 <body>
     <script>
         let results = []; // will be filled from PHP
+        let essentialTokens = [
+            'base64_decode',
+            'rawurldecode',
+            'urldecode',
+            'gzinflate',
+            'gzuncompress',
+            'str_rot13',
+            'bin2hex',
+            'hex2bin',
+            'hexdec',
+            'goto',
+            'eval',
+            'exec',
+            'shell_exec',
+            'system',
+            'passthru',
+            '$SISTEMIT_COM_ENC',
+            'getmyuid',
+            'getmygid',
+            'fopen',
+            'fsockopen',
+            'move_uploaded_file',
+            '$_files',
+            'posix_getuid',
+            'posix_geteuid'
+
+        ];
 
         function renderTable(list) {
             let html = "";
             for (let i = 0; i < list.length; i++) {
                 let r = list[i];
-                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
 
-                let color = "#3f3f3f";
-                if (r.cmp.includes("BLACKLIST")) {
-                    color = "#ff3333";
-                } else if (r.cmp.includes("NOT_READABLE")) {
-                    color = "#990808ff";
-                } else if (r.cmp.includes("HTACCESS")) {
-                    color = "#0077cc"; // blue highlight for htaccess
-                }
+                // Colorize tokens inside cmp array
+                let cmpColored = r.cmp.map(token => {
+                    if (essentialTokens.includes(token)) {
+                        return `<span style="color:#ff8a03ff;">${token}</span>`;
+                    }
+                    return token;
+                }).join(", ");
+
+                let cmpText = cmpColored.length ? " (" + cmpColored + ")" : "";
+
+                // Row color stays neutral
+                let color = "#dddbdbff";
+
+                if (r.cmp.includes("BLACKLIST")) color = "#f72f2fff";
+                else if (r.cmp.includes("NOT_READABLE")) color = "#f72f2fff";
+                else if (r.cmp.includes("HTACCESS")) color = "#66ccff";
 
                 // add filesize only if exists
                 let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
 
                 html += "<tr><td style='color:" + color + "; font-size:14px;'>" +
-                    r.file + cmp + " (" + r.date + ")" + extra + " (" + r.sum + ")" +
+                    r.file + cmpText + " (" + r.date + ")" + extra + " (" + r.sum + ")" +
                     "</td></tr>";
             }
             document.getElementById("result").innerHTML = html;
