@@ -196,7 +196,6 @@ function getSortedByPattern($path, $patterns)
 
     foreach ($fileReadable as $entry) {
         $extension = pathinfo($entry, PATHINFO_EXTENSION);
-        $patterns;
 
         foreach ($patterns as $pattern) {
             $regex = "/^$pattern$/i";
@@ -310,60 +309,63 @@ function compareTokens($tokenNeedles, $tokenHaystack)
     return $output;
 }
 /**
- * Return array of string from url
+ * Try every remote download method and return array of strings from a URL.
  *
  * @param string $url
  * @return array
  */
 function urlFileArray($url)
 {
+    $content = false;
+
+    // 1. Try cURL if a global handle exists
     if (isset($GLOBALS['ch'])) {
         curl_setopt($GLOBALS['ch'], CURLOPT_URL, $url);
-        // Handle potential cURL errors
-        if (curl_errno($GLOBALS['ch'])) {
-            $error_msg = curl_error($GLOBALS['ch']);
-            //curl_close($GLOBALS['ch']);
-            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
-            return array();
-        }
+        curl_setopt($GLOBALS['ch'], CURLOPT_RETURNTRANSFER, true);
 
         $content = curl_exec($GLOBALS['ch']);
-        //curl_close($GLOBALS['ch']);
-        return explode("\n", $content);
-    } else if (isWorking('file_get_contents')) {
-        $context = stream_context_create(
-            array(
-                'http' => array(
-                    'ignore_errors' => true, // Handle potential errors gracefully
-                ),
-                'ssl' => array(
-                    'verify_peer' => false,
-                    'verify_peer_name' => false,
-                )
-            )
-        );
 
-        $content = @file_get_contents($url, false, $context); // Use error suppression for cleaner handling
-
-        // If file_get_contents fails, return false
         if ($content === false) {
-            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
-            return array();
+            $error_msg = curl_error($GLOBALS['ch']);
+            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
+        } else {
+            return explode("\n", $content);
         }
-
-        return explode("\n", $content);
-    } else if (isWorking('file')) {
-        $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES); // Use error suppression for cleaner handling
-
-        // If file() fails, return false
-        if ($content === false) {
-            trigger_error("Failed to fetch URL using file", E_USER_WARNING);
-            return array();
-        }
-
-        return $content;
     }
 
+    // 2. Try file_get_contents
+    if (function_exists('file_get_contents')) {
+        $context = stream_context_create([
+            'http' => [
+                'ignore_errors' => true, // Handle potential errors gracefully
+            ],
+            'ssl' => [
+                'verify_peer' => true,
+                'verify_peer_name' => true,
+            ],
+        ]);
+
+        $content = @file_get_contents($url, false, $context);
+
+        if ($content !== false) {
+            return explode("\n", $content);
+        } else {
+            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
+        }
+    }
+
+    // 3. Try file()
+    if (function_exists('file')) {
+        $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+
+        if ($content !== false) {
+            return $content;
+        } else {
+            trigger_error("Failed to fetch URL using file()", E_USER_WARNING);
+        }
+    }
+
+    // 4. No suitable method found
     trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
     return array();
 }
@@ -636,7 +638,6 @@ if (_BLACKLIST_) {
             '$_files',
             'posix_getuid',
             'posix_geteuid'
-
         ];
 
         function renderTable(list) {
