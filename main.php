@@ -24,7 +24,6 @@ ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
-define('_DEBUG_', true);
 define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
 
@@ -52,7 +51,7 @@ if (isWorking('curl_exec')) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false); // Disable strict peer verification (caution in production)
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
 }
 /**
@@ -340,8 +339,8 @@ function urlFileArray($url)
                 'ignore_errors' => true, // Handle potential errors gracefully
             ],
             'ssl' => [
-                'verify_peer' => true,
-                'verify_peer_name' => true,
+                'verify_peer' => false,
+                'verify_peer_name' => false,
             ],
         ]);
 
@@ -733,7 +732,7 @@ if (_BLACKLIST_) {
 
                     if (in_array($fileSum, $blacklistMD5Sums)) {
                         $mtime = filemtime($filePath);
-                        $date = date("Y-m-d H:i:s", $mtime);
+                        $date = @date("Y-m-d H:i:s", $mtime);
                         $results[] = array(
                             'file' => $filePath,
                             'sum' => $fileSum,
@@ -746,7 +745,7 @@ if (_BLACKLIST_) {
                     }
                     if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
                         $mtime = filemtime($filePath);
-                        $date = date("Y-m-d H:i:s", $mtime);
+                        $date = @date("Y-m-d H:i:s", $mtime);
                         $results[] = array(
                             'file' => $filePath,
                             'sum' => $fileSum,
@@ -760,7 +759,7 @@ if (_BLACKLIST_) {
 
                     if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
                         $mtime = filemtime($filePath);
-                        $date = date("Y-m-d H:i:s", $mtime);
+                        $date = @date("Y-m-d H:i:s", $mtime);
                         $filesize = filesize($filePath);
                         $results[] = array(
                             'file' => $filePath,
@@ -774,9 +773,9 @@ if (_BLACKLIST_) {
                     }
 
                     $tokens = getFileTokens($filePath);
-                    $cmp = compareTokens($tokenNeedles, $tokens);
+                    $cmp = compareTokens($tokens, $tokenNeedles);
                     $mtime = filemtime($filePath);
-                    $date = date("Y-m-d H:i:s", $mtime);
+                    $date = @date("Y-m-d H:i:s", $mtime);
                     $results[] = array(
                         'file' => $filePath,
                         'sum' => $fileSum,
@@ -789,7 +788,7 @@ if (_BLACKLIST_) {
                     if (!($mtime = @filemtime($filePath))) {
                         $mtime = 0;
                     }
-                    $date = date("Y-m-d H:i:s", $mtime);
+                    $date = @date("Y-m-d H:i:s", $mtime);
                     $results[] = array(
                         'file'  => $filePath,
                         'sum'   => 'N/A',
