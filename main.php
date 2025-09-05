@@ -443,7 +443,6 @@ $tokenNeedles = array(
     'proc_close',
     'proc_terminate',
     'apache_child_terminate',
-    '',
 
     // Server Information
     'posix_getuid',
@@ -614,29 +613,34 @@ if (_BLACKLIST_) {
         let results = []; // will be filled from PHP
         let essentialTokens = [
             'base64_decode',
-            'rawurldecode',
-            'urldecode',
-            'gzinflate',
-            'gzuncompress',
             'str_rot13',
             'bin2hex',
             'hex2bin',
-            'hexdec',
             'goto',
             'eval',
             'exec',
             'shell_exec',
             'system',
             'passthru',
-            '$SISTEMIT_COM_ENC',
-            'getmyuid',
-            'getmygid',
+            'pcntl_fork',
+            'fsockopen',
+            'proc_open',
+            'popen ',
+            'posix_kill',
+            'posix_setpgid',
+            'posix_setsid',
+            'posix_setuid',
             'fopen',
             'fsockopen',
+            'file_put_contents',
+            'file_get_contents',
+            'url_get_contents',
             'move_uploaded_file',
             '$_files',
-            'posix_getuid',
-            'posix_geteuid'
+            '$auth_pass',
+            '$password',
+            '$pass',
+            '$SISTEMIT_COM_ENC',
         ];
 
         function renderTable(list) {
