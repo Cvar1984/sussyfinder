@@ -24,6 +24,8 @@ ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
 set_time_limit($limit);
 ini_set('display_errors', 1); // debug
+define('_WHITELIST_', true);
+define('_BLACKLIST_', true);
 
 /**
  * Check if function is available
@@ -49,28 +51,37 @@ if (isWorking('curl_exec')) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false); // Disable strict peer verification (caution in production)
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
 }
 /**
  * Recursive listing files
  *
  * @param string $directory
- * @param array $entries_array optional
+ * @param array $entries
+ * @param array $visited
  * @return array of files
  */
-function recursiveScan($directory, &$entries_array = array()) // :array
+function recursiveScan($directory, &$entries, &$visited)
 {
-    $directory = rtrim($directory, DIRECTORY_SEPARATOR);
+    // Resolve the real path to handle symlink loops
+    $realPath = realpath($directory);
+    if (!$realPath || isset($visited[$realPath])) {
+        return $entries; // Prevent infinite loops
+    }
+
+    // Mark this directory as visited
+    $visited[$realPath] = true;
+
     // Check if the directory exists and is readable
-    if (!is_dir($directory) || !is_readable($directory)) {
-        return $entries_array;
+    if (!is_dir($realPath) || !is_readable($realPath)) {
+        return $entries;
     }
 
     // Open the directory
-    $handle = opendir($directory);
+    $handle = opendir($realPath);
     if (!$handle) {
-        return $entries_array;
+        return $entries;
     }
 
     // Iterate over the directory contents
@@ -80,23 +91,36 @@ function recursiveScan($directory, &$entries_array = array()) // :array
             continue;
         }
 
-        // Get the full path to the entry
-        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $directory . '/' . $entry);
-        // Check if the entry is a symlink
+        // Get Nix-style full path
+        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $entry);
+
+        // Check if it's a symlink
         if (is_link($entryPath)) {
-            continue;
+            $entries['symlink'][] = $entryPath;
+
+            // Get the actual symlink target
+            $symlinkTarget = readlink($entryPath);
+            $resolvedTarget = realpath($symlinkTarget);
+
+            // Follow the symlink only if it's a directory and hasn't been visited
+            if ($resolvedTarget && is_dir($resolvedTarget) && !isset($visited[$resolvedTarget])) {
+                recursiveScan($resolvedTarget, $entries, $visited);
+            }
+            continue; // Continue processing other files
         }
 
-        // Check if the entry is a directory
-        if (is_dir($entryPath)) {
-            // Recursively scan the directory
-            $entries_array = recursiveScan($entryPath, $entries_array);
+        // Store whether it's a directory to avoid redundant calls
+        $isDir = is_dir($entryPath);
+
+        // If it's a directory, recursively scan it
+        if ($isDir) {
+            recursiveScan($entryPath, $entries, $visited);
         } elseif (is_readable($entryPath)) {
-            // Add the file to the writable array
-            $entries_array['file_readable'][] = $entryPath;
+            // Add readable files
+            $entries['file_readable'][] = $entryPath;
         } else {
-            // Add the file to the non-writable array
-            $entries_array['file_not_readable'][] = $entryPath;
+            // Add non-readable files
+            $entries['file_not_readable'][] = $entryPath;
         }
     }
 
@@ -104,7 +128,7 @@ function recursiveScan($directory, &$entries_array = array()) // :array
     closedir($handle);
 
     // Return the entries array
-    return $entries_array;
+    return $entries;
 }
 
 /**
@@ -112,7 +136,6 @@ function recursiveScan($directory, &$entries_array = array()) // :array
  * Sort array of list file by lastest modified time
  *
  * @param array  $files Array of files
- *
  * @return array
  *
  */
@@ -126,14 +149,15 @@ function sortByLastModified($files)
  * Recurisively list a file by descending modified time
  *
  * @param string $path
- *
  * @return array
  *
  */
-function getSortedByTime($path) // :array
+function getSortedByTime($path)
 {
     // Get the writable and non-writable files from the directory
-    $result = recursiveScan($path);
+    $entries = array();
+    $visited = array();
+    $result = recursiveScan($path, $entries, $visited);
     $readable = $result['file_readable'];
     //$notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
     if (isset($result['file_not_readable'])) {
@@ -153,43 +177,6 @@ function getSortedByTime($path) // :array
 }
 
 /**
- * Recursively list a file by descending modified time and extension.
- *
- * @param string $path The directory path to scan.
- * @param array $ext An array of file extensions to filter.
- * @return array An associative array containing two keys: 'file_readable' and 'file_not_readable'.
- *               Each key contains an array of file paths, sorted by their last modified time.
- */
-function getSortedByExtension($path, $ext)
-{
-    $result = getSortedByTime($path);
-    $fileReadable = $result['file_readable'];
-    //isset($result['file_not_readable']) ? $result['file_not_readable'] : false;
-
-    foreach ($fileReadable as $entry) {
-        $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
-
-        if (in_array($pathinfo, $ext)) {
-            $sortedWritableFile[] = $entry;
-        }
-    }
-    if (isset($fileNotWritable)) {
-        foreach ($fileNotWritable as $entry) {
-            $pathinfo = pathinfo($entry, PATHINFO_EXTENSION);
-
-            if (in_array($pathinfo, $ext)) {
-                $sortedNotWritableFile[] = $entry;
-            }
-        }
-    } else {
-        $sortedNotWritableFile = false;
-    }
-    return array(
-        'file_readable' => $sortedWritableFile,
-        'file_not_readable' => $sortedNotWritableFile
-    );
-}
-/**
  * Recursively list a file by descending modified time and pattern matching.
  *
  * @param string $path The directory path to scan.
@@ -202,13 +189,12 @@ function getSortedByPattern($path, $patterns)
     $fileReadable = $result['file_readable'];
     $fileNotReadable = $result['file_not_readable'];
 
-    $sortedReadableFiles = [];
-    $sortedNotReadableFiles = [];
+    $sortedReadableFiles = array();
+    $sortedNotReadableFiles = array();
 
 
     foreach ($fileReadable as $entry) {
         $extension = pathinfo($entry, PATHINFO_EXTENSION);
-        $patterns;
 
         foreach ($patterns as $pattern) {
             $regex = "/^$pattern$/i";
@@ -233,10 +219,10 @@ function getSortedByPattern($path, $patterns)
         }
     }
 
-    return [
+    return array(
         'file_readable' => $sortedReadableFiles,
         'file_not_readable' => $sortedNotReadableFiles,
-    ];
+    );
 }
 /**
  * Get lowercase Array of tokens in a file
@@ -252,7 +238,7 @@ function getFileTokens($filename)
     $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
 
     // Get the file tokens
-    $tokens = token_get_all($fileContent);
+    $tokens = @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
 
     // Create an output array
     $output = array();
@@ -280,7 +266,7 @@ function getFileTokens($filename)
  *
  * @param string $needle
  * @param array $haystack
- * @return array
+ * @return array matching case within an array
  */
 function inStringArray($needle, $haystack)
 {
@@ -322,113 +308,92 @@ function compareTokens($tokenNeedles, $tokenHaystack)
     return $output;
 }
 /**
- * Return array of string from url
+ * Try every remote download method and return array of strings from a URL.
  *
  * @param string $url
  * @return array
  */
 function urlFileArray($url)
 {
+    $content = false;
+
+    // 1. Try cURL if a global handle exists
     if (isset($GLOBALS['ch'])) {
         curl_setopt($GLOBALS['ch'], CURLOPT_URL, $url);
-        // Handle potential cURL errors
-        if (curl_errno($GLOBALS['ch'])) {
-            $error_msg = curl_error($GLOBALS['ch']);
-            //curl_close($GLOBALS['ch']);
-            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
-            return array();
-        }
+        curl_setopt($GLOBALS['ch'], CURLOPT_RETURNTRANSFER, true);
 
         $content = curl_exec($GLOBALS['ch']);
-        //curl_close($GLOBALS['ch']);
-        return explode("\n", $content);
-    } else if (isWorking('file_get_contents')) {
-        $context = stream_context_create(
-            array(
-                'http' => array(
-                    'ignore_errors' => true, // Handle potential errors gracefully
-                ),
-                'ssl' => array(
-                    'verify_peer' => false,
-                    'verify_peer_name' => false,
-                )
-            )
-        );
 
-        $content = file_get_contents($url, false, $context); // Use error suppression for cleaner handling
-
-        // If file_get_contents fails, return false
         if ($content === false) {
-            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
-            return array();
+            $error_msg = curl_error($GLOBALS['ch']);
+            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
+        } else {
+            return explode("\n", $content);
         }
-
-        return explode("\n", $content);
-    } else if (isWorking('file')) {
-        $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES); // Use error suppression for cleaner handling
-
-        // If file() fails, return false
-        if ($content === false) {
-            trigger_error("Failed to fetch URL using file", E_USER_WARNING);
-            return array();
-        }
-
-        return $content;
     }
 
+    // 2. Try file_get_contents
+    if (function_exists('file_get_contents')) {
+        $context = stream_context_create([
+            'http' => [
+                'ignore_errors' => true, // Handle potential errors gracefully
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false,
+            ],
+        ]);
+
+        $content = @file_get_contents($url, false, $context);
+
+        if ($content !== false) {
+            return explode("\n", $content);
+        } else {
+            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
+        }
+    }
+
+    // 3. Try file()
+    if (function_exists('file')) {
+        $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+
+        if ($content !== false) {
+            return $content;
+        } else {
+            trigger_error("Failed to fetch URL using file()", E_USER_WARNING);
+        }
+    }
+
+    // 4. No suitable method found
     trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
     return array();
 }
-/**
- * Get Online Vibes check fr, return gyatt if L
- *
- * @param string $hashSum
- * @param string $APIKey
- * @return array|bool|null
- */
-function vTotalCheckHash($hashSum, $APIKey)
-{
-
-    if (!isset($GLOBALS['ch']) || empty($APIKey)) {
-        return false;
-    }
-
-    curl_setopt($GLOBALS['ch'], CURLOPT_URL, sprintf('https://www.virustotal.com/api/v3/files/%s', $hashSum));
-    curl_setopt($GLOBALS['ch'], CURLOPT_HTTPHEADER, array(sprintf('x-apikey: %s', $APIKey)));
-    if (curl_errno($GLOBALS['ch'])) {
-        $error_msg = curl_error($GLOBALS['ch']);
-        //curl_close($GLOBALS['ch']);
-        trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
-        return false;
-    }
-    $result = curl_exec($GLOBALS['ch']);
-    return json_decode($result, true);
-}
-
 
 $APIKey = array(
     '',
 );
 
-$ext = array(
-    'php',
-    'phps',
-    'pht',
-    'phpt',
-    'phtm',
-    'phtml',
-    'phar',
-    'php3',
-    'php4',
-    'php5',
-    'php7',
-    'shtml',
-    'suspected'
-);
+// $ext = array(
+//     'php',
+//     'phps',
+//     'pht',
+//     'phpt',
+//     'phtm',
+//     'phtml',
+//     'phar',
+//     'php3',
+//     'php4',
+//     'php5',
+//     'php7',
+//     'shtml',
+//     'inc',
+// );
 
 $pattern = array(
     'ph.+',
     'sh.+',
+    'inc',
+    'htaccess'
 );
 
 $tokenNeedles = array(
@@ -478,7 +443,6 @@ $tokenNeedles = array(
     'proc_close',
     'proc_terminate',
     'apache_child_terminate',
-    '`',
 
     // Server Information
     'posix_getuid',
@@ -553,181 +517,324 @@ $tokenNeedles = array(
     '$SISTEMIT_COM_ENC',
 );
 
-$whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
-$blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+$whitelistMD5Sums = array();
+$blacklistMD5Sums = array();
+if (_WHITELIST_) {
+    $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
+}
+if (_BLACKLIST_) {
+    $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $request = json_decode(file_get_contents('php://input'), true);
+    $path = $request['dir'];
+    $result = getSortedByPattern($path, $pattern);
+    $fileReadable = sortByLastModified($result['file_readable']);
+    $fileNotReadable = $result['file_not_readable'];
+    $duplicateFiles = array();
+    $results = array();
+
+    foreach ($fileReadable as $filePath) {
+        $fileSum = md5_file($filePath);
+        if (in_array($fileSum, $whitelistMD5Sums)) continue;
+
+        if (in_array($fileSum, $blacklistMD5Sums)) {
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+            $results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => array('BLACKLIST'),
+                'mtime' => $mtime,
+                'date' => $date
+            );
+            unlink($filePath);
+            continue;
+        }
+        if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+            $results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => array("$duplicatePath"),
+                'mtime' => $mtime,
+                'date' => $date
+            );
+            continue;
+        }
+        $duplicateFiles[$filePath] = $fileSum;
+
+        if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+            $filesize = filesize($filePath);
+            $results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => array('HTACCESS'),
+                'mtime' => $mtime,
+                'date' => $date,
+                'filesize' => $filesize
+            );
+            continue;
+        }
+
+        $tokens = getFileTokens($filePath);
+        $cmp = compareTokens($tokens, $tokenNeedles);
+        $mtime = filemtime($filePath);
+        $date = @date("Y-m-d H:i:s", $mtime);
+        $results[] = array(
+            'file' => $filePath,
+            'sum' => $fileSum,
+            'cmp' => $cmp,
+            'mtime' => $mtime,
+            'date' => $date
+        );
+    }
+    foreach ($fileNotReadable as $filePath) {
+        if (!($mtime = @filemtime($filePath))) {
+            $mtime = 0;
+        }
+        $date = @date("Y-m-d H:i:s", $mtime);
+        $results[] = array(
+            'file'  => $filePath,
+            'sum'   => 'N/A',
+            'cmp'   => array('NOT_READABLE'),
+            'mtime' => $mtime,
+            'date' => $date
+        );
+    }
+    echo json_encode($results);
+    exit;
+}
+
+
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
 
 <head>
     <title>Sussy Finder</title>
-    <style type="text/css">
-        @import url('https://fonts.googleapis.com/css?family=Ubuntu+Mono&display=swap');
-
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style type="text/tailwindcss">
+        @theme {
+            --color-base: #1e1e1e;
+            --color-soft: #d0d0d0;
+            --color-dark: #2a2a2a;
+            --color-darker: #363535;
+            --color-accent: #ff6666;
+        }
+        
         body {
             font-family: 'Ubuntu Mono', monospace;
-            color: #8a8a8a;
+            background-color: var(--color-base);
+            /* dark gray background */
+            color: var(--color-soft);
+            /* light gray text */
+            font-size: 14px;
+            @apply py-10 px-5;
         }
 
-        table {
-            border-spacing: 0;
-            padding: 10px;
-            border-radius: 7px;
-            border: 3px solid #d6d6d6;
-        }
+        
 
         tr,
         td {
-            padding: 7px;
+            padding: 5px;
         }
 
         th {
-            color: #8a8a8a;
-            padding: 7px;
-            font-size: 25px;
+            color: #f0f0f0;
+            /* brighter header text */
+            padding: 5px;
+            font-size: 20px;
         }
 
-        input[type=submit]:focus {
-            background: #ff9999;
-            color: #fff;
-            border: 3px solid #ff9999;
+        button {
+            font-family: 'Ubuntu Mono', monospace;
+            padding: 5px;
+            border-radius: 5px;
+            background: var(--color-darker);
+            /* dark input bg */
+            color: #d0d0d0;
         }
 
-        input[type=submit]:hover {
-            border: 3px solid #ff9999;
+        button:hover,
+        button[type=submit]:hover {
+            border-color: #ff6666;
+            color: #ff6666;
             cursor: pointer;
         }
 
-        input[type=text]:hover {
-            border: 3px solid #ff9999;
-        }
-
-        input {
-            font-family: 'Ubuntu Mono', monospace;
-        }
-
         input[type=text] {
-            border: 3px solid #d6d6d6;
-            outline: none;
-            padding: 7px;
-            color: #8a8a8a;
             width: 100%;
-            border-radius: 7px;
         }
 
-        input[type=submit] {
-            color: #8a8a8a;
-            border: 3px solid #d6d6d6;
-            outline: none;
-            background: none;
-            padding: 7px;
-            width: 100%;
-            border-radius: 7px;
+        /* Results table */
+        #result td {
+            font-size: 12px;
+            padding: 3px 6px;
+            line-height: 1.3em;
+            border-bottom: 1px solid #333;
+            /* subtle divider */
+            white-space: normal;
+            word-wrap: break-word;
+            overflow-wrap: anywhere;
+            max-width: 95vw;
+        }
+
+        #result tr:nth-child(even) td {
+            background: #242424;
+            /* zebra striping */
         }
     </style>
 </head>
 
 <body>
-    <script type="text/javascript">
-        function copytable(el) {
-            var urlField = document.getElementById(el)
-            var range = document.createRange()
-            range.selectNode(urlField)
-            window.getSelection().addRange(range)
-            document.execCommand('copy')
-        }
-    </script>
-    <form method="post">
-        <table align="center" width="30%">
-            <tr>
-                <th>
-                    Sussy Finder
-                </th>
-            </tr>
-            <tr>
-                <td>
-                    <input type="text" name="dir" value="<?= getcwd() ?>">
-                </td>
-            </tr>
-            <tr>
-                <td>
-                    <input type="submit" name="submit" value="SEARCH">
-                </td>
-            </tr>
+    <div class="bg-dark rounded-xl p-5 mx-auto w-[90%] flex flex-col gap-2">
+        <div class="flex items-center justify-center gap-2">
+            <h1 class="text-5xl font-bold my-5 mb-7">Sussy Finder</h1>
+        </div>
+        <input type="text" id="dir" class="w-full bg-darker rounded-lg p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent" value="<?= getcwd() ?>">
+        <button type="button" onclick="submitForm()" class="w-full">SEARCH</button>
+        
+        <div id="resultsSection" class="hidden w-full">
+            <div class="flex justify-end my-5 gap-1">
+                <button type="button" onclick="copyResults()">Copy Results</button>
+                <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
+                <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
+            </div>
 
-            <?php if (isset($_POST['submit'])) { ?>
-                <tr>
-                    <td>
-                        <span style="font-weight:bold;font-size:25px;">RESULT</span>
-                        <input type=button value="Copy to Clipboard" onClick="copytable('result')">
-                    </td>
-                </tr>
-        </table>
-        <table id="result" align="center" width="30%">
-        <?php
-                $path = $_POST['dir'];
-                $result = getSortedByPattern($path, $pattern);
+            <table align="center" class="w-full">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Path</th>
+                        <th>Token</th>
+                        <th>md5sum</th>
+                    </tr>
+                </thead>
+                <tbody id="result"></tbody>
+            </table>
+        </div>
+    </div>
 
-                $fileReadable = $result['file_readable'];
-                $fileNotWritable = $result['file_not_readable'];
-                $fileReadable = sortByLastModified($fileReadable);
+    <script>
+        let results = []; // will be filled from PHP
+        let essentialTokens = [
+            'base64_decode',
+            'str_rot13',
+            'bin2hex',
+            'hex2bin',
+            'goto',
+            'eval',
+            'exec',
+            'shell_exec',
+            'system',
+            'passthru',
+            'pcntl_fork',
+            'fsockopen',
+            'proc_open',
+            'popen ',
+            'posix_kill',
+            'posix_setpgid',
+            'posix_setsid',
+            'posix_setuid',
+            'fopen',
+            'fsockopen',
+            'file_put_contents',
+            'file_get_contents',
+            'url_get_contents',
+            'move_uploaded_file',
+            '$_files',
+            '$auth_pass',
+            '$password',
+            '$pass',
+            '$SISTEMIT_COM_ENC',
+        ];
 
-                $currentKeyIndex = 0;
-                $actionCount = 0;
-                $duplicateFiles = array();
+        function renderTable(list) {
+            let html = "";
+            for (let i = 0; i < list.length; i++) {
+                let r = list[i];
 
-                foreach ($fileReadable as $filePath) {
-                    $fileSum = md5_file($filePath);
-
-                    if (in_array($fileSum, $whitelistMD5Sums)) { // if in whitelist skip
-                        continue;
-                    } elseif (in_array($fileSum, $blacklistMD5Sums)) { // if in blacklist alert and remove
-                        printf('<tr><td><span style="color:red;">%s (Blacklist)(%s)</span></td></tr>', $filePath, $fileSum);
-                        unlink($filePath);
-                        continue;
-                    } elseif (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
-                        printf('<tr><td><span style="color:#212121;">%s -> %s(%s)</span></td></tr>', $filePath, $duplicatePath, $fileSum);
-                        continue;
+                // Colorize tokens inside cmp array
+                let cmpColored = r.cmp.map(token => {
+                    if (essentialTokens.includes(token)) {
+                        return `<span style="color:#ff8a03ff;">${token}</span>`;
                     }
+                    return token;
+                }).join(", ");
 
-                    $duplicateFiles[$filePath] = $fileSum;
+                let color = "#dddbdbff";
+                if (r.cmp.includes("BLACKLIST")) color = "#f72f2fff";
+                else if (r.cmp.includes("NOT_READABLE")) color = "#f72f2fff";
+                else if (r.cmp.includes("HTACCESS")) color = "#66ccff";
 
-                    $vTotalRes = vTotalCheckHash($fileSum, $APIKey[$currentKeyIndex]);
+                // add filesize only if exists
+                let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
 
-                    $actionCount++;
-
-                    // keep track of the number of actions performed within a loop
-                    //if ($actionCount >= 240) {
-                    if ($actionCount >= 1) {
-                        $currentKeyIndex = ($currentKeyIndex + 1) % count($APIKey);
-                        $actionCount = 0;
-                    }
-
-                    if (isset($vTotalRes['data'])) {
-                        $matchedString = inStringArray('malicious', $vTotalRes); // matching casecmp
-                        if (!empty($matchedString)) {
-                            printf('<tr><td><span style="color:#ff0000;">%s (VTotal Webshell)(%s)</span></td></tr>', $filePath, $fileSum);
-                            unlink($filePath);
-                            continue;
-                        } else if ($vTotalRes['data']['attributes']['total_votes']['malicious'] > 0) {
-                            printf('<tr><td><span style="color:#eed202;">%s (VTotal Malicious)(%s)</span></td></tr>', $filePath, $fileSum);
-                            //unlink($filePath);
-                            continue;
-                        }
-                    }
-
-                    $tokens = getFileTokens($filePath);
-                    $cmp = compareTokens($tokens, $tokenNeedles);
-                    $cmp = implode(', ', $cmp);
-
-                    if (!empty($cmp)) {
-                        printf('<tr><td><span style="color:#3f3f3f;">%s (%s)</span></td></tr>', $filePath, $cmp);
-                    }
-                }
+                html += "<tr>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + r.date + "</td>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + r.file + extra + "</td>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + cmpColored + "</td>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + r.sum + "</td>"
+                    + "</tr>";
             }
-        ?>
-        </table>
-    </form>
+            document.getElementById("result").innerHTML = html;
+        }
+
+        function copyResults() {
+            let text = results.map(r => {
+                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
+                let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
+                return r.file + cmp + " (" + r.date + ")" + extra + " (" + r.sum + ")";
+            }).join("\n");
+
+            navigator.clipboard.writeText(text)
+                .then(() => alert("Results copied to clipboard!"))
+                .catch(() => alert("Failed to copy results."));
+        }
+
+        function sortResults(mode) {
+            if (mode === "tokens") {
+                results.sort((a, b) => {
+                    if (b.cmp.length !== a.cmp.length) return b.cmp.length - a.cmp.length;
+                    return b.mtime - a.mtime;
+                });
+            } else if (mode === "mtime") {
+                results.sort((a, b) => b.mtime - a.mtime);
+            }
+            renderTable(results);
+        }
+
+        function copyResults() {
+            let text = results.map(r => {
+                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
+                return r.file + cmp + " (" + r.sum + ")";
+            }).join("\n");
+
+            navigator.clipboard.writeText(text)
+                .then(() => alert("Results copied to clipboard!"))
+                .catch(() => alert("Failed to copy results."));
+        }
+
+        function submitForm() {
+            let dir = document.getElementById("dir").value;
+            
+            fetch("", {
+                method: "POST",
+                body: JSON.stringify({ dir: dir })
+            }).then(response => response.json()).then(data => {
+                results = data;
+                renderTable(results);
+                document.getElementById("resultsSection").classList.remove("hidden");
+            });
+        }
+    
+
+    </script>
 </body>
 
 </html>
