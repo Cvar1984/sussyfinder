@@ -525,33 +525,119 @@ if (_WHITELIST_) {
 if (_BLACKLIST_) {
     $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
 }
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $request = json_decode(file_get_contents('php://input'), true);
+    $path = $request['dir'];
+    $result = getSortedByPattern($path, $pattern);
+    $fileReadable = sortByLastModified($result['file_readable']);
+    $fileNotReadable = $result['file_not_readable'];
+    $duplicateFiles = array();
+    $results = array();
+
+    foreach ($fileReadable as $filePath) {
+        $fileSum = md5_file($filePath);
+        if (in_array($fileSum, $whitelistMD5Sums)) continue;
+
+        if (in_array($fileSum, $blacklistMD5Sums)) {
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+            $results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => array('BLACKLIST'),
+                'mtime' => $mtime,
+                'date' => $date
+            );
+            unlink($filePath);
+            continue;
+        }
+        if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+            $results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => array("$duplicatePath"),
+                'mtime' => $mtime,
+                'date' => $date
+            );
+            continue;
+        }
+        $duplicateFiles[$filePath] = $fileSum;
+
+        if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+            $filesize = filesize($filePath);
+            $results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => array('HTACCESS'),
+                'mtime' => $mtime,
+                'date' => $date,
+                'filesize' => $filesize
+            );
+            continue;
+        }
+
+        $tokens = getFileTokens($filePath);
+        $cmp = compareTokens($tokens, $tokenNeedles);
+        $mtime = filemtime($filePath);
+        $date = @date("Y-m-d H:i:s", $mtime);
+        $results[] = array(
+            'file' => $filePath,
+            'sum' => $fileSum,
+            'cmp' => $cmp,
+            'mtime' => $mtime,
+            'date' => $date
+        );
+    }
+    foreach ($fileNotReadable as $filePath) {
+        if (!($mtime = @filemtime($filePath))) {
+            $mtime = 0;
+        }
+        $date = @date("Y-m-d H:i:s", $mtime);
+        $results[] = array(
+            'file'  => $filePath,
+            'sum'   => 'N/A',
+            'cmp'   => array('NOT_READABLE'),
+            'mtime' => $mtime,
+            'date' => $date
+        );
+    }
+    echo json_encode($results);
+    exit;
+}
+
+
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
 
 <head>
     <title>Sussy Finder</title>
-    <style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style type="text/tailwindcss">
+        @theme {
+            --color-base: #1e1e1e;
+            --color-soft: #d0d0d0;
+            --color-dark: #2a2a2a;
+            --color-darker: #363535;
+            --color-accent: #ff6666;
+        }
+        
         body {
             font-family: 'Ubuntu Mono', monospace;
-            background-color: #1e1e1e;
+            background-color: var(--color-base);
             /* dark gray background */
-            color: #d0d0d0;
+            color: var(--color-soft);
             /* light gray text */
             font-size: 14px;
+            @apply py-10 px-5;
         }
 
-        table {
-            border-spacing: 0;
-            padding: 5px;
-            border-radius: 5px;
-            border: 1px solid #444;
-            /* subtle border */
-            width: 90%;
-            margin: auto;
-            background-color: #2a2a2a;
-            /* darker table background */
-        }
+        
 
         tr,
         td {
@@ -565,20 +651,17 @@ if (_BLACKLIST_) {
             font-size: 20px;
         }
 
-        input,
         button {
             font-family: 'Ubuntu Mono', monospace;
             padding: 5px;
             border-radius: 5px;
-            border: 1px solid #555;
-            background: #2a2a2a;
+            background: var(--color-darker);
             /* dark input bg */
             color: #d0d0d0;
         }
 
         button:hover,
-        input[type=submit]:hover,
-        input[type=text]:hover {
+        button[type=submit]:hover {
             border-color: #ff6666;
             color: #ff6666;
             cursor: pointer;
@@ -609,6 +692,34 @@ if (_BLACKLIST_) {
 </head>
 
 <body>
+    <div class="bg-dark rounded-xl p-5 mx-auto w-[90%] flex flex-col gap-2">
+        <div class="flex items-center justify-center gap-2">
+            <h1 class="text-5xl font-bold my-5 mb-7">Sussy Finder</h1>
+        </div>
+        <input type="text" id="dir" class="w-full bg-darker rounded-lg p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent" value="<?= getcwd() ?>">
+        <button type="button" onclick="submitForm()" class="w-full">SEARCH</button>
+        
+        <div id="resultsSection" class="hidden w-full">
+            <div class="flex justify-end my-5 gap-1">
+                <button type="button" onclick="copyResults()">Copy Results</button>
+                <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
+                <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
+            </div>
+
+            <table align="center" class="w-full">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Path</th>
+                        <th>Token</th>
+                        <th>md5sum</th>
+                    </tr>
+                </thead>
+                <tbody id="result"></tbody>
+            </table>
+        </div>
+    </div>
+
     <script>
         let results = []; // will be filled from PHP
         let essentialTokens = [
@@ -656,11 +767,7 @@ if (_BLACKLIST_) {
                     return token;
                 }).join(", ");
 
-                let cmpText = cmpColored.length ? " (" + cmpColored + ")" : "";
-
-                // Row color stays neutral
                 let color = "#dddbdbff";
-
                 if (r.cmp.includes("BLACKLIST")) color = "#f72f2fff";
                 else if (r.cmp.includes("NOT_READABLE")) color = "#f72f2fff";
                 else if (r.cmp.includes("HTACCESS")) color = "#66ccff";
@@ -668,9 +775,12 @@ if (_BLACKLIST_) {
                 // add filesize only if exists
                 let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
 
-                html += "<tr><td style='color:" + color + "; font-size:14px;'>" +
-                    r.file + cmpText + " (" + r.date + ")" + extra + " (" + r.sum + ")" +
-                    "</td></tr>";
+                html += "<tr>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + r.date + "</td>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + r.file + extra + "</td>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + cmpColored + "</td>"
+                    + "<td style='color:" + color + "; font-size:14px;'>" + r.sum + "</td>"
+                    + "</tr>";
             }
             document.getElementById("result").innerHTML = html;
         }
@@ -709,117 +819,22 @@ if (_BLACKLIST_) {
                 .then(() => alert("Results copied to clipboard!"))
                 .catch(() => alert("Failed to copy results."));
         }
+
+        function submitForm() {
+            let dir = document.getElementById("dir").value;
+            
+            fetch("", {
+                method: "POST",
+                body: JSON.stringify({ dir: dir })
+            }).then(response => response.json()).then(data => {
+                results = data;
+                renderTable(results);
+                document.getElementById("resultsSection").classList.remove("hidden");
+            });
+        }
+    
+
     </script>
-
-    <form method="post">
-        <table align="center" width="30%">
-            <tr>
-                <th>Sussy Finder</th>
-            </tr>
-            <tr>
-                <td><input type="text" name="dir" value="<?= getcwd() ?>"></td>
-            </tr>
-            <tr>
-                <td><input type="submit" name="submit" value="SEARCH"></td>
-            </tr>
-            <?php if (isset($_POST['submit'])) {
-                $path = $_POST['dir'];
-                $result = getSortedByPattern($path, $pattern);
-                $fileReadable = sortByLastModified($result['file_readable']);
-                $fileNotReadable = $result['file_not_readable'];
-                $duplicateFiles = array();
-                $results = array();
-
-                foreach ($fileReadable as $filePath) {
-                    $fileSum = md5_file($filePath);
-                    if (in_array($fileSum, $whitelistMD5Sums)) continue;
-
-                    if (in_array($fileSum, $blacklistMD5Sums)) {
-                        $mtime = filemtime($filePath);
-                        $date = @date("Y-m-d H:i:s", $mtime);
-                        $results[] = array(
-                            'file' => $filePath,
-                            'sum' => $fileSum,
-                            'cmp' => array('BLACKLIST'),
-                            'mtime' => $mtime,
-                            'date' => $date
-                        );
-                        unlink($filePath);
-                        continue;
-                    }
-                    if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
-                        $mtime = filemtime($filePath);
-                        $date = @date("Y-m-d H:i:s", $mtime);
-                        $results[] = array(
-                            'file' => $filePath,
-                            'sum' => $fileSum,
-                            'cmp' => array("$duplicatePath"),
-                            'mtime' => $mtime,
-                            'date' => $date
-                        );
-                        continue;
-                    }
-                    $duplicateFiles[$filePath] = $fileSum;
-
-                    if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
-                        $mtime = filemtime($filePath);
-                        $date = @date("Y-m-d H:i:s", $mtime);
-                        $filesize = filesize($filePath);
-                        $results[] = array(
-                            'file' => $filePath,
-                            'sum' => $fileSum,
-                            'cmp' => array('HTACCESS'),
-                            'mtime' => $mtime,
-                            'date' => $date,
-                            'filesize' => $filesize
-                        );
-                        continue;
-                    }
-
-                    $tokens = getFileTokens($filePath);
-                    $cmp = compareTokens($tokens, $tokenNeedles);
-                    $mtime = filemtime($filePath);
-                    $date = @date("Y-m-d H:i:s", $mtime);
-                    $results[] = array(
-                        'file' => $filePath,
-                        'sum' => $fileSum,
-                        'cmp' => $cmp,
-                        'mtime' => $mtime,
-                        'date' => $date
-                    );
-                }
-                foreach ($fileNotReadable as $filePath) {
-                    if (!($mtime = @filemtime($filePath))) {
-                        $mtime = 0;
-                    }
-                    $date = @date("Y-m-d H:i:s", $mtime);
-                    $results[] = array(
-                        'file'  => $filePath,
-                        'sum'   => 'N/A',
-                        'cmp'   => array('NOT_READABLE'),
-                        'mtime' => $mtime,
-                        'date' => $date
-                    );
-                } ?>
-                <tr>
-                    <td>
-                        <span style="font-weight:bold;font-size:25px;">RESULT</span><br>
-                        <button type="button" onclick="copyResults()">Copy Results</button>
-                        <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
-                        <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
-                    </td>
-                </tr>
-        </table>
-        <table align="center">
-            <tbody id="result"></tbody>
-        </table>
-
-        <script>
-            results = <?php echo json_encode($results); ?>;
-            sortResults('mtime'); // Default render: sort by mtime
-        </script>
-    <?php } ?>
-    </form>
 </body>
 
 </html>
