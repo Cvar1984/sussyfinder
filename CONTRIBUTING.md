@@ -13,13 +13,13 @@ We welcome contributions to SussyFinder! This document outlines how you can get 
 
 ## Code Style
 
--    Follow the existing code style conventions of the project. This ensures consistency and readability.
+-    Follow the existing code style conventions of the project which focus on perfomance, compatibility, and readability.
 -    Use consistent formatting and indentation.
 -    Add meaningful comments to explain complex code sections.
 
 ## Testing
 
--    Make sure your changes pass all existing tests.
+-    Make sure your changes is compatible as it was.
 -    If necessary, write new tests to cover your changes.
 
 ## Submitting Pull Requests
