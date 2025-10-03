@@ -369,6 +369,14 @@ function urlFileArray($url)
     return array();
 }
 
+function output($array) {
+    header("Content-Type: text/plain");
+    header("Cache-Control: no-cache");
+    header("Pragma: no-cache");
+    echo json_encode($array, JSON_PRETTY_PRINT);
+    die();
+}
+
 $APIKey = array(
     '',
 );
@@ -529,6 +537,14 @@ if (_BLACKLIST_) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $request = json_decode(file_get_contents('php://input'), true);
     $path = $request['dir'];
+
+    if (!is_dir($path)) {
+        output([
+            'success'=> false,
+            'message' => 'Dir not found.'
+        ]);
+    }
+
     $result = getSortedByPattern($path, $pattern);
     $fileReadable = sortByLastModified($result['file_readable']);
     $fileNotReadable = $result['file_not_readable'];
@@ -606,8 +622,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'date' => $date
         );
     }
-    echo json_encode($results);
-    exit;
+    output([
+        'success' => true,
+        'results'=> $results
+    ]);
 }
 
 
@@ -637,38 +655,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             @apply py-10 px-5;
         }
 
-        
-
         tr,
         td {
-            padding: 5px;
+            @apply p-5 text-[14px];
         }
 
         th {
+            @apply text-start;
             color: #f0f0f0;
             /* brighter header text */
             padding: 5px;
             font-size: 20px;
-        }
-
-        button {
-            font-family: 'Ubuntu Mono', monospace;
-            padding: 5px;
-            border-radius: 5px;
-            background: var(--color-darker);
-            /* dark input bg */
-            color: #d0d0d0;
-        }
-
-        button:hover,
-        button[type=submit]:hover {
-            border-color: #ff6666;
-            color: #ff6666;
-            cursor: pointer;
-        }
-
-        input[type=text] {
-            width: 100%;
         }
 
         /* Results table */
@@ -683,11 +680,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             overflow-wrap: anywhere;
             max-width: 95vw;
         }
-
-        #result tr:nth-child(even) td {
-            background: #242424;
-            /* zebra striping */
-        }
     </style>
 </head>
 
@@ -697,26 +689,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h1 class="text-5xl font-bold my-5 mb-7">Sussy Finder</h1>
         </div>
         <input type="text" id="dir" class="w-full bg-darker rounded-lg p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent" value="<?= getcwd() ?>">
-        <button type="button" onclick="submitForm()" class="w-full">SEARCH</button>
+        <button type="button" class="w-full bg-accent rounded-lg font-bold p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent hover:cursor-pointer" onclick="submitForm()">SEARCH</button>
         
+        <div id="alert" class="hidden my-5"></div>
+
         <div id="resultsSection" class="hidden w-full">
             <div class="flex justify-end my-5 gap-1">
-                <button type="button" onclick="copyResults()">Copy Results</button>
-                <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
-                <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
+                <button type="button" class="bg-darker p-2 rounded-lg hover:bg-darker/50 hover:cursor-pointer" onclick="copyResults()">Copy Results</button>
+                <button type="button" class="bg-darker p-2 rounded-lg hover:bg-darker/50 hover:cursor-pointer" onclick="sortResults('tokens')">Sort by Tokens</button>
+                <button type="button" class="bg-darker p-2 rounded-lg hover:bg-darker/50 hover:cursor-pointer" onclick="sortResults('mtime')">Sort by Time</button>
             </div>
 
-            <table align="center" class="w-full">
-                <thead>
-                    <tr>
-                        <th>Date</th>
-                        <th>Path</th>
-                        <th>Token</th>
-                        <th>md5sum</th>
-                    </tr>
-                </thead>
-                <tbody id="result"></tbody>
-            </table>
+            <div class="w-full">
+                <div class="grid grid-cols-[20ch_1fr_1fr_30ch] gap-x-3 py-2">
+                    <div class="text-start">Date</div>
+                    <div class="text-start">Path</div>
+                    <div class="text-start">Token</div>
+                    <div class="text-start">md5sum</div>
+                </div>
+                <div id="result" class="text-[14px]"></div>
+            </div>
+            
+            <!-- Detail Modal -->
+            <div id="detailModal" class="hidden fixed inset-0 bg-black/60 z-50 items-center justify-center">
+                <div class="bg-dark rounded-lg p-5 w-[90vw] max-w-[900px] max-h-[80vh] overflow-auto">
+                    <div class="flex items-center justify-between mb-4">
+                        <h2 class="text-2xl font-bold">Details</h2>
+                        <button type="button" class="bg-darker rounded-full text-xl font-bold px-3 py-1 hover:bg-darker/60 hover:cursor-pointer" onclick="closeModal()">&times;</button>
+                    </div>
+                    <div id="modalContent" class="text-[14px] space-y-2"></div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -775,12 +778,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // add filesize only if exists
                 let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
 
-                html += "<tr>"
-                    + "<td style='color:" + color + "; font-size:14px;'>" + r.date + "</td>"
-                    + "<td style='color:" + color + "; font-size:14px;'>" + r.file + extra + "</td>"
-                    + "<td style='color:" + color + "; font-size:14px;'>" + cmpColored + "</td>"
-                    + "<td style='color:" + color + "; font-size:14px;'>" + r.sum + "</td>"
-                    + "</tr>";
+                html += `<div class="grid grid-cols-[20ch_1fr_1fr_30ch] gap-x-3 odd:bg-transparent even:bg-[#242424] py-2 hover:bg-darker/60 cursor-pointer" onclick="showModal(${i})">
+                             <div class='text-[${color}] whitespace-nowrap'><div class="truncate" title="${r.date}">${r.date}</div></div>
+                             <div class='text-[${color}] min-w-0'>
+                                <div class="w-full truncate" title="${r.file + extra}">${r.file + extra}</div>
+                            </div>
+                             <div class='text-[${color}] min-w-0'>
+                                <div class="w-full truncate" title="${r.cmp.join(', ')}">${cmpColored}</div>
+                            </div>
+                             <div class='text-[${color}] whitespace-nowrap'><div class="truncate" title="${r.sum}">${r.sum}</div></div>
+                         </div>`;
             }
             document.getElementById("result").innerHTML = html;
         }
@@ -827,10 +834,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 method: "POST",
                 body: JSON.stringify({ dir: dir })
             }).then(response => response.json()).then(data => {
-                results = data;
-                renderTable(results);
-                document.getElementById("resultsSection").classList.remove("hidden");
+                if (data.success) {
+                    results = data.results;
+                    renderTable(results);
+                    document.getElementById("resultsSection").classList.remove("hidden");
+                } else {
+                    results = [];
+                    document.getElementById("resultsSection").classList.add('hidden');
+                    const alert = document.getElementById('alert');
+                    alert.classList.remove('hidden');
+                    alert.innerHTML = data.message ?? null;
+                }
             });
+        }
+        
+        function showModal(index) {
+            const r = results[index];
+            if (!r) return;
+            const extra = r.filesize !== undefined ? ` (${r.filesize.toFixed(1)} Bytes)` : "";
+            // Colorize tokens like in the table
+            const cmpColored = (Array.isArray(r.cmp) ? r.cmp : [r.cmp])
+                .map(token => {
+                    if (essentialTokens.includes(token)) {
+                        return `<span style="color:#ff8a03ff;">${token}</span>`;
+                    }
+                    return token;
+                }).join(", ");
+
+            const content = `
+                <div>
+                    <div><strong>Date:</strong> ${r.date}</div>
+                    <div><strong>Path:</strong> ${r.file}${extra}</div>
+                    <div><strong>Tokens:</strong> ${cmpColored}</div>
+                    <div><strong>md5sum:</strong> ${r.sum}</div>
+                </div>
+            `;
+            document.getElementById('modalContent').innerHTML = content;
+            const modal = document.getElementById('detailModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+
+            // Close on backdrop click
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) closeModal();
+            }, { once: true });
+
+            // Close on ESC
+            document.addEventListener('keydown', escHandler, { once: true });
+        }
+
+        function escHandler(e) {
+            if (e.key === 'Escape') closeModal();
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('detailModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
         }
     
 
