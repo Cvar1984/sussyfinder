@@ -541,7 +541,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!is_dir($path)) {
         output([
             'success'=> false,
-            'message' => 'Dir not found.'
+            'message' => "There are no files in <span class='underline italic'>{$path}</span>."
         ]);
     }
 
@@ -689,9 +689,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <h1 class="text-5xl font-bold my-5 mb-7">Sussy Finder</h1>
         </div>
         <input type="text" id="dir" class="w-full bg-darker rounded-lg p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent" value="<?= getcwd() ?>">
-        <button type="button" class="w-full bg-accent rounded-lg font-bold p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent hover:cursor-pointer" onclick="submitForm()">SEARCH</button>
+        <button type="button" class="w-full bg-accent mt-3 rounded-lg font-bold p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent hover:cursor-pointer" onclick="submitForm()">SEARCH</button>
         
-        <div id="alert" class="hidden my-5"></div>
+        <div id="alert" class="hidden my-3"></div>
+
+        <!-- Progress Bar -->
+        <div id="progressSection" class="mt-3 hidden w-full">
+            <div class="bg-darker rounded-lg p-3">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm">Scanning files...</span>
+                    <span id="progressText" class="text-sm">0%</span>
+                </div>
+                <div class="w-full bg-base rounded-full h-2">
+                    <div id="progressBar" class="bg-accent h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
 
         <div id="resultsSection" class="hidden w-full">
             <div class="flex justify-end my-5 gap-1">
@@ -830,22 +843,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         function submitForm() {
             let dir = document.getElementById("dir").value;
             
+            // Show progress bar and hide other sections
+            document.getElementById("progressSection").classList.remove("hidden");
+            document.getElementById("resultsSection").classList.add("hidden");
+            document.getElementById("alert").classList.add("hidden");
+            
+            // Start progress animation
+            let progress = 0;
+            const progressInterval = setInterval(() => {
+                progress += Math.random() * 15;
+                if (progress > 90) progress = 90;
+                updateProgress(progress);
+            }, 200);
+            
             fetch("", {
                 method: "POST",
                 body: JSON.stringify({ dir: dir })
             }).then(response => response.json()).then(data => {
-                if (data.success) {
-                    results = data.results;
-                    renderTable(results);
-                    document.getElementById("resultsSection").classList.remove("hidden");
-                } else {
-                    results = [];
-                    document.getElementById("resultsSection").classList.add('hidden');
-                    const alert = document.getElementById('alert');
-                    alert.classList.remove('hidden');
-                    alert.innerHTML = data.message ?? null;
-                }
+                // Complete progress
+                clearInterval(progressInterval);
+                updateProgress(100);
+                
+                // Hide progress after a short delay
+                setTimeout(() => {
+                    document.getElementById("progressSection").classList.add("hidden");
+                    
+                    if (data.success) {
+                        results = data.results;
+                        renderTable(results);
+                        document.getElementById("resultsSection").classList.remove("hidden");
+                    } else {
+                        results = [];
+                        document.getElementById("resultsSection").classList.add('hidden');
+                        const alert = document.getElementById('alert');
+                        alert.classList.remove('hidden');
+                        alert.innerHTML = data.message ? `<h1 class='text-xl'>${data.message}</h1>` : null;
+                    }
+                }, 500);
+            }).catch(error => {
+                clearInterval(progressInterval);
+                document.getElementById("progressSection").classList.add("hidden");
+                const alert = document.getElementById('alert');
+                alert.classList.remove('hidden');
+                alert.innerHTML = "Error: " + error.message;
             });
+        }
+        
+        function updateProgress(percent) {
+            document.getElementById("progressBar").style.width = percent + "%";
+            document.getElementById("progressText").textContent = Math.round(percent) + "%";
         }
         
         function showModal(index) {
