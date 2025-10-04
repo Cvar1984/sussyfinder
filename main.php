@@ -725,7 +725,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             
             <!-- Detail Modal -->
             <div id="detailModal" class="hidden fixed inset-0 bg-black/60 z-50 items-center justify-center">
-                <div class="bg-dark rounded-lg p-5 w-[90vw] max-w-[900px] max-h-[80vh] overflow-auto">
+                <div class="bg-dark rounded-xl p-5 w-[90vw] max-w-[900px] max-h-[80vh] overflow-auto">
                     <div class="flex items-center justify-between mb-4">
                         <h2 class="text-2xl font-bold">Details</h2>
                         <button type="button" class="bg-darker rounded-full text-xl font-bold px-3 py-1 hover:bg-darker/60 hover:cursor-pointer" onclick="closeModal()">&times;</button>
@@ -738,6 +738,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <script>
         let results = []; // will be filled from PHP
+        let getActiveType = localStorage.getItem('sort') || 'mtime';
         let essentialTokens = [
             'base64_decode',
             'str_rot13',
@@ -769,6 +770,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             '$pass',
             '$SISTEMIT_COM_ENC',
         ];
+
+        const sortByTokensBtn = document.querySelector('button[onclick="sortResults(\'tokens\')"]');
+        const sortByTimeBtn = document.querySelector('button[onclick="sortResults(\'mtime\')"]');
+
+        setActiveBtn(getActiveType);
+        
+        function setActiveBtn(type) {
+            if (type === 'tokens') {
+                localStorage.setItem('sort', 'tokens');
+                sortByTimeBtn.classList.remove('ring-2', 'ring-accent');
+                sortByTokensBtn.classList.add('ring-2', 'ring-accent');
+            } else if (type === 'mtime') {
+                localStorage.setItem('sort', 'mtime');
+                sortByTokensBtn.classList.remove('ring-2', 'ring-accent');
+                sortByTimeBtn.classList.add('ring-2', 'ring-accent');
+                
+            }
+        }
 
         function renderTable(list) {
             let html = "";
@@ -826,6 +845,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else if (mode === "mtime") {
                 results.sort((a, b) => b.mtime - a.mtime);
             }
+
+            setActiveBtn(mode);
             renderTable(results);
         }
 
@@ -871,6 +892,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (data.success) {
                         results = data.results;
                         renderTable(results);
+                        sortResults(getActiveType);
                         document.getElementById("resultsSection").classList.remove("hidden");
                     } else {
                         results = [];
@@ -902,17 +924,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             const cmpColored = (Array.isArray(r.cmp) ? r.cmp : [r.cmp])
                 .map(token => {
                     if (essentialTokens.includes(token)) {
-                        return `<span style="color:#ff8a03ff;">${token}</span>`;
+                        return `<span class='text-[#ff8a03ff]'>${token}</span>`;
                     }
                     return token;
                 }).join(", ");
 
             const content = `
-                <div>
-                    <div><strong>Date:</strong> ${r.date}</div>
-                    <div><strong>Path:</strong> ${r.file}${extra}</div>
-                    <div><strong>Tokens:</strong> ${cmpColored}</div>
-                    <div><strong>md5sum:</strong> ${r.sum}</div>
+                <div class="space-y-4">
+                    <div class="bg-darker rounded-lg p-4">
+                        <h3 class="text-lg font-semibold mb-3 text-accent">File Information</h3>
+                        <div class="space-y-2">
+                            <div class="flex items-start">
+                                <span class="font-medium text-soft w-20">Date:</span>
+                                <span class="text-soft ml-2">${r.date}</span>
+                            </div>
+                            <div class="flex items-start">
+                                <span class="font-medium text-soft w-20">Path:</span>
+                                <span class="text-soft ml-2 break-all">${r.file}${extra}</span>
+                            </div>
+                            <div class="flex items-start">
+                                <span class="font-medium text-soft w-20">Size:</span>
+                                <span class="text-soft ml-2">${r.filesize ? r.filesize.toFixed(1) + ' Bytes' : 'N/A'}</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-darker rounded-lg p-4">
+                        <h3 class="text-lg font-semibold mb-3 text-accent">Security Analysis</h3>
+                        <div class="space-y-2">
+                            <div class="flex items-start">
+                                <span class="font-medium text-soft w-20">md5sum:</span>
+                                <a href='https://www.virustotal.com/gui/file/${r.sum}' class="text-[#ff8a03ff] hover:underline ml-2 font-mono text-sm break-all" target='_blank'>${r.sum}</a>
+                            </div>
+                            <div class="flex items-start">
+                                <span class="font-medium text-soft w-20">Tokens:</span>
+                                <div class="ml-2 flex-1">
+                                    ${r.cmp.length > 0 ? 
+                                        `<div class="flex flex-wrap gap-1">${cmpColored}</div>` : 
+                                        '<span class="text-gray-500 italic">No suspicious tokens found</span>'
+                                    }
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    ${r.cmp.length > 0 ? `
+                    <div class="bg-darker rounded-lg p-4">
+                        <h3 class="text-lg font-semibold mb-3 text-accent">Risk Assessment</h3>
+                        <div class="space-y-2">
+                            <div class="flex items-center">
+                                <span class="font-medium text-soft w-20">Risk Level:</span>
+                                <span class="ml-2 px-2 py-1 rounded text-sm font-medium ${r.cmp.includes('BLACKLIST') ? 'bg-red-900 text-red-200' : 
+                                    r.cmp.includes('NOT_READABLE') ? 'bg-red-900 text-red-200' : 
+                                    r.cmp.includes('HTACCESS') ? 'bg-blue-900 text-blue-200' : 
+                                    'bg-yellow-900 text-yellow-200'}">
+                                    ${r.cmp.includes('BLACKLIST') ? 'HIGH - BLACKLISTED' : 
+                                      r.cmp.includes('NOT_READABLE') ? 'HIGH - NOT READABLE' : 
+                                      r.cmp.includes('HTACCESS') ? 'MEDIUM - HTACCESS' : 
+                                      'MEDIUM - SUSPICIOUS TOKENS'}
+                                </span>
+                            </div>
+                            <div class="flex items-start">
+                                <span class="font-medium text-soft w-20">Count:</span>
+                                <span class="text-soft ml-2">${r.cmp.length} suspicious token${r.cmp.length !== 1 ? 's' : ''}</span>
+                            </div>
+                        </div>
+                    </div>
+                    ` : ''}
                 </div>
             `;
             document.getElementById('modalContent').innerHTML = content;
