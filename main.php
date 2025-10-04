@@ -738,6 +738,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     <script>
         let results = []; // will be filled from PHP
+        let getActiveType = localStorage.getItem('sort') || 'mtime';
         let essentialTokens = [
             'base64_decode',
             'str_rot13',
@@ -769,6 +770,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             '$pass',
             '$SISTEMIT_COM_ENC',
         ];
+
+        const sortByTokensBtn = document.querySelector('button[onclick="sortResults(\'tokens\')"]');
+        const sortByTimeBtn = document.querySelector('button[onclick="sortResults(\'mtime\')"]');
+
+        setActiveBtn(getActiveType);
+        
+        function setActiveBtn(type) {
+            if (type === 'tokens') {
+                localStorage.setItem('sort', 'tokens');
+                sortByTimeBtn.classList.remove('ring-2', 'ring-accent');
+                sortByTokensBtn.classList.add('ring-2', 'ring-accent');
+            } else if (type === 'mtime') {
+                localStorage.setItem('sort', 'mtime');
+                sortByTokensBtn.classList.remove('ring-2', 'ring-accent');
+                sortByTimeBtn.classList.add('ring-2', 'ring-accent');
+                
+            }
+        }
 
         function renderTable(list) {
             let html = "";
@@ -826,6 +845,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } else if (mode === "mtime") {
                 results.sort((a, b) => b.mtime - a.mtime);
             }
+
+            setActiveBtn(mode);
             renderTable(results);
         }
 
@@ -871,6 +892,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if (data.success) {
                         results = data.results;
                         renderTable(results);
+                        sortResults(getActiveType);
                         document.getElementById("resultsSection").classList.remove("hidden");
                     } else {
                         results = [];
