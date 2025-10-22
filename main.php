@@ -19,13 +19,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 $minute = 60;
-$limit = (60 * $minute); // 60 (seconds) = 1 Minutes
-ini_set('memory_limit', '-1');
-ini_set('max_execution_time', $limit);
+$limit = 60 * $minute; // 60 (seconds) = 1 Minutes
+ini_set("memory_limit", "-1");
+ini_set("max_execution_time", $limit);
 set_time_limit($limit);
-ini_set('display_errors', 1); // debug
-define('_WHITELIST_', true);
-define('_BLACKLIST_', true);
+ini_set("display_errors", 1); // debug
+define("_WHITELIST_", true);
+define("_BLACKLIST_", true);
 
 /**
  * Check if function is available
@@ -35,8 +35,8 @@ define('_BLACKLIST_', true);
  */
 function isWorking($callback)
 {
-    $securityDisabled = ini_get('disable_functions');
-    $securityDisabled = explode(',', $securityDisabled);
+    $securityDisabled = ini_get("disable_functions");
+    $securityDisabled = explode(",", $securityDisabled);
 
     if (in_array($callback, $securityDisabled)) {
         return false;
@@ -47,7 +47,7 @@ function isWorking($callback)
     return true;
 }
 
-if (isWorking('curl_exec')) {
+if (isWorking("curl_exec")) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -87,23 +87,31 @@ function recursiveScan($directory, &$entries, &$visited)
     // Iterate over the directory contents
     while (($entry = readdir($handle)) !== false) {
         // Skip the current directory and parent directory
-        if ($entry === '.' || $entry === '..') {
+        if ($entry === "." || $entry === "..") {
             continue;
         }
 
         // Get Nix-style full path
-        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $entry);
+        $entryPath = str_replace(
+            DIRECTORY_SEPARATOR,
+            "/",
+            $realPath . "/" . $entry,
+        );
 
         // Check if it's a symlink
         if (is_link($entryPath)) {
-            $entries['symlink'][] = $entryPath;
+            $entries["symlink"][] = $entryPath;
 
             // Get the actual symlink target
             $symlinkTarget = readlink($entryPath);
             $resolvedTarget = realpath($symlinkTarget);
 
             // Follow the symlink only if it's a directory and hasn't been visited
-            if ($resolvedTarget && is_dir($resolvedTarget) && !isset($visited[$resolvedTarget])) {
+            if (
+                $resolvedTarget &&
+                is_dir($resolvedTarget) &&
+                !isset($visited[$resolvedTarget])
+            ) {
                 recursiveScan($resolvedTarget, $entries, $visited);
             }
             continue; // Continue processing other files
@@ -117,10 +125,10 @@ function recursiveScan($directory, &$entries, &$visited)
             recursiveScan($entryPath, $entries, $visited);
         } elseif (is_readable($entryPath)) {
             // Add readable files
-            $entries['file_readable'][] = $entryPath;
+            $entries["file_readable"][] = $entryPath;
         } else {
             // Add non-readable files
-            $entries['file_not_readable'][] = $entryPath;
+            $entries["file_not_readable"][] = $entryPath;
         }
     }
 
@@ -141,7 +149,7 @@ function recursiveScan($directory, &$entries, &$visited)
  */
 function sortByLastModified($files)
 {
-    @array_multisort(array_map('filemtime', $files), SORT_DESC, $files);
+    @array_multisort(array_map("filemtime", $files), SORT_DESC, $files);
     return $files;
 }
 /**
@@ -155,25 +163,25 @@ function sortByLastModified($files)
 function getSortedByTime($path)
 {
     // Get the writable and non-writable files from the directory
-    $entries = array();
-    $visited = array();
+    $entries = [];
+    $visited = [];
     $result = recursiveScan($path, $entries, $visited);
-    $readable = $result['file_readable'];
+    $readable = $result["file_readable"];
     //$notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
-    if (isset($result['file_not_readable'])) {
-        $notReadable = $result['file_not_readable'];
+    if (isset($result["file_not_readable"])) {
+        $notReadable = $result["file_not_readable"];
     } else {
-        $notReadable = array();
+        $notReadable = [];
     }
 
     // Sort the writable files by their last modified time
     $readable = sortByLastModified($readable);
 
     // Return the sorted files
-    return array(
-        'file_readable' => $readable,
-        'file_not_readable' => $notReadable,
-    );
+    return [
+        "file_readable" => $readable,
+        "file_not_readable" => $notReadable,
+    ];
 }
 
 /**
@@ -186,12 +194,11 @@ function getSortedByTime($path)
 function getSortedByPattern($path, $patterns)
 {
     $result = getSortedByTime($path);
-    $fileReadable = $result['file_readable'];
-    $fileNotReadable = $result['file_not_readable'];
+    $fileReadable = $result["file_readable"];
+    $fileNotReadable = $result["file_not_readable"];
 
-    $sortedReadableFiles = array();
-    $sortedNotReadableFiles = array();
-
+    $sortedReadableFiles = [];
+    $sortedNotReadableFiles = [];
 
     foreach ($fileReadable as $entry) {
         $extension = pathinfo($entry, PATHINFO_EXTENSION);
@@ -219,10 +226,10 @@ function getSortedByPattern($path, $patterns)
         }
     }
 
-    return array(
-        'file_readable' => $sortedReadableFiles,
-        'file_not_readable' => $sortedNotReadableFiles,
-    );
+    return [
+        "file_readable" => $sortedReadableFiles,
+        "file_not_readable" => $sortedNotReadableFiles,
+    ];
 }
 /**
  * Get lowercase Array of tokens in a file
@@ -234,14 +241,18 @@ function getFileTokens($filename)
 {
     // Replace short PHP tags with PHP tags
     $fileContent = file_get_contents($filename);
-    $fileContent = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $fileContent);
-    $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
+    $fileContent = preg_replace(
+        '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/',
+        "",
+        $fileContent,
+    );
+    $fileContent = preg_replace("/<\?([^p=\w])/m", "<?php ", $fileContent);
 
     // Get the file tokens
     $tokens = @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
 
     // Create an output array
-    $output = array();
+    $output = [];
 
     // Iterate over the tokens and add the token types to the output array
 
@@ -256,7 +267,9 @@ function getFileTokens($filename)
     }
 
     // Remove any duplicate or empty tokens from the output array
-    $output = array_values(array_unique(array_filter(array_map("trim", $output))));
+    $output = array_values(
+        array_unique(array_filter(array_map("trim", $output))),
+    );
 
     // Return the output array
     return $output;
@@ -270,7 +283,7 @@ function getFileTokens($filename)
  */
 function inStringArray($needle, $haystack)
 {
-    $matches = array();
+    $matches = [];
     foreach ($haystack as $key => $value) {
         if (is_string($value)) {
             // Check if string is found using strcasecmp
@@ -283,7 +296,7 @@ function inStringArray($needle, $haystack)
             if (!empty($subMatches)) {
                 // Prepend current key to sub-matches
                 foreach ($subMatches as $subMatch) {
-                    $matches[] = $key . '[' . $subMatch . ']';
+                    $matches[] = $key . "[" . $subMatch . "]";
                 }
             }
         }
@@ -299,7 +312,7 @@ function inStringArray($needle, $haystack)
  */
 function compareTokens($tokenNeedles, $tokenHaystack)
 {
-    $output = array();
+    $output = [];
     foreach ($tokenNeedles as $tokenNeedle) {
         if (inStringArray($tokenNeedle, $tokenHaystack)) {
             $output[] = $tokenNeedle;
@@ -318,29 +331,32 @@ function urlFileArray($url)
     $content = false;
 
     // 1. Try cURL if a global handle exists
-    if (isset($GLOBALS['ch'])) {
-        curl_setopt($GLOBALS['ch'], CURLOPT_URL, $url);
-        curl_setopt($GLOBALS['ch'], CURLOPT_RETURNTRANSFER, true);
+    if (isset($GLOBALS["ch"])) {
+        curl_setopt($GLOBALS["ch"], CURLOPT_URL, $url);
+        curl_setopt($GLOBALS["ch"], CURLOPT_RETURNTRANSFER, true);
 
-        $content = curl_exec($GLOBALS['ch']);
+        $content = curl_exec($GLOBALS["ch"]);
 
         if ($content === false) {
-            $error_msg = curl_error($GLOBALS['ch']);
-            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
+            $error_msg = curl_error($GLOBALS["ch"]);
+            trigger_error(
+                "cURL error fetching URL: $error_msg",
+                E_USER_WARNING,
+            );
         } else {
             return explode("\n", $content);
         }
     }
 
     // 2. Try file_get_contents
-    if (function_exists('file_get_contents')) {
+    if (function_exists("file_get_contents")) {
         $context = stream_context_create([
-            'http' => [
-                'ignore_errors' => true, // Handle potential errors gracefully
+            "http" => [
+                "ignore_errors" => true, // Handle potential errors gracefully
             ],
-            'ssl' => [
-                'verify_peer' => false,
-                'verify_peer_name' => false,
+            "ssl" => [
+                "verify_peer" => false,
+                "verify_peer_name" => false,
             ],
         ]);
 
@@ -349,12 +365,15 @@ function urlFileArray($url)
         if ($content !== false) {
             return explode("\n", $content);
         } else {
-            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
+            trigger_error(
+                "Failed to fetch URL using file_get_contents",
+                E_USER_WARNING,
+            );
         }
     }
 
     // 3. Try file()
-    if (function_exists('file')) {
+    if (function_exists("file")) {
         $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 
         if ($content !== false) {
@@ -365,8 +384,11 @@ function urlFileArray($url)
     }
 
     // 4. No suitable method found
-    trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
-    return array();
+    trigger_error(
+        "No suitable methods found to fetch URL content",
+        E_USER_WARNING,
+    );
+    return [];
 }
 
 /**
@@ -376,16 +398,20 @@ function urlFileArray($url)
  * @param string $filePath
  * @return array ['ok' => bool, 'errors' => array<string>]
  */
-function safe_unlink(string $filePath): array {
+function safe_unlink(string $filePath): array
+{
     $errors = [];
 
-    $handler = function($errno, $errstr, $errfile, $errline) use (&$errors, $filePath) {
+    $handler = function ($errno, $errstr, $errfile, $errline) use (
+        &$errors,
+        $filePath,
+    ) {
         $errors[] = trim($errstr);
         return true;
     };
 
     $prevHandler = set_error_handler($handler);
-    ob_start(); 
+    ob_start();
     $ok = @unlink($filePath);
     ob_end_clean();
     if ($prevHandler !== null) {
@@ -394,10 +420,11 @@ function safe_unlink(string $filePath): array {
         restore_error_handler();
     }
 
-    return ['ok' => $ok, 'errors' => $errors];
+    return ["ok" => $ok, "errors" => $errors];
 }
 
-function output($array) {
+function output($array)
+{
     header("Content-Type: text/plain");
     header("Cache-Control: no-cache");
     header("Pragma: no-cache");
@@ -405,9 +432,7 @@ function output($array) {
     die();
 }
 
-$APIKey = array(
-    '',
-);
+$APIKey = [""];
 
 // $ext = array(
 //     'php',
@@ -425,214 +450,217 @@ $APIKey = array(
 //     'inc',
 // );
 
-$pattern = array(
-    'ph.+',
-    'sh.+',
-    'inc',
-    'htaccess'
-);
+$pattern = ["ph.+", "sh.+", "inc", "htaccess"];
 
-$tokenNeedles = array(
+$tokenNeedles = [
     // Obfuscation
-    'base64_decode',
-    'rawurldecode',
-    'urldecode',
-    'gzinflate',
-    'gzuncompress',
-    'str_rot13',
-    'convert_uu',
-    'htmlspecialchars_decode',
-    'bin2hex',
-    'hex2bin',
-    'hexdec',
-    'chr',
-    'strrev',
-    'goto',
-    'implode',
-    'strtr',
-    'extract',
-    'parse_str', //works like extract if only one argument is given.
-    'substr',
-    'mb_substr',
-    'str_replace',
-    'substr_replace',
-    'preg_replace', // able to do eval on match
-    'exif_read_data',
-    'readgzfile',
+    "base64_decode",
+    "rawurldecode",
+    "urldecode",
+    "gzinflate",
+    "gzuncompress",
+    "str_rot13",
+    "convert_uu",
+    "htmlspecialchars_decode",
+    "bin2hex",
+    "hex2bin",
+    "hexdec",
+    "chr",
+    "strrev",
+    "goto",
+    "implode",
+    "strtr",
+    "extract",
+    "parse_str", //works like extract if only one argument is given.
+    "substr",
+    "mb_substr",
+    "str_replace",
+    "substr_replace",
+    "preg_replace", // able to do eval on match
+    "exif_read_data",
+    "readgzfile",
 
     // Shell / Process
-    'eval',
-    'exec',
-    'shell_exec',
-    'system',
-    'passthru',
-    'pcntl_fork',
-    'fsockopen',
-    'proc_open',
-    'popen ',
-    'assert', // identical to eval
-    'posix_kill',
-    'posix_setpgid',
-    'posix_setsid',
-    'posix_setuid',
-    'proc_nice',
-    'proc_close',
-    'proc_terminate',
-    'apache_child_terminate',
+    "eval",
+    "exec",
+    "shell_exec",
+    "system",
+    "passthru",
+    "pcntl_fork",
+    "fsockopen",
+    "proc_open",
+    "popen ",
+    "assert", // identical to eval
+    "posix_kill",
+    "posix_setpgid",
+    "posix_setsid",
+    "posix_setuid",
+    "proc_nice",
+    "proc_close",
+    "proc_terminate",
+    "apache_child_terminate",
 
     // Server Information
-    'posix_getuid',
-    'posix_geteuid',
-    'posix_getegid',
-    'posix_getpwuid',
-    'posix_getgrgid',
-    'posix_mkfifo',
-    'posix_getlogin',
-    'posix_ttyname',
-    'getenv',
-    'proc_get_status',
-    'get_cfg_var',
-    'disk_free_space',
-    'disk_total_space',
-    'diskfreespace',
-    'getlastmo',
-    'getmyinode',
-    'getmypid',
-    'getmyuid',
-    'getmygid',
-    'fileowner',
-    'filegroup',
-    'get_current_user',
-    'pathinfo',
-    'getcwd',
-    'sys_get_temp_dir',
-    'basename',
-    'phpinfo',
-    'php_uname',
+    "posix_getuid",
+    "posix_geteuid",
+    "posix_getegid",
+    "posix_getpwuid",
+    "posix_getgrgid",
+    "posix_mkfifo",
+    "posix_getlogin",
+    "posix_ttyname",
+    "getenv",
+    "proc_get_status",
+    "get_cfg_var",
+    "disk_free_space",
+    "disk_total_space",
+    "diskfreespace",
+    "getlastmo",
+    "getmyinode",
+    "getmypid",
+    "getmyuid",
+    "getmygid",
+    "fileowner",
+    "filegroup",
+    "get_current_user",
+    "pathinfo",
+    "getcwd",
+    "sys_get_temp_dir",
+    "basename",
+    "phpinfo",
+    "php_uname",
 
     // Database
-    'mysql_connect',
-    'mysqli_connect',
-    'mysqli_query',
-    'mysql_query',
+    "mysql_connect",
+    "mysqli_connect",
+    "mysqli_query",
+    "mysql_query",
 
     // I/O
-    'fopen',
-    'fsockopen',
-    'file_put_contents',
-    'file_get_contents',
-    'url_get_contents',
-    'stream_get_meta_data',
-    'move_uploaded_file',
+    "fopen",
+    "fsockopen",
+    "file_put_contents",
+    "file_get_contents",
+    "url_get_contents",
+    "stream_get_meta_data",
+    "move_uploaded_file",
     '$_files',
-    'copy',
-    'include',
-    'include_once',
-    'require',
-    'require_once',
-    '__file__',
+    "copy",
+    "include",
+    "include_once",
+    "require",
+    "require_once",
+    "__file__",
 
     // Miscellaneous
-    'mail',
-    'putenv',
-    'curl_init',
-    'tmpfile',
-    'allow_url_fopen',
-    'ini_set',
-    'set_time_limit',
-    'session_start',
-    'symlink',
-    '__halt_compiler',
-    '__compiler_halt_offset__',
-    'error_reporting',
-    'create_function',
-    'get_magic_quotes_gpc',
+    "mail",
+    "putenv",
+    "curl_init",
+    "tmpfile",
+    "allow_url_fopen",
+    "ini_set",
+    "set_time_limit",
+    "session_start",
+    "symlink",
+    "__halt_compiler",
+    "__compiler_halt_offset__",
+    "error_reporting",
+    "create_function",
+    "get_magic_quotes_gpc",
     '$auth_pass',
     '$password',
     '$pass',
     '$SISTEMIT_COM_ENC',
-);
+];
 
-$whitelistMD5Sums = array();
-$blacklistMD5Sums = array();
+$whitelistMD5Sums = [];
+$blacklistMD5Sums = [];
 if (_WHITELIST_) {
-    $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
+    $whitelistMD5Sums = urlFileArray(
+        "https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt",
+    );
 }
 if (_BLACKLIST_) {
-    $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+    $blacklistMD5Sums = urlFileArray(
+        "https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt",
+    );
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $request = json_decode(file_get_contents('php://input'), true);
-    $path = $request['dir'];
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $request = json_decode(file_get_contents("php://input"), true);
+    $path = $request["dir"];
 
     if (!is_dir($path)) {
         output([
-            'success'=> false,
-            'message' => "There are no files in <span class='underline italic'>{$path}</span>."
+            "success" => false,
+            "message" => "There are no files in <span class='underline italic'>{$path}</span>.",
         ]);
     }
 
     $result = getSortedByPattern($path, $pattern);
-    $fileReadable = sortByLastModified($result['file_readable']);
-    $fileNotReadable = $result['file_not_readable'];
-    $duplicateFiles = array();
-    $results = array();
+    $fileReadable = sortByLastModified($result["file_readable"]);
+    $fileNotReadable = $result["file_not_readable"];
+    $duplicateFiles = [];
+    $results = [];
 
     foreach ($fileReadable as $filePath) {
         $fileSum = md5_file($filePath);
-        if (in_array($fileSum, $whitelistMD5Sums)) continue;
+        if (in_array($fileSum, $whitelistMD5Sums)) {
+            continue;
+        }
 
         if (in_array($fileSum, $blacklistMD5Sums)) {
             $mtime = filemtime($filePath);
             $date = @date("Y-m-d H:i:s", $mtime);
-            $results[] = array(
-                'file' => $filePath,
-                'sum' => $fileSum,
-                'cmp' => array('BLACKLIST'),
-                'mtime' => $mtime,
-                'date' => $date
-            );
+            $results[] = [
+                "file" => $filePath,
+                "sum" => $fileSum,
+                "cmp" => ["BLACKLIST"],
+                "mtime" => $mtime,
+                "date" => $date,
+            ];
             $deleteResult = safe_unlink($filePath);
-            if (!$deleteResult['ok']) {
-                $results[] = array(
-                    'file' => $filePath,
-                    'sum' => $fileSum,
-                    'cmp' => array('BLACKLIST', $deleteResult['errors']),
-                    'mtime' => $mtime,
-                    'date' => $date
-                );
+            if (!$deleteResult["ok"]) {
+                $results[] = [
+                    "file" => $filePath,
+                    "sum" => $fileSum,
+                    "cmp" => ["BLACKLIST", $deleteResult["errors"]],
+                    "mtime" => $mtime,
+                    "date" => $date,
+                ];
             }
             continue;
         }
 
-        if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
+        if (
+            ($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false
+        ) {
             $mtime = filemtime($filePath);
             $date = @date("Y-m-d H:i:s", $mtime);
-            $results[] = array(
-                'file' => $filePath,
-                'sum' => $fileSum,
-                'cmp' => array("$duplicatePath"),
-                'mtime' => $mtime,
-                'date' => $date
-            );
+            $results[] = [
+                "file" => $filePath,
+                "sum" => $fileSum,
+                "cmp" => ["$duplicatePath"],
+                "mtime" => $mtime,
+                "date" => $date,
+            ];
             continue;
         }
 
         $duplicateFiles[$filePath] = $fileSum;
 
-        if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
+        if (pathinfo($filePath, PATHINFO_EXTENSION) == "htaccess") {
             $mtime = filemtime($filePath);
             $date = @date("Y-m-d H:i:s", $mtime);
             $filesize = filesize($filePath);
-            $results[] = array(
-                'file' => $filePath,
-                'sum' => $fileSum,
-                'cmp' => array('HTACCESS'),
-                'mtime' => $mtime,
-                'date' => $date,
-                'filesize' => $filesize
-            );
+            $results[] = [
+                "file" => $filePath,
+                "sum" => $fileSum,
+                "cmp" => ["HTACCESS"],
+                "mtime" => $mtime,
+                "date" => $date,
+                "filesize" => $filesize,
+            ];
             continue;
         }
 
@@ -640,33 +668,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cmp = compareTokens($tokens, $tokenNeedles);
         $mtime = filemtime($filePath);
         $date = @date("Y-m-d H:i:s", $mtime);
-        $results[] = array(
-            'file' => $filePath,
-            'sum' => $fileSum,
-            'cmp' => $cmp,
-            'mtime' => $mtime,
-            'date' => $date
-        );
+        $results[] = [
+            "file" => $filePath,
+            "sum" => $fileSum,
+            "cmp" => $cmp,
+            "mtime" => $mtime,
+            "date" => $date,
+        ];
     }
     foreach ($fileNotReadable as $filePath) {
         if (!($mtime = @filemtime($filePath))) {
             $mtime = 0;
         }
         $date = @date("Y-m-d H:i:s", $mtime);
-        $results[] = array(
-            'file'  => $filePath,
-            'sum'   => 'N/A',
-            'cmp'   => array('NOT_READABLE'),
-            'mtime' => $mtime,
-            'date' => $date
-        );
+        $results[] = [
+            "file" => $filePath,
+            "sum" => "N/A",
+            "cmp" => ["NOT_READABLE"],
+            "mtime" => $mtime,
+            "date" => $date,
+        ];
     }
     output([
-        'success' => true,
-        'results'=> $results
+        "success" => true,
+        "results" => $results,
     ]);
 }
-
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -682,7 +709,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             --color-darker: #363535;
             --color-accent: #ff6666;
         }
-        
+
         body {
             font-family: 'Ubuntu Mono', monospace;
             background-color: var(--color-base);
@@ -728,7 +755,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         </div>
         <input type="text" id="dir" class="w-full bg-darker rounded-lg p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent" value="<?= getcwd() ?>">
         <button type="button" class="w-full bg-accent mt-3 rounded-lg font-bold p-3 w-full outline-none focus:outline-none focus:ring-2 focus:ring-accent hover:cursor-pointer" onclick="submitForm()">SEARCH</button>
-        
+
         <div id="alert" class="hidden my-3"></div>
 
         <!-- Progress Bar -->
@@ -760,7 +787,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 </div>
                 <div id="result" class="text-[14px]"></div>
             </div>
-            
+
             <!-- Detail Modal -->
             <div id="detailModal" class="hidden fixed inset-0 bg-black/60 z-50 items-center justify-center">
                 <div class="bg-dark rounded-xl p-5 w-[90vw] max-w-[900px] max-h-[80vh] overflow-auto">
@@ -813,7 +840,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         const sortByTimeBtn = document.querySelector('button[onclick="sortResults(\'mtime\')"]');
 
         setActiveBtn(getActiveType);
-        
+
         function setActiveBtn(type) {
             if (type === 'tokens') {
                 localStorage.setItem('sort', 'tokens');
@@ -823,7 +850,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 localStorage.setItem('sort', 'mtime');
                 sortByTokensBtn.classList.remove('ring-2', 'ring-accent');
                 sortByTimeBtn.classList.add('ring-2', 'ring-accent');
-                
+
             }
         }
 
@@ -901,12 +928,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         function submitForm() {
             let dir = document.getElementById("dir").value;
-            
+
             // Show progress bar and hide other sections
             document.getElementById("progressSection").classList.remove("hidden");
             document.getElementById("resultsSection").classList.add("hidden");
             document.getElementById("alert").classList.add("hidden");
-            
+
             // Start progress animation
             let progress = 0;
             const progressInterval = setInterval(() => {
@@ -914,7 +941,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (progress > 90) progress = 90;
                 updateProgress(progress);
             }, 200);
-            
+
             fetch("", {
                 method: "POST",
                 body: JSON.stringify({ dir: dir })
@@ -922,11 +949,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Complete progress
                 clearInterval(progressInterval);
                 updateProgress(100);
-                
+
                 // Hide progress after a short delay
                 setTimeout(() => {
                     document.getElementById("progressSection").classList.add("hidden");
-                    
+
                     if (data.success) {
                         results = data.results;
                         renderTable(results);
@@ -948,12 +975,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 alert.innerHTML = "Error: " + error.message;
             });
         }
-        
+
         function updateProgress(percent) {
             document.getElementById("progressBar").style.width = percent + "%";
             document.getElementById("progressText").textContent = Math.round(percent) + "%";
         }
-        
+
         function showModal(index) {
             const r = results[index];
             if (!r) return;
@@ -986,7 +1013,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </div>
                         </div>
                     </div>
-                    
+
                     <div class="bg-darker rounded-lg p-4">
                         <h3 class="text-lg font-semibold mb-3 text-accent">Security Analysis</h3>
                         <div class="space-y-2">
@@ -997,28 +1024,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             <div class="flex items-start">
                                 <span class="font-medium text-soft w-20">Tokens:</span>
                                 <div class="ml-2 flex-1">
-                                    ${r.cmp.length > 0 ? 
-                                        `<div class="flex flex-wrap gap-1">${cmpColored}</div>` : 
+                                    ${r.cmp.length > 0 ?
+                                        `<div class="flex flex-wrap gap-1">${cmpColored}</div>` :
                                         '<span class="text-gray-500 italic">No suspicious tokens found</span>'
                                     }
                                 </div>
                             </div>
                         </div>
                     </div>
-                    
+
                     ${r.cmp.length > 0 ? `
                     <div class="bg-darker rounded-lg p-4">
                         <h3 class="text-lg font-semibold mb-3 text-accent">Risk Assessment</h3>
                         <div class="space-y-2">
                             <div class="flex items-center">
                                 <span class="font-medium text-soft w-20">Risk Level:</span>
-                                <span class="ml-2 px-2 py-1 rounded text-sm font-medium ${r.cmp.includes('BLACKLIST') ? 'bg-red-900 text-red-200' : 
-                                    r.cmp.includes('NOT_READABLE') ? 'bg-red-900 text-red-200' : 
-                                    r.cmp.includes('HTACCESS') ? 'bg-blue-900 text-blue-200' : 
+                                <span class="ml-2 px-2 py-1 rounded text-sm font-medium ${r.cmp.includes('BLACKLIST') ? 'bg-red-900 text-red-200' :
+                                    r.cmp.includes('NOT_READABLE') ? 'bg-red-900 text-red-200' :
+                                    r.cmp.includes('HTACCESS') ? 'bg-blue-900 text-blue-200' :
                                     'bg-yellow-900 text-yellow-200'}">
-                                    ${r.cmp.includes('BLACKLIST') ? 'HIGH - BLACKLISTED' : 
-                                      r.cmp.includes('NOT_READABLE') ? 'HIGH - NOT READABLE' : 
-                                      r.cmp.includes('HTACCESS') ? 'MEDIUM - HTACCESS' : 
+                                    ${r.cmp.includes('BLACKLIST') ? 'HIGH - BLACKLISTED' :
+                                      r.cmp.includes('NOT_READABLE') ? 'HIGH - NOT READABLE' :
+                                      r.cmp.includes('HTACCESS') ? 'MEDIUM - HTACCESS' :
                                       'MEDIUM - SUSPICIOUS TOKENS'}
                                 </span>
                             </div>
@@ -1054,7 +1081,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             modal.classList.add('hidden');
             modal.classList.remove('flex');
         }
-    
+
 
     </script>
 </body>
