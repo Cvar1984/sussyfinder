@@ -369,10 +369,6 @@ function urlFileArray($url)
     return array();
 }
 
-$APIKey = array(
-    '',
-);
-
 // $ext = array(
 //     'php',
 //     'phps',
