@@ -53,6 +53,13 @@ if (isWorking('curl_exec')) {
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt_array($ch, array(
+    CURLOPT_HTTPHEADER => array(
+        'Cache-Control: no-cache, no-store, must-revalidate',
+        'Pragma: no-cache',
+        'Expires: 0'
+    )
+));
 }
 /**
  * Recursive listing files
@@ -334,15 +341,20 @@ function urlFileArray($url)
 
     // 2. Try file_get_contents
     if (function_exists('file_get_contents')) {
-        $context = stream_context_create([
-            'http' => [
+        $context = stream_context_create(array(
+            'http' => array(
                 'ignore_errors' => true, // Handle potential errors gracefully
-            ],
-            'ssl' => [
+                'header'  => implode("\r\n", array(
+            'Cache-Control: no-cache, no-store, must-revalidate',
+            'Pragma: no-cache',
+            'Expires: 0'
+                )),
+            ),
+            'ssl' => array(
                 'verify_peer' => false,
                 'verify_peer_name' => false,
-            ],
-        ]);
+            ),
+        ));
 
         $content = @file_get_contents($url, false, $context);
 
