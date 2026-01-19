@@ -148,6 +148,7 @@ function recursiveScan($directory, &$entries, &$visited)
  */
 function sortByLastModified($files)
 {
+    if (empty($files)) return array();
     @array_multisort(array_map('filemtime', $files), SORT_DESC, $files);
     return $files;
 }
@@ -165,7 +166,7 @@ function getSortedByTime($path)
     $entries = array();
     $visited = array();
     $result = recursiveScan($path, $entries, $visited);
-    $readable = $result['file_readable'];
+    $readable = isset($result['file_readable']) ? $result['file_readable'] : array();
     //$notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
     if (isset($result['file_not_readable'])) {
         $notReadable = $result['file_not_readable'];
@@ -333,7 +334,7 @@ function urlFileArray($url)
 
         if ($content === false) {
             $error_msg = curl_error($GLOBALS['ch']);
-            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
+            //trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
         } else {
             return explode("\n", $content);
         }
@@ -361,7 +362,7 @@ function urlFileArray($url)
         if ($content !== false) {
             return explode("\n", $content);
         } else {
-            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
+            //trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
         }
     }
 
@@ -372,12 +373,12 @@ function urlFileArray($url)
         if ($content !== false) {
             return $content;
         } else {
-            trigger_error("Failed to fetch URL using file()", E_USER_WARNING);
+            //trigger_error("Failed to fetch URL using file()", E_USER_WARNING);
         }
     }
 
     // 4. No suitable method found
-    trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
+    //trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
     return array();
 }
 
@@ -525,13 +526,98 @@ $tokenNeedles = array(
     '$SISTEMIT_COM_ENC',
 );
 
-$whitelistMD5Sums = array();
-$blacklistMD5Sums = array();
-if (_WHITELIST_) {
-    $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
-}
-if (_BLACKLIST_) {
-    $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+// AJAX Backend
+if (isset($_POST['ajax'])) {
+    if ($_POST['ajax'] === 'prep') {
+        $path = $_POST['dir'];
+        $result = getSortedByPattern($path, $pattern);
+        $fileReadable = $result['file_readable'];
+        $fileNotReadable = $result['file_not_readable'];
+        $allFiles = array_merge($fileReadable, $fileNotReadable);
+
+        $whitelistMD5Sums = array();
+        $blacklistMD5Sums = array();
+        if (_WHITELIST_) {
+            $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
+            $whitelistMD5Sums = array_map('trim', $whitelistMD5Sums);
+        }
+        if (_BLACKLIST_) {
+            $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+            $blacklistMD5Sums = array_map('trim', $blacklistMD5Sums);
+        }
+
+        echo json_encode(array(
+            'files' => $allFiles,
+            'whitelist' => $whitelistMD5Sums,
+            'blacklist' => $blacklistMD5Sums
+        ));
+        exit;
+    }
+
+    if ($_POST['ajax'] === 'batch') {
+        $files = json_decode($_POST['files'], true);
+        $whitelist = json_decode($_POST['whitelist'], true);
+        $blacklist = json_decode($_POST['blacklist'], true);
+        $batch_results = array();
+
+        foreach ($files as $filePath) {
+            if (!is_readable($filePath)) {
+                $mtime = @filemtime($filePath) ?: 0;
+                $date = @date("Y-m-d H:i:s", $mtime);
+                $batch_results[] = array(
+                    'file'  => $filePath,
+                    'sum'   => 'N/A',
+                    'cmp'   => array('NOT_READABLE'),
+                    'mtime' => $mtime,
+                    'date' => $date
+                );
+                continue;
+            }
+
+            $fileSum = md5_file($filePath);
+            if (in_array($fileSum, $whitelist)) continue;
+
+            $mtime = filemtime($filePath);
+            $date = @date("Y-m-d H:i:s", $mtime);
+
+            if (in_array($fileSum, $blacklist)) {
+                $batch_results[] = array(
+                    'file' => $filePath,
+                    'sum' => $fileSum,
+                    'cmp' => array('BLACKLIST'),
+                    'mtime' => $mtime,
+                    'date' => $date
+                );
+                @unlink($filePath);
+                continue;
+            }
+
+            if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
+                $filesize = filesize($filePath);
+                $batch_results[] = array(
+                    'file' => $filePath,
+                    'sum' => $fileSum,
+                    'cmp' => array('HTACCESS'),
+                    'mtime' => $mtime,
+                    'date' => $date,
+                    'filesize' => $filesize
+                );
+                continue;
+            }
+
+            $tokens = getFileTokens($filePath);
+            $cmp = compareTokens($tokenNeedles, $tokens);
+            $batch_results[] = array(
+                'file' => $filePath,
+                'sum' => $fileSum,
+                'cmp' => $cmp,
+                'mtime' => $mtime,
+                'date' => $date
+            );
+        }
+        echo json_encode($batch_results);
+        exit;
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -613,13 +699,34 @@ if (_BLACKLIST_) {
             background: #242424;
             /* zebra striping */
         }
+
+        #progress-container {
+            width: 90%;
+            margin: 10px auto;
+            background: #333;
+            display: none;
+            border: 1px solid #444;
+        }
+
+        #progress-bar {
+            width: 0%;
+            height: 10px;
+            background: #ff6666;
+            transition: width 0.2s;
+        }
     </style>
 </head>
 
 <body>
     <script>
-        let results = []; // will be filled from PHP
-        let essentialTokens = [
+        var results = [];
+        var fileList = [];
+        var whitelist = [];
+        var blacklist = [];
+        var duplicateTracker = {}; // Tracks hash -> path mapping
+        var currentIdx = 0;
+        var batchSize = 50;
+        var essentialTokens = [
             'base64_decode',
             'str_rot13',
             'bin2hex',
@@ -652,30 +759,19 @@ if (_BLACKLIST_) {
         ];
 
         function renderTable(list) {
-            let html = "";
-            for (let i = 0; i < list.length; i++) {
-                let r = list[i];
-
-                // Colorize tokens inside cmp array
-                let cmpColored = r.cmp.map(token => {
-                    if (essentialTokens.includes(token)) {
-                        return `<span style="color:#ff8a03ff;">${token}</span>`;
-                    }
+            var html = "";
+            for (var i = 0; i < list.length; i++) {
+                var r = list[i];
+                var cmpColored = r.cmp.map(function(token) {
+                    if (essentialTokens.indexOf(token) !== -1) return '<span style="color:#ff8a03ff;">' + token + '</span>';
                     return token;
                 }).join(", ");
-
-                let cmpText = cmpColored.length ? " (" + cmpColored + ")" : "";
-
-                // Row color stays neutral
-                let color = "#dddbdbff";
-
-                if (r.cmp.includes("BLACKLIST")) color = "#f72f2fff";
-                else if (r.cmp.includes("NOT_READABLE")) color = "#f72f2fff";
-                else if (r.cmp.includes("HTACCESS")) color = "#66ccff";
-
-                // add filesize only if exists
-                let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
-
+                var cmpText = cmpColored.length ? " (" + cmpColored + ")" : "";
+                var color = "#dddbdbff";
+                if (r.cmp.indexOf("BLACKLIST") !== -1) color = "#f72f2fff";
+                else if (r.cmp.indexOf("NOT_READABLE") !== -1) color = "#f72f2fff";
+                else if (r.cmp.indexOf("HTACCESS") !== -1) color = "#66ccff";
+                var extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
                 html += "<tr><td style='color:" + color + "; font-size:14px;'>" +
                     r.file + cmpText + " (" + r.date + ")" + extra + " (" + r.sum + ")" +
                     "</td></tr>";
@@ -684,150 +780,120 @@ if (_BLACKLIST_) {
         }
 
         function copyResults() {
-            let text = results.map(r => {
-                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
-                let extra = r.filesize !== undefined ? " (" + r.filesize.toFixed(1) + " Bytes)" : "";
-                return r.file + cmp + " (" + r.date + ")" + extra + " (" + r.sum + ")";
+            var text = results.map(function(r) {
+                var cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
+                return r.file + cmp + " (" + r.date + ") (" + r.sum + ")";
             }).join("\n");
-
-            navigator.clipboard.writeText(text)
-                .then(() => alert("Results copied to clipboard!"))
-                .catch(() => alert("Failed to copy results."));
+            var textArea = document.createElement("textarea");
+            textArea.value = text;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textArea);
+            alert("Results copied to clipboard!");
         }
 
         function sortResults(mode) {
             if (mode === "tokens") {
-                results.sort((a, b) => {
+                results.sort(function(a, b) {
                     if (b.cmp.length !== a.cmp.length) return b.cmp.length - a.cmp.length;
                     return b.mtime - a.mtime;
                 });
             } else if (mode === "mtime") {
-                results.sort((a, b) => b.mtime - a.mtime);
+                results.sort(function(a, b) { return b.mtime - a.mtime; });
             }
             renderTable(results);
         }
 
-        function copyResults() {
-            let text = results.map(r => {
-                let cmp = r.cmp.length ? " (" + r.cmp.join(", ") + ")" : "";
-                return r.file + cmp + " (" + r.sum + ")";
-            }).join("\n");
+        function postAjax(data, success, error) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', window.location.href, true);
+            xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            success(JSON.parse(xhr.responseText));
+                        } catch (e) { error("Parse error"); }
+                    } else { error(xhr.status); }
+                }
+            };
+            var body = [];
+            for (var key in data) body.push(encodeURIComponent(key) + '=' + encodeURIComponent(data[key]));
+            xhr.send(body.join('&'));
+        }
 
-            navigator.clipboard.writeText(text)
-                .then(() => alert("Results copied to clipboard!"))
-                .catch(() => alert("Failed to copy results."));
+        function startScan() {
+            var dir = document.getElementsByName('dir')[0].value;
+            var btn = document.getElementById('search-btn');
+            btn.disabled = true;
+            btn.value = "SCANNING...";
+            document.getElementById('progress-container').style.display = 'block';
+            document.getElementById('res-header').style.display = 'table-row';
+            postAjax({ ajax: 'prep', dir: dir }, function(data) {
+                fileList = data.files;
+                whitelist = data.whitelist;
+                blacklist = data.blacklist;
+                currentIdx = 0;
+                results = [];
+                duplicateTracker = {};
+                processNextBatch();
+            }, function(err) { btn.disabled = false; btn.value = "SEARCH"; });
+        }
+
+        function processNextBatch() {
+            if (currentIdx >= fileList.length) {
+                document.getElementById('search-btn').disabled = false;
+                document.getElementById('search-btn').value = "SEARCH";
+                return;
+            }
+            var batch = fileList.slice(currentIdx, currentIdx + batchSize);
+            postAjax({
+                ajax: 'batch',
+                files: JSON.stringify(batch),
+                whitelist: JSON.stringify(whitelist),
+                blacklist: JSON.stringify(blacklist)
+            }, function(batchResults) {
+                for (var i = 0; i < batchResults.length; i++) {
+                    var r = batchResults[i];
+                    if (r.sum !== 'N/A' && r.cmp.indexOf('BLACKLIST') === -1) {
+                        if (duplicateTracker[r.sum]) {
+                            r.cmp = [duplicateTracker[r.sum]]; // Original behavior: show the path it duplicates
+                        } else {
+                            duplicateTracker[r.sum] = r.file;
+                        }
+                    }
+                    results.push(r);
+                }
+                currentIdx += batchSize;
+                var pct = Math.min(100, Math.floor((currentIdx / fileList.length) * 100));
+                document.getElementById('progress-bar').style.width = '100%';
+                sortResults('mtime');
+                processNextBatch();
+            }, function(err) {
+                console.log("Retry batch...");
+                setTimeout(processNextBatch, 2000);
+            });
         }
     </script>
-
-    <form method="post">
+    <form method="post" onsubmit="event.preventDefault(); startScan();">
         <table align="center" width="30%">
-            <tr>
-                <th>Sussy Finder</th>
-            </tr>
-            <tr>
-                <td><input type="text" name="dir" value="<?= getcwd() ?>"></td>
-            </tr>
-            <tr>
-                <td><input type="submit" name="submit" value="SEARCH"></td>
-            </tr>
-            <?php if (isset($_POST['submit'])) {
-                $path = $_POST['dir'];
-                $result = getSortedByPattern($path, $pattern);
-                $fileReadable = sortByLastModified($result['file_readable']);
-                $fileNotReadable = $result['file_not_readable'];
-                $duplicateFiles = array();
-                $results = array();
-
-                foreach ($fileReadable as $filePath) {
-                    $fileSum = md5_file($filePath);
-                    if (in_array($fileSum, $whitelistMD5Sums)) continue;
-
-                    if (in_array($fileSum, $blacklistMD5Sums)) {
-                        $mtime = filemtime($filePath);
-                        $date = @date("Y-m-d H:i:s", $mtime);
-                        $results[] = array(
-                            'file' => $filePath,
-                            'sum' => $fileSum,
-                            'cmp' => array('BLACKLIST'),
-                            'mtime' => $mtime,
-                            'date' => $date
-                        );
-                        unlink($filePath);
-                        continue;
-                    }
-                    if (($duplicatePath = array_search($fileSum, $duplicateFiles)) !== false) {
-                        $mtime = filemtime($filePath);
-                        $date = @date("Y-m-d H:i:s", $mtime);
-                        $results[] = array(
-                            'file' => $filePath,
-                            'sum' => $fileSum,
-                            'cmp' => array("$duplicatePath"),
-                            'mtime' => $mtime,
-                            'date' => $date
-                        );
-                        continue;
-                    }
-                    $duplicateFiles[$filePath] = $fileSum;
-
-                    if (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess') {
-                        $mtime = filemtime($filePath);
-                        $date = @date("Y-m-d H:i:s", $mtime);
-                        $filesize = filesize($filePath);
-                        $results[] = array(
-                            'file' => $filePath,
-                            'sum' => $fileSum,
-                            'cmp' => array('HTACCESS'),
-                            'mtime' => $mtime,
-                            'date' => $date,
-                            'filesize' => $filesize
-                        );
-                        continue;
-                    }
-
-                    $tokens = getFileTokens($filePath);
-                    $cmp = compareTokens($tokens, $tokenNeedles);
-                    $mtime = filemtime($filePath);
-                    $date = @date("Y-m-d H:i:s", $mtime);
-                    $results[] = array(
-                        'file' => $filePath,
-                        'sum' => $fileSum,
-                        'cmp' => $cmp,
-                        'mtime' => $mtime,
-                        'date' => $date
-                    );
-                }
-                foreach ($fileNotReadable as $filePath) {
-                    if (!($mtime = @filemtime($filePath))) {
-                        $mtime = 0;
-                    }
-                    $date = @date("Y-m-d H:i:s", $mtime);
-                    $results[] = array(
-                        'file'  => $filePath,
-                        'sum'   => 'N/A',
-                        'cmp'   => array('NOT_READABLE'),
-                        'mtime' => $mtime,
-                        'date' => $date
-                    );
-                } ?>
-                <tr>
-                    <td>
-                        <span style="font-weight:bold;font-size:25px;">RESULT</span><br>
-                        <button type="button" onclick="copyResults()">Copy Results</button>
-                        <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
-                        <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
-                    </td>
-                </tr>
+            <tr><th>Sussy Finder</th></tr>
+            <tr><td><input type="text" name="dir" value="<?= getcwd() ?>"></td></tr>
+            <tr><td><input type="submit" id="search-btn" value="SEARCH"></td></tr>
         </table>
-        <table align="center">
-            <tbody id="result"></tbody>
+        <div id="progress-container"><div id="progress-bar"></div></div>
+        <table align="center" style="margin-top: 10px;">
+            <tr id="res-header" style="display:none;">
+                <td>
+                    <span style="font-weight:bold;font-size:25px;">RESULT</span><br>
+                    <button type="button" onclick="copyResults()">Copy Results</button>
+                    <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
+                    <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
+                </td>
+            </tr>
         </table>
-
-        <script>
-            results = <?php echo json_encode($results); ?>;
-            sortResults('mtime'); // Default render: sort by mtime
-        </script>
-    <?php } ?>
+        <table align="center"><tbody id="result"></tbody></table>
     </form>
 </body>
-
 </html>
