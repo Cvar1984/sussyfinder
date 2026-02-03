@@ -106,7 +106,9 @@ function recursiveScan($directory, &$entries, &$visited)
             $entries['symlink'][] = $entryPath;
 
             // Get the actual symlink target
-            $symlinkTarget = readlink($entryPath);
+            if (!($symlinkTarget = @readlink($entryPath))) {
+                continue;
+            }
             $resolvedTarget = realpath($symlinkTarget);
 
             // Follow the symlink only if it's a directory and hasn't been visited
