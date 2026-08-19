@@ -324,7 +324,7 @@ function urlFileArray($url)
     }
 
     // 2. Try file_get_contents
-    if (function_exists('file_get_contents')) {
+    if (isWorking('file_get_contents')) {
         $context = stream_context_create(array(
             'http' => array(
                 'ignore_errors' => true, // Handle potential errors gracefully
@@ -350,7 +350,7 @@ function urlFileArray($url)
     }
 
     // 3. Try file()
-    if (function_exists('file')) {
+    if (isWorking('file')) {
         $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 
         if ($content !== false) {
@@ -374,10 +374,14 @@ function urlFileArray($url)
 function shannonEntropy($data)
 {
     $len = strlen($data);
-    if ($len === 0)
+
+    if ($len === 0) {
         return 0;
+    }
+
     $freq = array_count_values(str_split($data));
     $entropy = 0;
+
     foreach ($freq as $count) {
         $p = $count / $len;
         $entropy -= $p * log($p, 2);
@@ -725,7 +729,12 @@ if (_BLACKLIST_) {
             }
 
             foreach ($fileNotReadable as $filePath) {
-                $mtime = @filemtime($filePath) ?: 0;
+                $mtime = @filemtime($filePath);
+
+                if (!$mtime) {
+                    $mtime = 0;
+                }
+
                 $rawFeatures[] = array(
                     'path' => $filePath,
                     'size' => null,
