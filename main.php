@@ -937,14 +937,50 @@ if (_BLACKLIST_) {
                 document.getElementById('result').innerHTML = html;
             }
 
-            // Copy hash when filename clicked
+            function copyText(text) {
+                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                    return navigator.clipboard.writeText(text);
+                }
+
+                return new Promise((resolve, reject) => {
+                    const textarea = document.createElement('textarea');
+
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.left = '-9999px';
+                    textarea.style.top = '-9999px';
+
+                    document.body.appendChild(textarea);
+
+                    textarea.focus();
+                    textarea.select();
+
+                    try {
+                        const success = document.execCommand('copy');
+
+                        document.body.removeChild(textarea);
+
+                        if (success) {
+                            resolve();
+                        } else {
+                            reject(new Error('Copy failed'));
+                        }
+                    } catch (error) {
+                        document.body.removeChild(textarea);
+                        reject(error);
+                    }
+                });
+            }
+
             function copyHash(hash) {
                 if (hash && hash !== 'N/A') {
-                    navigator.clipboard.writeText(hash).then(() => {
-                        //alert('Hash copied: ' + hash);
-                    }).catch(() => {
-                        alert('Failed to copy hash.');
-                    });
+                    copyText(hash)
+                        .then(() => {
+                            // alert('Hash copied: ' + hash);
+                        })
+                        .catch(() => {
+                            alert('Failed to copy hash.');
+                        });
                 } else {
                     alert('No hash available for this file.');
                 }
@@ -976,7 +1012,9 @@ if (_BLACKLIST_) {
                         return line;
                     })
                     .join('\n');
-                navigator.clipboard.writeText(text).then(() => alert('Results copied!')).catch(() => alert('Failed to copy.'));
+                copyText(text)
+                    .then(() => alert('Results copied!'))
+                    .catch(() => alert('Failed to copy.'));
             }
 
             function sortResults(mode) {
