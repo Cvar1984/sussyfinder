@@ -652,6 +652,198 @@ if (_BLACKLIST_) {
             .token-highlight {
                 color: #ff8a03ff;
             }
+
+            .dashboard-controls {
+                text-align: center;
+                margin: 10px auto 15px;
+            }
+
+            .dashboard-controls button {
+                margin: 0 5px;
+            }
+
+            .dashboard-panel {
+                display: none;
+                width: 95%;
+                margin: 0 auto 20px;
+            }
+
+            .dashboard-panel.visible {
+                display: block;
+            }
+
+            .dashboard-panel h3 {
+                text-align: center;
+                color: #ccc;
+                margin: 8px 0 15px;
+            }
+
+            .insights-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 12px;
+                margin-bottom: 15px;
+            }
+
+            .insight-card {
+                background: #2a2a2a;
+                border-radius: 8px;
+                padding: 12px;
+                border-left: 4px solid #4a8bc2;
+                text-align: center;
+                cursor: pointer;
+                transition: border-color 0.2s, background 0.2s;
+            }
+
+            .insight-card:hover {
+                background: #333;
+                border-color: #ffcc66;
+            }
+
+            .insight-card.danger { border-left-color: #ff4444; }
+            .insight-card.warning { border-left-color: #ffaa00; }
+            .insight-card.success { border-left-color: #4CAF50; }
+            .insight-card.info { border-left-color: #4a8bc2; }
+            .insight-card.purple { border-left-color: #9b59b6; }
+
+            .insight-card .label {
+                font-size: 11px;
+                color: #888;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+
+            .insight-card .value {
+                font-size: 22px;
+                font-weight: bold;
+                color: #f0f0f0;
+                margin-top: 5px;
+            }
+
+            .insight-card .sub {
+                font-size: 11px;
+                color: #aaa;
+                margin-top: 2px;
+            }
+
+            .insight-columns {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+            }
+
+            .insight-list {
+                background: #2a2a2a;
+                border-radius: 8px;
+                padding: 12px;
+            }
+
+            .insight-list h4 {
+                color: #ccc;
+                margin: 0 0 10px;
+            }
+
+            .insight-list table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 12px;
+            }
+
+            .insight-list th {
+                text-align: left;
+                color: #888;
+                font-weight: normal;
+                padding: 4px 6px;
+                border-bottom: 1px solid #444;
+            }
+
+            .insight-list td {
+                padding: 4px 6px;
+                border-bottom: 1px solid #333;
+            }
+            .insight-list .clickable-row {
+                cursor: pointer;
+            }
+            .insight-list .clickable-row:hover td {
+                background: #333;
+                color: #ffcc66;
+            }
+
+            .charts-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+            }
+
+            .chart-box {
+                background: #2a2a2a;
+                border-radius: 8px;
+                padding: 10px;
+                position: relative;
+            }
+
+            .chart-box canvas {
+                display: block;
+                width: 100%;
+                height: 300px;
+                cursor: crosshair;
+            }
+
+            .dashboard-empty {
+                color: #888;
+                text-align: center;
+                padding: 20px;
+            }
+
+            /* Tooltip for charts - fixed positioning */
+            #chart-tooltip {
+                display: none;
+                position: fixed;
+                background: #1e1e1e;
+                border: 1px solid #555;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #eee;
+                font-size: 12px;
+                line-height: 1.5;
+                pointer-events: none;
+                z-index: 9999;
+                max-width: 350px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.7);
+                font-family: 'Ubuntu Mono', monospace;
+            }
+            #chart-tooltip .label {
+                color: #aaa;
+            }
+            #chart-tooltip .value {
+                color: #ffcc66;
+            }
+            #chart-tooltip .mono {
+                font-family: 'Ubuntu Mono', monospace;
+                word-break: break-all;
+            }
+
+            /* Copy MD5 button */
+            .copy-hash-btn {
+                cursor: pointer;
+                color: #4a8bc2;
+                margin-left: 6px;
+                font-size: 13px;
+                background: none;
+                border: none;
+                padding: 0 4px;
+                display: inline-block;
+            }
+            .copy-hash-btn:hover {
+                color: #ffcc66;
+            }
+
+            @media (max-width: 768px) {
+                .insight-columns,
+                .charts-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
         </style>
     </head>
 
@@ -765,10 +957,46 @@ if (_BLACKLIST_) {
                 <input type="checkbox" id="showAnomaliesOnly" onchange="toggleAnomalies()"> ⚠️ Only Anomalies
             </label>
             <label style="margin-left:10px;">
-                Z‑threshold: <input type="number" id="zThreshold" value="2.5" step="0.1" style="width:60px;"
+                Z‑threshold: <input type="number" id="zThreshold" value="3.5" step="0.1" style="width:60px;"
                     onchange="applyThreshold()">
             </label>
+            <!-- Combined search -->
+            <label style="margin-left:20px;">
+                🔍 Search (filename/token):
+                <input type="text" id="searchInput" placeholder="e.g. eval or .php" style="width:180px;" oninput="applySearch()">
+            </label>
+            <label style="margin-left:5px;">
+                <input type="checkbox" id="searchTokensOnly" onchange="applySearch()"> Tokens only
+            </label>
         </div>
+
+        <!-- Dashboard controls and panels -->
+        <div class="dashboard-controls">
+            <button type="button" onclick="toggleInsights()">📋 Show Insights</button>
+            <button type="button" onclick="toggleCharts()">📊 Show Charts</button>
+            <button type="button" onclick="clearFilters()">🧹 Clear Filters</button>
+        </div>
+
+        <div id="insightsPanel" class="dashboard-panel">
+            <h3>📋 File System Insights</h3>
+            <div id="insightsGrid" class="insights-grid"></div>
+            <div class="insight-columns">
+                <div id="topSuspicious" class="insight-list">
+                    <h4>🔍 Top Suspicious Files</h4>
+                </div>
+                <div id="topRecent" class="insight-list">
+                    <h4>🕒 Most Recent Files</h4>
+                </div>
+            </div>
+        </div>
+
+        <div id="chartsPanel" class="dashboard-panel">
+            <h3>📊 Anomaly Visualizations</h3>
+            <div id="chartsGrid" class="charts-grid"></div>
+        </div>
+
+        <!-- Tooltip for charts -->
+        <div id="chart-tooltip"></div>
 
         <table align="center">
             <tbody id="result"></tbody>
@@ -779,7 +1007,14 @@ if (_BLACKLIST_) {
             let analyzedData = [];
             let currentSort = 'mtime';
             let currentFilterAnomalies = false;
-            let currentThreshold = 2.5;
+            let currentThreshold = 3.5;
+            let insightsVisible = false;
+            let chartsVisible = false;
+            let currentSearch = '';
+            let searchTokensOnly = false;
+
+            // For chart interactivity
+            let chartDataPoints = []; // store point info for each chart
 
             function computeStats(values) {
                 const filtered = values.filter(v => v !== null && !isNaN(v));
@@ -866,25 +1101,84 @@ if (_BLACKLIST_) {
                 });
             }
 
-            // Render table with main line (file + status) and verbosity line (date + stats)
-            function renderTable(data, sortBy, filterAnomalies) {
-                let filtered = filterAnomalies ? data.filter(d => d.isAnomaly) : data;
+            // Escape HTML
+            function escapeHtml(value) {
+                if (value === undefined || value === null) return '';
+                return String(value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+            }
 
-                if (sortBy === 'mtime') filtered.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
-                else if (sortBy === 'tokens') filtered.sort((a, b) => (b.suspCount || 0) - (a.suspCount || 0));
-                else if (sortBy === 'zSusp') filtered.sort((a, b) => Math.abs(b.zScores.susp) - Math.abs(a.zScores.susp));
-                else if (sortBy === 'residual') filtered.sort((a, b) => (b.residual || 0) - (a.residual || 0));
+            // Copy text
+            function copyText(text) {
+                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                    return navigator.clipboard.writeText(text);
+                }
+                return new Promise((resolve, reject) => {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    textarea.style.position = 'fixed';
+                    textarea.style.left = '-9999px';
+                    textarea.style.top = '-9999px';
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+                    try {
+                        const success = document.execCommand('copy');
+                        document.body.removeChild(textarea);
+                        if (success) resolve();
+                        else reject(new Error('Copy failed'));
+                    } catch (e) {
+                        document.body.removeChild(textarea);
+                        reject(e);
+                    }
+                });
+            }
+
+            // Filtering function that combines anomaly, search, and token-only
+            function shouldShowFile(d) {
+                if (currentFilterAnomalies && !d.isAnomaly) return false;
+                if (!currentSearch.trim()) return true;
+
+                const searchLower = currentSearch.toLowerCase();
+                const pathMatch = d.path.toLowerCase().includes(searchLower);
+                if (searchTokensOnly) {
+                    // Only match tokens
+                    if (d.matched_tokens && d.matched_tokens.length) {
+                        return d.matched_tokens.some(t => t.toLowerCase().includes(searchLower));
+                    }
+                    return false;
+                } else {
+                    // Match path OR tokens
+                    if (pathMatch) return true;
+                    if (d.matched_tokens && d.matched_tokens.length) {
+                        return d.matched_tokens.some(t => t.toLowerCase().includes(searchLower));
+                    }
+                    return false;
+                }
+            }
+
+            // Render table
+            function renderTable(data) {
+                let filtered = data.filter(d => shouldShowFile(d));
+
+                if (currentSort === 'mtime') filtered.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+                else if (currentSort === 'tokens') filtered.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
+                else if (currentSort === 'zSusp') filtered.sort((a, b) => Math.abs(b.zScores.susp) - Math.abs(a.zScores.susp));
+                else if (currentSort === 'residual') filtered.sort((a, b) => (b.residual || 0) - (a.residual || 0));
 
                 let html = '';
                 if (filtered.length === 0) {
-                    html = '<tr><td style="color:#888;text-align:center;">No files match the current filter.</td></tr>';
+                    html = '<tr><td style="color:#888;text-align:center;">No files match the current filters.</td></tr>';
                 } else {
                     filtered.forEach(d => {
                         let color = '#dddbdb';
-                        let status = ''; // will be appended to main line
-                        let verbosity = ''; // second line
+                        let status = '';
+                        let verbosity = '';
 
-                        // Determine status and color
                         if (d.is_unreadable) {
                             color = '#f72f2f';
                             status = 'NOT_READABLE';
@@ -898,114 +1192,59 @@ if (_BLACKLIST_) {
                         } else if (d.duplicate_of !== false) {
                             status = '' + d.duplicate_of;
                         } else if (d.matched_tokens && d.matched_tokens.length > 0) {
-                            // Show tokens with highlighting
                             let tokens = d.matched_tokens.map(t => {
                                 const essential = ['base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'goto', 'eval', 'exec', 'shell_exec', 'system', 'passthru', 'pcntl_fork', 'fsockopen', 'proc_open', 'popen ', 'posix_kill', 'posix_setpgid', 'posix_setsid', 'posix_setuid', 'fopen', 'fsockopen', 'file_put_contents', 'file_get_contents', 'url_get_contents', 'move_uploaded_file', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
-                                if (essential.includes(t)) return '<span class="token-highlight">' + t + '</span>';
-                                return t;
+                                if (essential.includes(t)) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
+                                return escapeHtml(t);
                             });
                             status = tokens.join(', ');
                         }
 
-                        // Verbosity line: date + numeric stats (only if readable and not special status that already has them)
                         if (d.is_unreadable) {
-                            verbosity = d.date; // just date
-                        } else if (d.is_blacklisted || d.is_htaccess || d.duplicate_of !== false) {
-                            // For these, we still show date + size + tokens etc.
-                            const sizeKB = (d.size / 1024).toFixed(1);
-                            verbosity = `${d.date} | Size: ${sizeKB} KB, Tokens: ${d.total_tokens}, Suspicious: ${d.suspCount}, Z‑Susp: ${d.zScores.susp.toFixed(1)}, Residual: ${d.residual.toFixed(1)}`;
+                            verbosity = d.date;
                         } else {
-                            // Normal file with tokens
                             const sizeKB = (d.size / 1024).toFixed(1);
-                            verbosity = `${d.date} | Size: ${sizeKB} KB, Tokens: ${d.total_tokens}, Suspicious: ${d.suspCount}, Z‑Susp: ${d.zScores.susp.toFixed(1)}, Residual: ${d.residual.toFixed(1)}`;
+                            verbosity = `${d.date} | Size: ${sizeKB} KB, Tokens: ${d.total_tokens || 0}, Suspicious: ${d.suspCount}, Z‑Susp: ${d.zScores.susp.toFixed(1)}, Residual: ${d.residual.toFixed(1)}`;
                         }
 
-                        // Build main line: clickable filename + status (if any)
-                        const warningSign = d.isAnomaly ? '<span class="warning-sign">⚠️</span> ' : '';
-                        const fileLink = `<span class="file-link" onclick="copyHash('${d.md5}')">${d.path}</span>`;
-                        let mainLine = warningSign + fileLink;
+                        const warningSign = d.isAnomaly ? '⚠️ ' : '';
+                        const fileLink = `<span class="file-link" onclick="copyText('${escapeHtml(d.path)}')">${escapeHtml(d.path)}</span>`;
+                        // MD5 copy button (only if readable and has a real MD5)
+                        let md5Btn = '';
+                        if (!d.is_unreadable && d.md5 && d.md5 !== 'N/A') {
+                            md5Btn = `<span class="copy-hash-btn" onclick="copyText('${escapeHtml(d.md5)}')" title="Copy MD5 hash">📋</span>`;
+                        }
+                        let mainLine = warningSign + fileLink + md5Btn;
                         if (status) mainLine += ' (' + status + ')';
 
                         html += `<tr>
-                        <td style="color:${color}; font-size:14px;">
-                            ${mainLine}
-                            <br><span class="verbosity">${verbosity}</span>
-                        </td>
-                    </tr>`;
+                            <td style="color:${color}; font-size:14px;">
+                                ${mainLine}
+                                <br><span class="verbosity">${verbosity}</span>
+                            </td>
+                        </tr>`;
                     });
                 }
                 document.getElementById('result').innerHTML = html;
             }
 
-            function copyText(text) {
-                if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
-                    return navigator.clipboard.writeText(text);
-                }
-
-                return new Promise((resolve, reject) => {
-                    const textarea = document.createElement('textarea');
-
-                    textarea.value = text;
-                    textarea.style.position = 'fixed';
-                    textarea.style.left = '-9999px';
-                    textarea.style.top = '-9999px';
-
-                    document.body.appendChild(textarea);
-
-                    textarea.focus();
-                    textarea.select();
-
-                    try {
-                        const success = document.execCommand('copy');
-
-                        document.body.removeChild(textarea);
-
-                        if (success) {
-                            resolve();
-                        } else {
-                            reject(new Error('Copy failed'));
-                        }
-                    } catch (error) {
-                        document.body.removeChild(textarea);
-                        reject(error);
-                    }
-                });
-            }
-
-            function copyHash(hash) {
-                if (hash && hash !== 'N/A') {
-                    copyText(hash)
-                        .then(() => {
-                            // alert('Hash copied: ' + hash);
-                        })
-                        .catch(() => {
-                            alert('Failed to copy hash.');
-                        });
-                } else {
-                    alert('No hash available for this file.');
-                }
-            }
-
-            // Copy full results (main line + verbosity)
+            // Copy full results
             function copyResults() {
                 let text = analyzedData
-                    .filter(d => currentFilterAnomalies ? d.isAnomaly : true)
+                    .filter(d => shouldShowFile(d))
                     .map(d => {
                         let line = d.path;
-                        // status
                         if (d.is_unreadable) line += ' (NOT_READABLE)';
-                        else if (d.is_blacklisted) {
-                            line += ' (BLACKLIST)';
-                        }
+                        else if (d.is_blacklisted) line += ' (BLACKLIST)';
                         else if (d.is_htaccess) line += ' (HTACCESS)';
                         else if (d.duplicate_of !== false) line += ' (' + d.duplicate_of + ')';
                         else if (d.matched_tokens && d.matched_tokens.length > 0) {
                             line += ' (' + d.matched_tokens.join(', ') + ')';
                         }
-                        // verbosity: date + stats
                         if (!d.is_unreadable && d.size !== null) {
                             const sizeKB = (d.size / 1024).toFixed(1);
                             line += ` | ${d.date} | Size: ${sizeKB} KB, Tokens: ${d.total_tokens}, Suspicious: ${d.suspCount}, Z-Susp: ${d.zScores.susp.toFixed(1)}, Residual: ${d.residual.toFixed(1)}`;
+                            if (d.md5 && d.md5 !== 'N/A') line += ` | MD5: ${d.md5}`;
                         } else {
                             line += ` | ${d.date}`;
                         }
@@ -1017,14 +1256,15 @@ if (_BLACKLIST_) {
                     .catch(() => alert('Failed to copy.'));
             }
 
+            // Sort, anomaly toggle, threshold
             function sortResults(mode) {
                 currentSort = mode;
-                renderTable(analyzedData, currentSort, currentFilterAnomalies);
+                renderTable(analyzedData);
             }
 
             function toggleAnomalies() {
                 currentFilterAnomalies = document.getElementById('showAnomaliesOnly').checked;
-                renderTable(analyzedData, currentSort, currentFilterAnomalies);
+                renderTable(analyzedData);
             }
 
             function applyThreshold() {
@@ -1034,16 +1274,493 @@ if (_BLACKLIST_) {
                     currentThreshold = val;
                     if (typeof rawFileData !== 'undefined') {
                         analyzedData = analyzeData(rawFileData, currentThreshold);
-                        renderTable(analyzedData, currentSort, currentFilterAnomalies);
+                        renderTable(analyzedData);
+                        if (insightsVisible) renderInsights(analyzedData);
+                        if (chartsVisible) renderCharts(analyzedData);
                     }
                 }
             }
 
+            // Combined search
+            function applySearch() {
+                currentSearch = document.getElementById('searchInput').value;
+                searchTokensOnly = document.getElementById('searchTokensOnly').checked;
+                renderTable(analyzedData);
+            }
+
+            // Clear all filters (except threshold)
+            function clearFilters() {
+                document.getElementById('showAnomaliesOnly').checked = false;
+                document.getElementById('searchInput').value = '';
+                document.getElementById('searchTokensOnly').checked = false;
+                currentFilterAnomalies = false;
+                currentSearch = '';
+                searchTokensOnly = false;
+                renderTable(analyzedData);
+            }
+
+            // Insights with clickable cards and rows
+            function toggleInsights() {
+                insightsVisible = !insightsVisible;
+                const panel = document.getElementById('insightsPanel');
+                panel.classList.toggle('visible', insightsVisible);
+                if (insightsVisible) renderInsights(analyzedData);
+            }
+
+            function renderInsights(data) {
+                const grid = document.getElementById('insightsGrid');
+                const topSuspicious = document.getElementById('topSuspicious');
+                const topRecentPanel = document.getElementById('topRecent');
+
+                if (!data || data.length === 0) {
+                    grid.innerHTML = '<div class="dashboard-empty">No scan data available. Run SEARCH first.</div>';
+                    topSuspicious.innerHTML = '<h4>🔍 Top Suspicious Files</h4><div class="dashboard-empty">No data.</div>';
+                    topRecentPanel.innerHTML = '<h4>🕒 Most Recent Files</h4><div class="dashboard-empty">No data.</div>';
+                    return;
+                }
+
+                const valid = data.filter(d => !d.is_unreadable && d.size !== null);
+                const readable = data.filter(d => !d.is_unreadable);
+                const unreadable = data.filter(d => d.is_unreadable).length;
+                const blacklisted = data.filter(d => d.is_blacklisted).length;
+                const duplicates = data.filter(d => d.duplicate_of !== false).length;
+                const htaccess = data.filter(d => d.is_htaccess).length;
+                const anomalies = data.filter(d => d.isAnomaly).length;
+
+                let avgSize = 0, minSize = 0, maxSize = 0;
+                let avgTokens = 0, minTokens = 0, maxTokens = 0;
+                let minMtime = 0, maxMtime = 0;
+
+                if (valid.length > 0) {
+                    const sizes = valid.map(d => Number(d.size) || 0);
+                    const tokens = valid.map(d => Number(d.total_tokens) || 0);
+                    const mtimes = valid.map(d => Number(d.mtime) || 0);
+
+                    avgSize = sizes.reduce((a, b) => a + b, 0) / sizes.length;
+                    minSize = Math.min.apply(null, sizes);
+                    maxSize = Math.max.apply(null, sizes);
+
+                    avgTokens = tokens.reduce((a, b) => a + b, 0) / tokens.length;
+                    minTokens = Math.min.apply(null, tokens);
+                    maxTokens = Math.max.apply(null, tokens);
+
+                    minMtime = Math.min.apply(null, mtimes);
+                    maxMtime = Math.max.apply(null, mtimes);
+                }
+
+                // Helper to create clickable cards that set filters
+                function makeCard(label, value, sub, cls, filterFn) {
+                    return `<div class="insight-card ${cls}" onclick="applyInsightFilter('${label}', ${filterFn})">
+                        <div class="label">${label}</div>
+                        <div class="value">${value}</div>
+                        <div class="sub">${sub}</div>
+                    </div>`;
+                }
+
+                grid.innerHTML = `
+                    ${makeCard('Total Files', data.length, `${readable.length} readable, ${unreadable} unreadable`, 'info', 'all')}
+                    ${makeCard('Anomalies', anomalies, `${data.length ? ((anomalies / data.length) * 100).toFixed(1) : 0}% of total`, anomalies > 0 ? 'danger' : 'success', 'anomaly')}
+                    ${makeCard('Blacklisted', blacklisted, `${duplicates} duplicates, ${htaccess} .htaccess`, 'warning', 'blacklisted')}
+                    ${makeCard('Average Size', `${(avgSize / 1024).toFixed(1)} KB`, `Min ${(minSize / 1024).toFixed(1)} | Max ${(maxSize / 1024).toFixed(1)}`, 'info', 'all')}
+                    ${makeCard('Average Tokens', avgTokens.toFixed(0), `Min ${minTokens} | Max ${maxTokens}`, 'purple', 'all')}
+                    ${makeCard('Modification Range', formatDate(minMtime), `to ${formatDate(maxMtime)}`, 'info', 'all')}
+                `;
+
+                // Top Suspicious (clickable rows)
+                const topSusp = valid.slice().sort((a, b) =>
+                    Math.abs((b.zScores && b.zScores.susp) || 0) -
+                    Math.abs((a.zScores && a.zScores.susp) || 0)
+                ).slice(0, 5);
+
+                let suspHtml = '<h4>🔍 Top Suspicious Files</h4>';
+                if (topSusp.length === 0) {
+                    suspHtml += '<div class="dashboard-empty">No readable files.</div>';
+                } else {
+                    suspHtml += '<table>';
+                    suspHtml += '<tr><th>File</th><th>|Z-Susp|</th><th>Suspicious</th></tr>';
+                    topSusp.forEach(d => {
+                        const name = String(d.path || '').split('/').pop() || d.path;
+                        const z = Math.abs((d.zScores && d.zScores.susp) || 0);
+                        suspHtml += `<tr class="clickable-row" onclick="filterByPath('${escapeHtml(d.path)}')">
+                            <td>${escapeHtml(name)}</td>
+                            <td>${z.toFixed(2)}</td>
+                            <td>${d.suspCount || 0}</td>
+                        </tr>`;
+                    });
+                    suspHtml += '</table>';
+                }
+                topSuspicious.innerHTML = suspHtml;
+
+                // Most Recent (clickable rows)
+                const topRecent = valid.slice().sort((a, b) =>
+                    (Number(b.mtime) || 0) - (Number(a.mtime) || 0)
+                ).slice(0, 5);
+
+                let recentHtml = '<h4>🕒 Most Recent Files</h4>';
+                if (topRecent.length === 0) {
+                    recentHtml += '<div class="dashboard-empty">No readable files.</div>';
+                } else {
+                    recentHtml += '<table><tr><th>File</th><th>Modified</th><th>Size</th></tr>';
+                    topRecent.forEach(d => {
+                        const name = String(d.path || '').split('/').pop() || d.path;
+                        recentHtml += `<tr class="clickable-row" onclick="filterByPath('${escapeHtml(d.path)}')">
+                            <td>${escapeHtml(name)}</td>
+                            <td>${escapeHtml(d.date || 'N/A')}</td>
+                            <td>${((Number(d.size) || 0) / 1024).toFixed(1)} KB</td>
+                        </tr>`;
+                    });
+                    recentHtml += '</table>';
+                }
+                topRecentPanel.innerHTML = recentHtml;
+            }
+
+            // Filter functions called from insights
+            function applyInsightFilter(label, type) {
+                // Reset other filters, then set specific
+                document.getElementById('showAnomaliesOnly').checked = false;
+                document.getElementById('searchInput').value = '';
+                document.getElementById('searchTokensOnly').checked = false;
+                currentFilterAnomalies = false;
+                currentSearch = '';
+                searchTokensOnly = false;
+
+                if (type === 'anomaly') {
+                    document.getElementById('showAnomaliesOnly').checked = true;
+                    currentFilterAnomalies = true;
+                } else if (type === 'blacklisted') {
+                    currentSearch = '__BLACKLIST__';
+                    searchTokensOnly = false;
+                }
+                renderTable(analyzedData);
+            }
+
+            // Filter by a specific path (click on insight list item)
+            function filterByPath(path) {
+                document.getElementById('searchInput').value = path;
+                currentSearch = path;
+                searchTokensOnly = false;
+                document.getElementById('searchTokensOnly').checked = false;
+                // Also turn off anomaly filter
+                document.getElementById('showAnomaliesOnly').checked = false;
+                currentFilterAnomalies = false;
+                renderTable(analyzedData);
+            }
+
+            // Override shouldShowFile to handle blacklist pseudo-filter
+            const originalShouldShow = shouldShowFile;
+            shouldShowFile = function(d) {
+                if (currentSearch === '__BLACKLIST__') {
+                    return d.is_blacklisted === true;
+                }
+                return originalShouldShow(d);
+            };
+
+            // Charts with tooltips and click filtering
+            function toggleCharts() {
+                chartsVisible = !chartsVisible;
+                const panel = document.getElementById('chartsPanel');
+                panel.classList.toggle('visible', chartsVisible);
+                if (chartsVisible) renderCharts(analyzedData);
+            }
+
+            // Helper to position fixed tooltip at mouse
+            function positionTooltip(e, tooltip) {
+                let leftPos = e.clientX + 12;
+                let topPos = e.clientY + 12;
+                // Get tooltip dimensions
+                const rect = tooltip.getBoundingClientRect();
+                if (leftPos + rect.width > window.innerWidth) {
+                    leftPos = e.clientX - rect.width - 12;
+                }
+                if (topPos + rect.height > window.innerHeight) {
+                    topPos = e.clientY - rect.height - 12;
+                }
+                // Ensure not negative
+                leftPos = Math.max(0, leftPos);
+                topPos = Math.max(0, topPos);
+                tooltip.style.left = leftPos + 'px';
+                tooltip.style.top = topPos + 'px';
+            }
+
+            function renderCharts(data) {
+                const grid = document.getElementById('chartsGrid');
+                grid.innerHTML = '';
+
+                if (!data || data.length < 2) {
+                    grid.innerHTML = '<div class="dashboard-empty">Not enough data to render charts.</div>';
+                    return;
+                }
+
+                const valid = data.filter(d =>
+                    !d.is_unreadable &&
+                    d.size !== null &&
+                    d.total_tokens !== null &&
+                    d.mtime !== null
+                );
+
+                if (valid.length < 2) {
+                    grid.innerHTML = '<div class="dashboard-empty">Not enough readable files to render charts.</div>';
+                    return;
+                }
+
+                // Tooltip element for charts
+                const tooltip = document.getElementById('chart-tooltip');
+
+                function makeBox(title) {
+                    const box = document.createElement('div');
+                    box.className = 'chart-box';
+
+                    const titleEl = document.createElement('div');
+                    titleEl.style.textAlign = 'center';
+                    titleEl.style.color = '#ccc';
+                    titleEl.style.marginBottom = '8px';
+                    titleEl.textContent = title;
+                    box.appendChild(titleEl);
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 900;
+                    canvas.height = 300;
+                    box.appendChild(canvas);
+                    grid.appendChild(box);
+
+                    return canvas.getContext('2d');
+                }
+
+                function clear(ctx) {
+                    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                    ctx.fillStyle = '#2a2a2a';
+                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                }
+
+                function drawAxes(ctx, left, top, right, bottom) {
+                    ctx.strokeStyle = '#666';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(left, top);
+                    ctx.lineTo(left, bottom);
+                    ctx.lineTo(right, bottom);
+                    ctx.stroke();
+                }
+
+                function drawLabel(ctx, text, x, y, align) {
+                    ctx.fillStyle = '#aaa';
+                    ctx.font = '12px Ubuntu Mono, monospace';
+                    ctx.textAlign = align || 'left';
+                    ctx.fillText(text, x, y);
+                }
+
+                // Helper to draw points with interactivity
+                function drawScatter(ctx, left, top, right, bottom, points, xKey, yKey, labelX, labelY) {
+                    // points: array of data objects with x and y numeric values, and original data item
+                    const maxX = Math.max.apply(null, points.map(p => p.x)) || 1;
+                    const maxY = Math.max.apply(null, points.map(p => p.y)) || 1;
+
+                    // Store point coordinates for hit detection
+                    const hitPoints = [];
+
+                    points.forEach((p, idx) => {
+                        const px = left + (p.x / maxX) * (right - left);
+                        const py = bottom - (p.y / maxY) * (bottom - top);
+                        const isAnomaly = p.item.isAnomaly;
+                        ctx.fillStyle = isAnomaly ? '#ff4444' : '#66a3ff';
+                        ctx.beginPath();
+                        ctx.arc(px, py, 5, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        // Store for hit detection
+                        hitPoints.push({ x: px, y: py, data: p.item, index: idx });
+                    });
+
+                    // Add hover and click listeners on canvas
+                    const canvas = ctx.canvas;
+                    // Remove old listeners to avoid duplicates
+                    canvas._listeners && canvas._listeners.forEach(l => canvas.removeEventListener(l.type, l.handler));
+                    canvas._listeners = [];
+
+                    function getMousePos(e) {
+                        const rect = canvas.getBoundingClientRect();
+                        return {
+                            x: (e.clientX - rect.left) * (canvas.width / rect.width),
+                            y: (e.clientY - rect.top) * (canvas.height / rect.height)
+                        };
+                    }
+
+                    function findHit(mx, my, radius = 10) {
+                        for (let hp of hitPoints) {
+                            const dx = hp.x - mx;
+                            const dy = hp.y - my;
+                            if (dx * dx + dy * dy < radius * radius) {
+                                return hp;
+                            }
+                        }
+                        return null;
+                    }
+
+                    // Mouse move: show tooltip
+                    const onMouseMove = function(e) {
+                        const pos = getMousePos(e);
+                        const hit = findHit(pos.x, pos.y);
+                        if (hit) {
+                            const d = hit.data;
+                            const info = `
+                                <div><span class="label">File:</span> <span class="value">${escapeHtml(d.path)}</span></div>
+                                <div><span class="label">Size:</span> <span class="value">${(d.size/1024).toFixed(1)} KB</span></div>
+                                <div><span class="label">Tokens:</span> <span class="value">${d.total_tokens}</span></div>
+                                <div><span class="label">Suspicious:</span> <span class="value">${d.suspCount}</span></div>
+                                <div><span class="label">Z‑Susp:</span> <span class="value">${d.zScores.susp.toFixed(2)}</span></div>
+                                <div><span class="label">MD5:</span> <span class="value mono">${escapeHtml(d.md5)}</span></div>
+                                <div><span class="label">Anomaly:</span> <span class="value">${d.isAnomaly ? '⚠️ Yes' : 'No'}</span></div>
+                            `;
+                            tooltip.innerHTML = info;
+                            tooltip.style.display = 'block';
+                            positionTooltip(e, tooltip);
+                            canvas.style.cursor = 'pointer';
+                        } else {
+                            tooltip.style.display = 'none';
+                            canvas.style.cursor = 'crosshair';
+                        }
+                    };
+
+                    const onMouseLeave = function() {
+                        tooltip.style.display = 'none';
+                        canvas.style.cursor = 'crosshair';
+                    };
+
+                    const onClick = function(e) {
+                        const pos = getMousePos(e);
+                        const hit = findHit(pos.x, pos.y);
+                        if (hit) {
+                            // Filter table to this file
+                            filterByPath(hit.data.path);
+                        }
+                    };
+
+                    canvas.addEventListener('mousemove', onMouseMove);
+                    canvas.addEventListener('mouseleave', onMouseLeave);
+                    canvas.addEventListener('click', onClick);
+                    canvas._listeners = [
+                        { type: 'mousemove', handler: onMouseMove },
+                        { type: 'mouseleave', handler: onMouseLeave },
+                        { type: 'click', handler: onClick }
+                    ];
+
+                    // Labels
+                    drawLabel(ctx, labelX, (left + right) / 2, bottom + 35, 'center');
+                    drawLabel(ctx, labelY, 8, top + 10, 'left');
+                }
+
+                // 1. Tokens vs Suspicious
+                {
+                    const ctx = makeBox('Tokens vs Suspicious Count');
+                    clear(ctx);
+                    const left = 55, top = 20, right = 875, bottom = 250;
+                    drawAxes(ctx, left, top, right, bottom);
+
+                    const points = valid.map(d => ({
+                        x: d.total_tokens,
+                        y: d.suspCount,
+                        item: d
+                    }));
+                    drawScatter(ctx, left, top, right, bottom, points, 'total_tokens', 'suspCount', 'Total Tokens', 'Suspicious Count');
+                }
+
+                // 2. Z-score bars - clickable
+                {
+                    const ctx = makeBox('Top Suspicious Z-Scores');
+                    clear(ctx);
+
+                    const selected = valid.slice().sort((a, b) =>
+                        Math.abs((b.zScores && b.zScores.susp) || 0) -
+                        Math.abs((a.zScores && a.zScores.susp) || 0)
+                    ).slice(0, 12);
+
+                    const left = 180, top = 20, right = 875, bottom = 270;
+                    const rowH = (bottom - top) / Math.max(1, selected.length);
+                    const maxZ = Math.max(
+                        currentThreshold,
+                        ...selected.map(d => Math.abs((d.zScores && d.zScores.susp) || 0))
+                    ) || 1;
+
+                    // Store hit areas for bars
+                    const barHitAreas = [];
+
+                    selected.forEach((d, i) => {
+                        const z = Math.abs((d.zScores && d.zScores.susp) || 0);
+                        const y = top + i * rowH + 3;
+                        const w = (z / maxZ) * (right - left);
+
+                        ctx.fillStyle = z > currentThreshold ? '#ff4444' : '#4a8bc2';
+                        ctx.fillRect(left, y, w, Math.max(8, rowH - 6));
+
+                        const name = String(d.path || '').split('/').pop() || d.path;
+                        drawLabel(ctx, name.length > 24 ? name.slice(0, 21) + '...' : name, left - 8, y + rowH / 2 + 4, 'right');
+                        drawLabel(ctx, z.toFixed(2), Math.min(right - 4, left + w + 6), y + rowH / 2 + 4, 'left');
+
+                        barHitAreas.push({
+                            x: left,
+                            y: y,
+                            w: w,
+                            h: Math.max(8, rowH - 6),
+                            data: d
+                        });
+                    });
+
+                    // Add click on bars to filter
+                    const canvas = ctx.canvas;
+                    canvas.addEventListener('click', function(e) {
+                        const rect = canvas.getBoundingClientRect();
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                        for (let bar of barHitAreas) {
+                            if (mx >= bar.x && mx <= bar.x + bar.w &&
+                                my >= bar.y && my <= bar.y + bar.h) {
+                                filterByPath(bar.data.path);
+                                break;
+                            }
+                        }
+                    });
+                    // Add hover for tooltip on bars
+                    canvas.addEventListener('mousemove', function(e) {
+                        const rect = canvas.getBoundingClientRect();
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                        let found = false;
+                        for (let bar of barHitAreas) {
+                            if (mx >= bar.x && mx <= bar.x + bar.w &&
+                                my >= bar.y && my <= bar.y + bar.h) {
+                                const d = bar.data;
+                                const info = `
+                                    <div><span class="label">File:</span> <span class="value">${escapeHtml(d.path)}</span></div>
+                                    <div><span class="label">Z‑Susp:</span> <span class="value">${d.zScores.susp.toFixed(2)}</span></div>
+                                    <div><span class="label">Suspicious:</span> <span class="value">${d.suspCount}</span></div>
+                                    <div><span class="label">MD5:</span> <span class="value mono">${escapeHtml(d.md5)}</span></div>
+                                `;
+                                tooltip.innerHTML = info;
+                                tooltip.style.display = 'block';
+                                positionTooltip(e, tooltip);
+                                canvas.style.cursor = 'pointer';
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            tooltip.style.display = 'none';
+                            canvas.style.cursor = 'crosshair';
+                        }
+                    });
+                    canvas.addEventListener('mouseleave', function() {
+                        tooltip.style.display = 'none';
+                        canvas.style.cursor = 'crosshair';
+                    });
+                }
+            }
+
+            // Initialize on page load
             window.onload = function () {
                 if (typeof rawFileData !== 'undefined') {
-                    currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 2.5;
+                    currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
                     analyzedData = analyzeData(rawFileData, currentThreshold);
-                    renderTable(analyzedData, 'mtime', false);
+                    renderTable(analyzedData);
                 }
             };
         </script>
