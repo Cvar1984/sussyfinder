@@ -937,14 +937,12 @@ if (_BLACKLIST_) {
                 if (in_array($fileSum, $whitelistMD5Sums))
                     continue;
 
-                $content = file_get_contents($filePath);
+                // Token extraction only — entropy and threat score computed client-side
                 $tokens = getFileTokens($filePath);
                 $matchedTokens = compareTokens($tokenNeedles, $tokens);
                 $totalTokens = count($tokens);
                 $size = filesize($filePath);
                 $mtime = filemtime($filePath);
-                $entropy = shannonEntropy($content);
-                $threatScore = calculateThreatScore($matchedTokens, $filePath, $entropy, $size, $tokenNeedles);
 
                 $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
                 $isHtaccess = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
@@ -970,14 +968,12 @@ if (_BLACKLIST_) {
                     'mtime' => $mtime,
                     'total_tokens' => $totalTokens,
                     'matched_tokens' => $matchedTokens,
-                    'entropy' => $entropy,
                     'md5' => $fileSum,
                     'is_blacklisted' => $isBlacklisted,
                     'is_htaccess' => $isHtaccess,
                     'duplicate_of' => $duplicateOf,
                     'error' => $error,
                     'is_unreadable' => false,
-                    'threat_score' => $threatScore,
                 );
             }
 
@@ -994,16 +990,16 @@ if (_BLACKLIST_) {
                     'mtime' => $mtime,
                     'total_tokens' => null,
                     'matched_tokens' => array('NOT_READABLE'),
-                    'entropy' => null,
                     'md5' => 'N/A',
                     'is_blacklisted' => false,
                     'is_htaccess' => false,
                     'duplicate_of' => false,
                     'error' => null,
                     'is_unreadable' => true,
-                    'threat_score' => 0,
                 );
             }
+            // Emit token weight map so JS can replicate PHP scoring exactly
+            echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
             echo '<script>const rawFileData = ' . json_encode($rawFeatures) . ';</script>';
         }
         ?>
@@ -1080,6 +1076,81 @@ if (_BLACKLIST_) {
             let currentSearch = '';
             let searchTokensOnly = false;
 
+            // --- Client-side threat scoring (offloaded from PHP) ---
+
+            /**
+             * Compute Shannon entropy from an array of token strings.
+             * Treats each character in each token as a symbol.
+             */
+            function shannonEntropy(tokens) {
+                if (!tokens || tokens.length === 0) return 0;
+                var combined = tokens.join('');
+                var len = combined.length;
+                if (len === 0) return 0;
+                var freq = {};
+                for (var i = 0; i < len; i++) {
+                    var ch = combined[i];
+                    freq[ch] = (freq[ch] || 0) + 1;
+                }
+                var entropy = 0;
+                for (var ch in freq) {
+                    var p = freq[ch] / len;
+                    entropy -= p * Math.log2(p);
+                }
+                return entropy;
+            }
+
+            /**
+             * Compute composite threat score — exact JS port of PHP calculateThreatScore().
+             * @param {string[]} matchedTokens
+             * @param {string}   filePath
+             * @param {number}   entropy
+             * @param {number}   size       file size in bytes, or null
+             * @param {Object}   weights    tokenWeights map (key -> weight)
+             */
+            function calculateThreatScore(matchedTokens, filePath, entropy, size, weights) {
+                var score = 0.0;
+                var hasCritical = false;
+                var hasObfuscation = false;
+                var hasUploadReq = false;
+
+                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','assert','create_function'];
+                var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','hex2bin','bin2hex'];
+                var reqTokens  = ['move_uploaded_file','$_files','file_put_contents'];
+
+                if (Array.isArray(matchedTokens)) {
+                    for (var i = 0; i < matchedTokens.length; i++) {
+                        var token = matchedTokens[i].toLowerCase();
+                        if (weights && typeof weights[token] !== 'undefined') {
+                            score += parseFloat(weights[token]);
+                        } else {
+                            score += 1.0;
+                        }
+                        if (critTokens.indexOf(token) !== -1) hasCritical = true;
+                        if (obfTokens.indexOf(token)  !== -1) hasObfuscation = true;
+                        if (reqTokens.indexOf(token)  !== -1) hasUploadReq = true;
+                    }
+                }
+
+                if (hasCritical && hasObfuscation) score *= 2.5;
+                if (hasCritical && hasUploadReq)   score *= 1.8;
+
+                var pathLow = (filePath || '').toLowerCase().replace(/\\/g, '/');
+                if (pathLow.indexOf('upload')  !== -1 ||
+                    pathLow.indexOf('cache')   !== -1 ||
+                    pathLow.indexOf('tmp')     !== -1 ||
+                    pathLow.indexOf('images')  !== -1 ||
+                    pathLow.indexOf('media')   !== -1) {
+                    if (score > 0 || entropy > 5.5) score += 5.0;
+                }
+
+                if (size !== null && size < 20480 && entropy > 5.8) score += 3.0;
+
+                return Math.round(score * 100) / 100;
+            }
+
+            // --- End client-side threat scoring ---
+
             function computeStats(values) {
                 const filtered = values.filter(v => v !== null && !isNaN(v));
                 const n = filtered.length;
@@ -1112,7 +1183,12 @@ if (_BLACKLIST_) {
                 const mtimes = valid.map(d => d.mtime);
                 const tokens = valid.map(d => d.total_tokens);
                 const susp = valid.map(d => d.matched_tokens ? d.matched_tokens.length : 0);
-                const entropies = valid.map(d => d.entropy);
+                // Compute entropy and threat score client-side (not in PHP payload)
+                const entropies = valid.map(d => {
+                    return shannonEntropy(d.matched_tokens);
+                });
+
+                const weights = (typeof tokenWeights !== 'undefined') ? tokenWeights : {};
 
                 const stats = {
                     size: computeStats(sizes),
@@ -1124,10 +1200,11 @@ if (_BLACKLIST_) {
 
                 const avgSuspPerToken = stats.susp.mean / Math.max(1, stats.tokens.mean);
 
-                return rawData.map(d => {
+                return rawData.map((d, idx) => {
                     if (d.is_unreadable) {
                         return {
                             ...d,
+                            entropy: 0,
                             zScores: { size: 0, mtime: 0, tokens: 0, susp: 0, entropy: 0 },
                             residual: 0,
                             isAnomaly: true,
@@ -1137,17 +1214,20 @@ if (_BLACKLIST_) {
                         };
                     }
 
+                    const entropy = shannonEntropy(d.matched_tokens);
+                    const threatScore = calculateThreatScore(
+                        d.matched_tokens, d.path, entropy, d.size, weights
+                    );
+
                     const suspCount = d.matched_tokens ? d.matched_tokens.length : 0;
                     const zSize = zScore(d.size, stats.size.mean, stats.size.std);
                     const zMtime = zScore(d.mtime, stats.mtime.mean, stats.mtime.std);
                     const zTokens = zScore(d.total_tokens, stats.tokens.mean, stats.tokens.std);
                     const zSusp = zScore(suspCount, stats.susp.mean, stats.susp.std);
-                    const zEntropy = zScore(d.entropy, stats.entropy.mean, stats.entropy.std);
+                    const zEntropy = zScore(entropy, stats.entropy.mean, stats.entropy.std);
 
                     const expectedSusp = d.total_tokens * avgSuspPerToken;
                     const residual = suspCount - expectedSusp;
-
-                    const threatScore = typeof d.threat_score !== 'undefined' ? d.threat_score : 0;
 
                     const isAnomaly = (threatScore >= 8.0) ||
                         (Math.abs(zSize) > threshold) ||
@@ -1161,6 +1241,7 @@ if (_BLACKLIST_) {
 
                     return {
                         ...d,
+                        entropy: entropy,
                         zScores: { size: zSize, mtime: zMtime, tokens: zTokens, susp: zSusp, entropy: zEntropy },
                         residual: residual,
                         isAnomaly: isAnomaly,
@@ -1607,56 +1688,145 @@ if (_BLACKLIST_) {
                     ctx.fillText(text, x, y);
                 }
 
-                // 1. QUADRANT THREAT MATRIX: Shannon Entropy vs Composite Threat Score
+                // 1. QUADRANT THREAT MATRIX: Token Suspicion Ratio vs Composite Threat Score
                 {
-                    const ctx = makeBox('Threat Matrix: Shannon Entropy vs Composite Threat Score');
+                    const ctx = makeBox('Threat Matrix: Token Suspicion Ratio vs Threat Score');
                     clear(ctx);
-                    const left = 60, top = 25, right = 870, bottom = 250;
+
+                    // Plot area — leave room for axis labels
+                    const left = 70, top = 30, right = 860, bottom = 255;
+                    const W = right - left;
+                    const H = bottom - top;
+
+                    // Axes
                     drawAxes(ctx, left, top, right, bottom);
 
-                    const maxEnt = 8.0;
-                    const maxScore = Math.max(20.0, ...valid.map(d => d.threatScore)) || 20.0;
+                    // X = suspCount / max(1, total_tokens)  [0..1]
+                    // Y = threatScore  [0..maxScore]
+                    let maxScore = 20.0;
+                    for (let i = 0; i < valid.length; i++) {
+                        if ((valid[i].threatScore || 0) > maxScore) maxScore = valid[i].threatScore;
+                    }
 
-                    // Draw Quadrant Threshold Lines (Entropy = 5.5, ThreatScore = 8.0)
-                    const quadX = left + (5.5 / maxEnt) * (right - left);
-                    const quadY = bottom - (8.0 / maxScore) * (bottom - top);
+                    // Quadrant thresholds
+                    const xThresh = 0.15;  // 15% of tokens are suspicious
+                    const yThresh = 8.0;
 
-                    ctx.strokeStyle = '#444';
-                    ctx.setLineDash([4, 4]);
+                    const quadX = left + (xThresh) * W;
+                    const quadY = bottom - (yThresh / maxScore) * H;
+
+                    // Dashed quadrant lines
+                    ctx.save();
+                    ctx.strokeStyle = '#555';
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([5, 4]);
                     ctx.beginPath();
                     ctx.moveTo(quadX, top);
                     ctx.lineTo(quadX, bottom);
                     ctx.moveTo(left, quadY);
                     ctx.lineTo(right, quadY);
                     ctx.stroke();
-                    ctx.setLineDash([]); // Reset line dash
+                    ctx.setLineDash([]);
+                    ctx.restore();
 
-                    // Quadrant Labels
-                    drawLabel(ctx, '🔴 OBFUSCATED WEBSHELL (High Threat, High Entropy)', right - 10, top + 15, 'right', '#ff4444');
-                    drawLabel(ctx, '🟠 RCE SCRIPT (High Threat, Normal Entropy)', left + 10, top + 15, 'left', '#ffaa00');
-                    drawLabel(ctx, '🔵 COMPRESSED ASSET (Low Threat, High Entropy)', right - 10, bottom - 10, 'right', '#4a8bc2');
-                    drawLabel(ctx, '⚪ NORMAL CODE', left + 10, bottom - 10, 'left', '#888');
+                    // Quadrant labels (placed in each corner, inside plot area)
+                    ctx.font = '10px Ubuntu Mono, monospace';
+                    ctx.textAlign = 'right';
+                    ctx.fillStyle = '#ff4444';
+                    ctx.fillText('OBFUSCATED WEBSHELL', right - 4, top + 14);   // top-right
 
+                    ctx.textAlign = 'left';
+                    ctx.fillStyle = '#ffaa00';
+                    ctx.fillText('RCE SCRIPT', left + 4, top + 14);             // top-left
+
+                    ctx.textAlign = 'right';
+                    ctx.fillStyle = '#4a8bc2';
+                    ctx.fillText('DENSE NORMAL', right - 4, bottom - 6);        // bottom-right
+
+                    ctx.textAlign = 'left';
+                    ctx.fillStyle = '#777';
+                    ctx.fillText('BENIGN', left + 4, bottom - 6);               // bottom-left
+
+                    // Y-axis tick marks
+                    ctx.fillStyle = '#888';
+                    ctx.font = '10px Ubuntu Mono, monospace';
+                    ctx.textAlign = 'right';
+                    const yTicks = 5;
+                    for (let t = 0; t <= yTicks; t++) {
+                        const val = (maxScore * t) / yTicks;
+                        const y = bottom - (val / maxScore) * H;
+                        ctx.fillText(val.toFixed(0), left - 4, y + 4);
+                        ctx.save();
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(left - 3, y);
+                        ctx.lineTo(left, y);
+                        ctx.stroke();
+                        ctx.restore();
+                    }
+
+                    // X-axis tick marks
+                    ctx.textAlign = 'center';
+                    const xTicks = 5;
+                    for (let t = 0; t <= xTicks; t++) {
+                        const ratio = t / xTicks;
+                        const x = left + ratio * W;
+                        ctx.fillText((ratio * 100).toFixed(0) + '%', x, bottom + 14);
+                        ctx.save();
+                        ctx.strokeStyle = '#333';
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(x, bottom);
+                        ctx.lineTo(x, bottom + 3);
+                        ctx.stroke();
+                        ctx.restore();
+                    }
+
+                    // Axis labels
+                    ctx.fillStyle = '#aaa';
+                    ctx.font = '11px Ubuntu Mono, monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('Suspicious Token Ratio (matched / total tokens)', left + W / 2, bottom + 28);
+
+                    ctx.save();
+                    ctx.translate(14, top + H / 2);
+                    ctx.rotate(-Math.PI / 2);
+                    ctx.fillText('Threat Score', 0, 0);
+                    ctx.restore();
+
+                    // Plot dots
                     const hitPoints = [];
 
-                    valid.forEach((d, idx) => {
-                        const ent = d.entropy !== null ? d.entropy : 0;
+                    for (let i = 0; i < valid.length; i++) {
+                        const d = valid[i];
+                        const ratio = d.total_tokens > 0
+                            ? Math.min(1.0, (d.suspCount || 0) / d.total_tokens)
+                            : 0;
                         const score = d.threatScore || 0;
-                        const px = left + Math.min(1.0, (ent / maxEnt)) * (right - left);
-                        const py = bottom - Math.min(1.0, (score / maxScore)) * (bottom - top);
 
-                        let color = '#888';
-                        if (score >= 10.0 && ent >= 5.5) color = '#ff4444';
-                        else if (score >= 8.0) color = '#ffaa00';
-                        else if (ent >= 5.8) color = '#4a8bc2';
+                        const px = left + ratio * W;
+                        const py = bottom - Math.min(1.0, score / maxScore) * H;
+
+                        // Color by quadrant
+                        let color;
+                        if (score >= yThresh && ratio >= xThresh) {
+                            color = '#ff4444';  // top-right: obfuscated webshell
+                        } else if (score >= yThresh) {
+                            color = '#ffaa00';  // top-left: RCE with low ratio
+                        } else if (ratio >= xThresh) {
+                            color = '#4a8bc2';  // bottom-right: dense suspicious
+                        } else {
+                            color = '#555';     // bottom-left: benign
+                        }
 
                         ctx.fillStyle = color;
                         ctx.beginPath();
-                        ctx.arc(px, py, 3, 0, Math.PI * 2);
+                        ctx.arc(px, py, 3.5, 0, Math.PI * 2);
                         ctx.fill();
 
                         hitPoints.push({ x: px, y: py, data: d });
-                    });
+                    }
 
                     const canvas = ctx.canvas;
                     function getMousePos(e) {
@@ -1667,8 +1837,10 @@ if (_BLACKLIST_) {
                         };
                     }
 
-                    function findHit(mx, my, radius = 10) {
-                        for (let hp of hitPoints) {
+                    function findHit(mx, my, radius) {
+                        radius = radius || 10;
+                        for (let j = 0; j < hitPoints.length; j++) {
+                            const hp = hitPoints[j];
                             const dx = hp.x - mx;
                             const dy = hp.y - my;
                             if (dx * dx + dy * dy < radius * radius) return hp;
@@ -1681,14 +1853,15 @@ if (_BLACKLIST_) {
                         const hit = findHit(pos.x, pos.y);
                         if (hit) {
                             const d = hit.data;
-                            const info = `
-                                <div><span class="label">File:</span> <span class="value">${escapeHtml(d.path)}</span></div>
-                                <div><span class="label">Threat Score:</span> <span class="value">${d.threatScore.toFixed(1)}</span></div>
-                                <div><span class="label">Entropy:</span> <span class="value">${d.entropy !== null ? d.entropy.toFixed(2) : 'N/A'}</span></div>
-                                <div><span class="label">Tokens:</span> <span class="value">${d.total_tokens}</span></div>
-                                <div><span class="label">Matched Tokens:</span> <span class="value">${escapeHtml((d.matched_tokens || []).join(', '))}</span></div>
-                            `;
-                            tooltip.innerHTML = info;
+                            const ratio = d.total_tokens > 0
+                                ? ((d.suspCount || 0) / d.total_tokens * 100).toFixed(1)
+                                : '0.0';
+                            tooltip.innerHTML =
+                                '<div><span class="label">File:</span> <span class="value">' + escapeHtml(d.path) + '</span></div>' +
+                                '<div><span class="label">Threat Score:</span> <span class="value">' + d.threatScore.toFixed(1) + '</span></div>' +
+                                '<div><span class="label">Token Ratio:</span> <span class="value">' + ratio + '%</span></div>' +
+                                '<div><span class="label">Matched / Total:</span> <span class="value">' + (d.suspCount || 0) + ' / ' + d.total_tokens + '</span></div>' +
+                                '<div><span class="label">Matched:</span> <span class="value">' + escapeHtml((d.matched_tokens || []).join(', ')) + '</span></div>';
                             tooltip.style.display = 'block';
                             positionTooltip(e, tooltip);
                             canvas.style.cursor = 'pointer';
@@ -1703,9 +1876,6 @@ if (_BLACKLIST_) {
                         const hit = findHit(pos.x, pos.y);
                         if (hit) filterByPath(hit.data.path);
                     });
-
-                    drawLabel(ctx, 'Shannon Entropy (bits/byte)', (left + right) / 2, bottom + 35, 'center');
-                    drawLabel(ctx, 'Threat Score', 8, top + 10, 'left');
                 }
 
                 // 2. TIMELINE HISTOGRAM: File Modifications over Time
