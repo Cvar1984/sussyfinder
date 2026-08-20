@@ -290,7 +290,16 @@ function inStringArray($needle, $haystack)
 function compareTokens($tokenNeedles, $tokenHaystack)
 {
     $output = array();
-    foreach ($tokenNeedles as $tokenNeedle) {
+    $needles = array();
+    if (is_array($tokenNeedles)) {
+        $keys = array_keys($tokenNeedles);
+        if (isset($keys[0]) && is_int($keys[0])) {
+            $needles = array_values($tokenNeedles);
+        } else {
+            $needles = $keys;
+        }
+    }
+    foreach ($needles as $tokenNeedle) {
         if (inStringArray($tokenNeedle, $tokenHaystack)) {
             $output[] = $tokenNeedle;
         }
@@ -379,7 +388,7 @@ function shannonEntropy($data)
         return 0;
     }
 
-    $freq = array_count_values(str_split($data));
+    $freq = count_chars($data, 1);
     $entropy = 0;
 
     foreach ($freq as $count) {
@@ -388,6 +397,79 @@ function shannonEntropy($data)
     }
     return $entropy;
 }
+
+
+/**
+ * Calculate composite threat score using weighted tokens and combination rules.
+ * Backward compatible with PHP 4.3.
+ *
+ * @param array $matchedTokens
+ * @param string $filePath
+ * @param float $entropy
+ * @param int $size
+ * @param array $tokenWeights Master token weights array
+ * @return float
+ */
+function calculateThreatScore($matchedTokens, $filePath, $entropy, $size, $tokenWeights = array())
+{
+    $score = 0.0;
+    $hasCritical = false;
+    $hasObfuscation = false;
+    $hasUploadReq = false;
+
+    $critTokens = array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function');
+    $obfTokens  = array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'hex2bin', 'bin2hex');
+    $reqTokens  = array('move_uploaded_file', '$_files', 'file_put_contents');
+
+    if (is_array($matchedTokens)) {
+        foreach ($matchedTokens as $token) {
+            $tokenLower = strtolower($token);
+            if (isset($tokenWeights[$tokenLower])) {
+                $score += (float)$tokenWeights[$tokenLower];
+            } else {
+                $score += 1.0;
+            }
+
+            if (in_array($tokenLower, $critTokens)) {
+                $hasCritical = true;
+            }
+            if (in_array($tokenLower, $obfTokens)) {
+                $hasObfuscation = true;
+            }
+            if (in_array($tokenLower, $reqTokens)) {
+                $hasUploadReq = true;
+            }
+        }
+    }
+
+    // Combination Multipliers
+    if ($hasCritical && $hasObfuscation) {
+        $score *= 2.5; // High confidence RCE + Obfuscation combo
+    }
+    if ($hasCritical && $hasUploadReq) {
+        $score *= 1.8; // RCE + Upload handling combo
+    }
+
+    // Path location penalty (e.g. uploads, tmp, cache, images)
+    $pathLower = strtolower(str_replace('\\', '/', $filePath));
+    if (strpos($pathLower, 'upload') !== false ||
+        strpos($pathLower, 'cache') !== false ||
+        strpos($pathLower, 'tmp') !== false ||
+        strpos($pathLower, 'images') !== false ||
+        strpos($pathLower, 'media') !== false) {
+        if ($score > 0 || $entropy > 5.5) {
+            $score += 5.0; // Extra suspicion for code in upload/cache locations
+        }
+    }
+
+    // High Entropy Bonus for small PHP files (< 20KB with entropy > 5.8)
+    if ($size !== null && $size < 20480 && $entropy > 5.8) {
+        $score += 3.0;
+    }
+
+    return round($score, 2);
+}
+
 
 // $ext = array(
 //     'php',
@@ -412,125 +494,102 @@ $pattern = array(
     'htaccess'
 );
 
+/**
+ * Master Token Needles and Threat Weights Map
+ * Maps token strings directly to their threat score weights.
+ */
 $tokenNeedles = array(
-    // Obfuscation
-    'base64_decode',
-    'rawurldecode',
-    'urldecode',
-    'gzinflate',
-    'gzuncompress',
-    'str_rot13',
-    'convert_uu',
-    'htmlspecialchars_decode',
-    'bin2hex',
-    'hex2bin',
-    'hexdec',
-    'chr',
-    'strrev',
-    'goto',
-    'implode',
-    'strtr',
-    'extract',
-    'parse_str', //works like extract if only one argument is given.
-    'substr',
-    'mb_substr',
-    'str_replace',
-    'substr_replace',
-    'preg_replace', // able to do eval on match
-    'exif_read_data',
-    'readgzfile',
+    // Critical RCE (Weight: 10.0)
+    'eval' => 10.0,
+    'exec' => 10.0,
+    'shell_exec' => 10.0,
+    'system' => 10.0,
+    'passthru' => 10.0,
+    'proc_open' => 10.0,
+    'assert' => 10.0,
+    'create_function' => 10.0,
+    'pcntl_fork' => 10.0,
+    'posix_kill' => 10.0,
+    'posix_setuid' => 10.0,
 
-    // Shell / Process
-    'eval',
-    'exec',
-    'shell_exec',
-    'system',
-    'passthru',
-    'pcntl_fork',
-    'fsockopen',
-    'proc_open',
-    'popen ',
-    'assert', // identical to eval
-    'posix_kill',
-    'posix_setpgid',
-    'posix_setsid',
-    'posix_setuid',
-    'proc_nice',
-    'proc_close',
-    'proc_terminate',
-    'apache_child_terminate',
+    // High Obfuscation & De-encoding (Weight: 5.0)
+    'base64_decode' => 5.0,
+    'gzinflate' => 5.0,
+    'str_rot13' => 5.0,
+    'gzuncompress' => 5.0,
+    'convert_uu' => 5.0,
+    'rawurldecode' => 5.0,
+    'urldecode' => 5.0,
+    'hex2bin' => 5.0,
+    'bin2hex' => 5.0,
+    'exif_read_data' => 5.0,
+    'readgzfile' => 5.0,
+    '$SISTEMIT_COM_ENC' => 5.0,
 
-    // Server Information
-    'posix_getuid',
-    'posix_geteuid',
-    'posix_getegid',
-    'posix_getpwuid',
-    'posix_getgrgid',
-    'posix_mkfifo',
-    'posix_getlogin',
-    'posix_ttyname',
-    'getenv',
-    'proc_get_status',
-    'get_cfg_var',
-    'disk_free_space',
-    'disk_total_space',
-    'diskfreespace',
-    'getlastmo',
-    'getmyinode',
-    'getmypid',
-    'getmyuid',
-    'getmygid',
-    'fileowner',
-    'filegroup',
-    'get_current_user',
-    'pathinfo',
-    'getcwd',
-    'sys_get_temp_dir',
-    'basename',
-    'phpinfo',
-    'php_uname',
+    // Obfuscation Helpers & I/O Manipulation (Weight: 2.0)
+    'htmlspecialchars_decode' => 2.0,
+    'hexdec' => 2.0,
+    'chr' => 2.0,
+    'strrev' => 2.0,
+    'goto' => 2.0,
+    'extract' => 2.0,
+    'parse_str' => 2.0,
+    'popen ' => 2.0,
+    'fsockopen' => 2.0,
+    'posix_setsid' => 2.0,
+    'posix_setpgid' => 2.0,
+    'proc_nice' => 2.0,
+    'proc_close' => 2.0,
+    'proc_terminate' => 2.0,
+    'apache_child_terminate' => 2.0,
+    'move_uploaded_file' => 2.0,
+    '$_files' => 2.0,
+    '$auth_pass' => 2.0,
+    '$password' => 2.0,
+    '$pass' => 2.0,
+    'preg_replace' => 2.0,
 
-    // Database
-    'mysql_connect',
-    'mysqli_connect',
-    'mysqli_query',
-    'mysql_query',
-
-    // I/O
-    'fopen',
-    'fsockopen',
-    'file_put_contents',
-    'file_get_contents',
-    'url_get_contents',
-    'stream_get_meta_data',
-    'move_uploaded_file',
-    '$_files',
-    'copy',
-    'include',
-    'include_once',
-    'require',
-    'require_once',
-    '__file__',
-
-    // Miscellaneous
-    'mail',
-    'putenv',
-    'curl_init',
-    'tmpfile',
-    'allow_url_fopen',
-    'ini_set',
-    'set_time_limit',
-    'session_start',
-    'symlink',
-    '__halt_compiler',
-    '__compiler_halt_offset__',
-    'error_reporting',
-    'create_function',
-    'get_magic_quotes_gpc',
-    '$auth_pass',
-    '$password',
-    '$pass',
-    '$SISTEMIT_COM_ENC',
+    // Low / Routine Tokens (Weight: 0.1)
+    'implode' => 0.1,
+    'strtr' => 0.1,
+    'substr' => 0.1,
+    'mb_substr' => 0.1,
+    'str_replace' => 0.1,
+    'substr_replace' => 0.1,
+    'basename' => 0.1,
+    'getcwd' => 0.1,
+    'pathinfo' => 0.1,
+    'getenv' => 0.1,
+    'get_current_user' => 0.1,
+    'fileowner' => 0.1,
+    'filegroup' => 0.1,
+    'disk_free_space' => 0.1,
+    'disk_total_space' => 0.1,
+    'sys_get_temp_dir' => 0.1,
+    'fopen' => 0.1,
+    'file_put_contents' => 0.1,
+    'file_get_contents' => 0.1,
+    'url_get_contents' => 0.1,
+    'stream_get_meta_data' => 0.1,
+    'copy' => 0.1,
+    'include' => 0.1,
+    'require' => 0.1,
+    'include_once' => 0.1,
+    'require_once' => 0.1,
+    '__file__' => 0.1,
+    'mail' => 0.1,
+    'putenv' => 0.1,
+    'curl_init' => 0.1,
+    'tmpfile' => 0.1,
+    'allow_url_fopen' => 0.1,
+    'ini_set' => 0.1,
+    'set_time_limit' => 0.1,
+    'session_start' => 0.1,
+    'symlink' => 0.1,
+    '__halt_compiler' => 0.1,
+    '__compiler_halt_offset__' => 0.1,
+    'error_reporting' => 0.1,
+    'get_magic_quotes_gpc' => 0.1
 );
 
 $whitelistMD5Sums = array();
@@ -854,7 +913,7 @@ if (_BLACKLIST_) {
                     <th>Sussy Finder</th>
                 </tr>
                 <tr>
-                    <td><input type="text" name="dir" value="<?= getcwd() ?>"></td>
+                    <td><input type="text" name="dir" value="<?php echo getcwd(); ?>"></td>
                 </tr>
                 <tr>
                     <td><input type="submit" name="submit" value="SEARCH"></td>
@@ -880,11 +939,12 @@ if (_BLACKLIST_) {
 
                 $content = file_get_contents($filePath);
                 $tokens = getFileTokens($filePath);
-                $matchedTokens = compareTokens($tokens, $tokenNeedles);
+                $matchedTokens = compareTokens($tokenNeedles, $tokens);
                 $totalTokens = count($tokens);
                 $size = filesize($filePath);
                 $mtime = filemtime($filePath);
                 $entropy = shannonEntropy($content);
+                $threatScore = calculateThreatScore($matchedTokens, $filePath, $entropy, $size, $tokenNeedles);
 
                 $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
                 $isHtaccess = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
@@ -917,6 +977,7 @@ if (_BLACKLIST_) {
                     'duplicate_of' => $duplicateOf,
                     'error' => $error,
                     'is_unreadable' => false,
+                    'threat_score' => $threatScore,
                 );
             }
 
@@ -940,6 +1001,7 @@ if (_BLACKLIST_) {
                     'duplicate_of' => false,
                     'error' => null,
                     'is_unreadable' => true,
+                    'threat_score' => 0,
                 );
             }
             echo '<script>const rawFileData = ' . json_encode($rawFeatures) . ';</script>';
@@ -948,22 +1010,27 @@ if (_BLACKLIST_) {
 
         <!-- Controls -->
         <div class="control-bar">
-            <button type="button" onclick="copyResults()">📋 Copy Results</button>
-            <button type="button" onclick="sortResults('mtime')">🕒 Sort by Time</button>
-            <button type="button" onclick="sortResults('tokens')">🔢 Sort by Tokens</button>
-            <button type="button" onclick="sortResults('zSusp')">📊 Sort by Z‑Score</button>
-            <button type="button" onclick="sortResults('residual')">📈 Sort by Residual</button>
-            <label style="margin-left:20px;">
-                <input type="checkbox" id="showAnomaliesOnly" onchange="toggleAnomalies()"> ⚠️ Only Anomalies
+            <button type="button" onclick="copyResults()">Copy Results</button>
+            <button type="button" onclick="sortResults('threat')">Sort by Threat Score</button>
+            <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
+            <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
+            <button type="button" onclick="sortResults('zSusp')">Sort by Z‑Score</button>
+            <button type="button" onclick="sortResults('residual')">Sort by Residual</button>
+            <label style="margin-left:15px;">
+                Filter:
+                <select id="severityFilter" onchange="applySeverityFilter()" style="padding:4px; border-radius:5px; background:#2a2a2a; color:#d0d0d0; border:1px solid #555;">
+                    <option value="all">All Files</option>
+                    <option value="anomalies">⚠️ Only Anomalies</option>
+                    <option value="critical">🔴 Critical Threat (Score >= 10)</option>
+                    <option value="obfuscated">🟣 High Entropy / Obfuscated</option>
+                </select>
             </label>
             <label style="margin-left:10px;">
-                Z‑threshold: <input type="number" id="zThreshold" value="3.5" step="0.1" style="width:60px;"
-                    onchange="applyThreshold()">
+                Z‑threshold: <input type="number" id="zThreshold" value="3.5" step="0.1" style="width:55px;" onchange="applyThreshold()">
             </label>
-            <!-- Combined search -->
-            <label style="margin-left:20px;">
-                🔍 Search (filename/token):
-                <input type="text" id="searchInput" placeholder="e.g. eval or .php" style="width:180px;" oninput="applySearch()">
+            <label style="margin-left:15px;">
+                🔍 Search:
+                <input type="text" id="searchInput" placeholder="e.g. eval or .php" style="width:160px;" oninput="applySearch()">
             </label>
             <label style="margin-left:5px;">
                 <input type="checkbox" id="searchTokensOnly" onchange="applySearch()"> Tokens only
@@ -972,26 +1039,26 @@ if (_BLACKLIST_) {
 
         <!-- Dashboard controls and panels -->
         <div class="dashboard-controls">
-            <button type="button" onclick="toggleInsights()">📋 Show Insights</button>
-            <button type="button" onclick="toggleCharts()">📊 Show Charts</button>
-            <button type="button" onclick="clearFilters()">🧹 Clear Filters</button>
+            <button type="button" onclick="toggleInsights()">Show Insights</button>
+            <button type="button" onclick="toggleCharts()">Show Charts</button>
+            <button type="button" onclick="clearFilters()">Clear Filters</button>
         </div>
 
         <div id="insightsPanel" class="dashboard-panel">
-            <h3>📋 File System Insights</h3>
+            <h3>File System & Threat Insights</h3>
             <div id="insightsGrid" class="insights-grid"></div>
             <div class="insight-columns">
                 <div id="topSuspicious" class="insight-list">
-                    <h4>🔍 Top Suspicious Files</h4>
+                    <h4>Top Suspicious Files</h4>
                 </div>
                 <div id="topRecent" class="insight-list">
-                    <h4>🕒 Most Recent Files</h4>
+                    <h4>Most Recent Files</h4>
                 </div>
             </div>
         </div>
 
         <div id="chartsPanel" class="dashboard-panel">
-            <h3>📊 Anomaly Visualizations</h3>
+            <h3>Threat Matrix & Anomaly Visualizations</h3>
             <div id="chartsGrid" class="charts-grid"></div>
         </div>
 
@@ -1003,18 +1070,15 @@ if (_BLACKLIST_) {
         </table>
 
         <script>
-            // All statistical analysis in browser
+            // Client-side statistical analysis and graph rendering
             let analyzedData = [];
-            let currentSort = 'mtime';
-            let currentFilterAnomalies = false;
+            let currentSort = 'threat';
+            let currentFilterMode = 'all';
             let currentThreshold = 3.5;
             let insightsVisible = false;
             let chartsVisible = false;
             let currentSearch = '';
             let searchTokensOnly = false;
-
-            // For chart interactivity
-            let chartDataPoints = []; // store point info for each chart
 
             function computeStats(values) {
                 const filtered = values.filter(v => v !== null && !isNaN(v));
@@ -1029,6 +1093,7 @@ if (_BLACKLIST_) {
                 if (std === 0 || value === null) return 0;
                 return (value - mean) / std;
             }
+
             function formatDate(timestamp) {
                 if (!timestamp) return 'N/A';
                 const d = new Date(timestamp * 1000);
@@ -1066,6 +1131,7 @@ if (_BLACKLIST_) {
                             zScores: { size: 0, mtime: 0, tokens: 0, susp: 0, entropy: 0 },
                             residual: 0,
                             isAnomaly: true,
+                            threatScore: 0,
                             date: formatDate(d.mtime),
                             suspCount: 0
                         };
@@ -1081,7 +1147,10 @@ if (_BLACKLIST_) {
                     const expectedSusp = d.total_tokens * avgSuspPerToken;
                     const residual = suspCount - expectedSusp;
 
-                    const isAnomaly = (Math.abs(zSize) > threshold) ||
+                    const threatScore = typeof d.threat_score !== 'undefined' ? d.threat_score : 0;
+
+                    const isAnomaly = (threatScore >= 8.0) ||
+                        (Math.abs(zSize) > threshold) ||
                         (Math.abs(zSusp) > threshold) ||
                         (Math.abs(zEntropy) > threshold) ||
                         (Math.abs(zMtime) > threshold) ||
@@ -1095,13 +1164,13 @@ if (_BLACKLIST_) {
                         zScores: { size: zSize, mtime: zMtime, tokens: zTokens, susp: zSusp, entropy: zEntropy },
                         residual: residual,
                         isAnomaly: isAnomaly,
-                        date: d.mtime ? new Date(d.mtime * 1000).toLocaleString() : 'N/A',
+                        threatScore: threatScore,
+                        date: d.mtime ? formatDate(d.mtime) : 'N/A',
                         suspCount: suspCount
                     };
                 });
             }
 
-            // Escape HTML
             function escapeHtml(value) {
                 if (value === undefined || value === null) return '';
                 return String(value)
@@ -1112,7 +1181,6 @@ if (_BLACKLIST_) {
                     .replace(/'/g, '&#039;');
             }
 
-            // Copy text
             function copyText(text) {
                 if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
                     return navigator.clipboard.writeText(text);
@@ -1138,21 +1206,21 @@ if (_BLACKLIST_) {
                 });
             }
 
-            // Filtering function that combines anomaly, search, and token-only
             function shouldShowFile(d) {
-                if (currentFilterAnomalies && !d.isAnomaly) return false;
+                if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
+                if (currentFilterMode === 'critical' && d.threatScore < 10.0 && !d.is_blacklisted) return false;
+                if (currentFilterMode === 'obfuscated' && (d.entropy < 5.8 || d.is_unreadable)) return false;
+
                 if (!currentSearch.trim()) return true;
 
                 const searchLower = currentSearch.toLowerCase();
                 const pathMatch = d.path.toLowerCase().includes(searchLower);
                 if (searchTokensOnly) {
-                    // Only match tokens
                     if (d.matched_tokens && d.matched_tokens.length) {
                         return d.matched_tokens.some(t => t.toLowerCase().includes(searchLower));
                     }
                     return false;
                 } else {
-                    // Match path OR tokens
                     if (pathMatch) return true;
                     if (d.matched_tokens && d.matched_tokens.length) {
                         return d.matched_tokens.some(t => t.toLowerCase().includes(searchLower));
@@ -1161,40 +1229,48 @@ if (_BLACKLIST_) {
                 }
             }
 
-            // Render table
             function renderTable(data) {
                 let filtered = data.filter(d => shouldShowFile(d));
 
-                if (currentSort === 'mtime') filtered.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+                if (currentSort === 'threat') filtered.sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0));
+                else if (currentSort === 'mtime') filtered.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
                 else if (currentSort === 'tokens') filtered.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
                 else if (currentSort === 'zSusp') filtered.sort((a, b) => Math.abs(b.zScores.susp) - Math.abs(a.zScores.susp));
                 else if (currentSort === 'residual') filtered.sort((a, b) => (b.residual || 0) - (a.residual || 0));
 
                 let html = '';
                 if (filtered.length === 0) {
-                    html = '<tr><td style="color:#888;text-align:center;">No files match the current filters.</td></tr>';
+                    html = '<tr><td style="color:#888;text-align:center;padding:15px;">No files match the current search or filters.</td></tr>';
                 } else {
                     filtered.forEach(d => {
                         let color = '#dddbdb';
+                        let badge = '';
                         let status = '';
                         let verbosity = '';
 
                         if (d.is_unreadable) {
                             color = '#f72f2f';
-                            status = 'NOT_READABLE';
+                            badge = '<span style="background:#8b0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">NOT READABLE</span> ';
                         } else if (d.is_blacklisted) {
                             color = '#f72f2f';
-                            status = 'BLACKLIST';
-                            if (d.error) status += ' ' + d.error;
+                            badge = '<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">BLACKLIST</span> ';
+                            if (d.error) status = d.error;
+                        } else if (d.threatScore >= 15.0) {
+                            color = '#ff4444';
+                            badge = `<span style="background:#990000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">CRITICAL (${d.threatScore.toFixed(1)})</span> `;
+                        } else if (d.threatScore >= 8.0) {
+                            color = '#ffaa00';
+                            badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
                         } else if (d.is_htaccess) {
                             color = '#66ccff';
-                            status = '';
+                            badge = '<span style="background:#005580;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HTACCESS</span> ';
                         } else if (d.duplicate_of !== false) {
-                            status = '' + d.duplicate_of;
+                            badge = '<span style="background:#444;color:#aaa;padding:2px 6px;border-radius:3px;font-size:11px;">DUPLICATE</span> ';
+                            status = 'Duplicate of ' + d.duplicate_of;
                         } else if (d.matched_tokens && d.matched_tokens.length > 0) {
                             let tokens = d.matched_tokens.map(t => {
-                                const essential = ['base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'goto', 'eval', 'exec', 'shell_exec', 'system', 'passthru', 'pcntl_fork', 'fsockopen', 'proc_open', 'popen ', 'posix_kill', 'posix_setpgid', 'posix_setsid', 'posix_setuid', 'fopen', 'fsockopen', 'file_put_contents', 'file_get_contents', 'url_get_contents', 'move_uploaded_file', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
-                                if (essential.includes(t)) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
+                                const essential = ['eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function', 'base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
+                                if (essential.includes(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
                                 return escapeHtml(t);
                             });
                             status = tokens.join(', ');
@@ -1204,21 +1280,21 @@ if (_BLACKLIST_) {
                             verbosity = d.date;
                         } else {
                             const sizeKB = (d.size / 1024).toFixed(1);
-                            verbosity = `${d.date} | Size: ${sizeKB} KB, Tokens: ${d.total_tokens || 0}, Suspicious: ${d.suspCount}, Z‑Susp: ${d.zScores.susp.toFixed(1)}, Residual: ${d.residual.toFixed(1)}`;
+                            const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
+                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)}`;
                         }
 
                         const warningSign = d.isAnomaly ? '⚠️ ' : '';
                         const fileLink = `<span class="file-link" onclick="copyText('${escapeHtml(d.path)}')">${escapeHtml(d.path)}</span>`;
-                        // MD5 copy button (only if readable and has a real MD5)
                         let md5Btn = '';
                         if (!d.is_unreadable && d.md5 && d.md5 !== 'N/A') {
                             md5Btn = `<span class="copy-hash-btn" onclick="copyText('${escapeHtml(d.md5)}')" title="Copy MD5 hash">📋</span>`;
                         }
-                        let mainLine = warningSign + fileLink + md5Btn;
+                        let mainLine = warningSign + badge + fileLink + md5Btn;
                         if (status) mainLine += ' (' + status + ')';
 
                         html += `<tr>
-                            <td style="color:${color}; font-size:14px;">
+                            <td style="color:${color}; font-size:13px;">
                                 ${mainLine}
                                 <br><span class="verbosity">${verbosity}</span>
                             </td>
@@ -1228,7 +1304,6 @@ if (_BLACKLIST_) {
                 document.getElementById('result').innerHTML = html;
             }
 
-            // Copy full results
             function copyResults() {
                 let text = analyzedData
                     .filter(d => shouldShowFile(d))
@@ -1243,7 +1318,7 @@ if (_BLACKLIST_) {
                         }
                         if (!d.is_unreadable && d.size !== null) {
                             const sizeKB = (d.size / 1024).toFixed(1);
-                            line += ` | ${d.date} | Size: ${sizeKB} KB, Tokens: ${d.total_tokens}, Suspicious: ${d.suspCount}, Z-Susp: ${d.zScores.susp.toFixed(1)}, Residual: ${d.residual.toFixed(1)}`;
+                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
                             if (d.md5 && d.md5 !== 'N/A') line += ` | MD5: ${d.md5}`;
                         } else {
                             line += ` | ${d.date}`;
@@ -1256,14 +1331,20 @@ if (_BLACKLIST_) {
                     .catch(() => alert('Failed to copy.'));
             }
 
-            // Sort, anomaly toggle, threshold
             function sortResults(mode) {
                 currentSort = mode;
                 renderTable(analyzedData);
             }
 
+            function applySeverityFilter() {
+                currentFilterMode = document.getElementById('severityFilter').value;
+                renderTable(analyzedData);
+            }
+
             function toggleAnomalies() {
-                currentFilterAnomalies = document.getElementById('showAnomaliesOnly').checked;
+                const checked = document.getElementById('showAnomaliesOnly').checked;
+                currentFilterMode = checked ? 'anomalies' : 'all';
+                document.getElementById('severityFilter').value = currentFilterMode;
                 renderTable(analyzedData);
             }
 
@@ -1281,25 +1362,22 @@ if (_BLACKLIST_) {
                 }
             }
 
-            // Combined search
             function applySearch() {
                 currentSearch = document.getElementById('searchInput').value;
                 searchTokensOnly = document.getElementById('searchTokensOnly').checked;
                 renderTable(analyzedData);
             }
 
-            // Clear all filters (except threshold)
             function clearFilters() {
-                document.getElementById('showAnomaliesOnly').checked = false;
+                document.getElementById('severityFilter').value = 'all';
                 document.getElementById('searchInput').value = '';
                 document.getElementById('searchTokensOnly').checked = false;
-                currentFilterAnomalies = false;
+                currentFilterMode = 'all';
                 currentSearch = '';
                 searchTokensOnly = false;
                 renderTable(analyzedData);
             }
 
-            // Insights with clickable cards and rows
             function toggleInsights() {
                 insightsVisible = !insightsVisible;
                 const panel = document.getElementById('insightsPanel');
@@ -1314,8 +1392,8 @@ if (_BLACKLIST_) {
 
                 if (!data || data.length === 0) {
                     grid.innerHTML = '<div class="dashboard-empty">No scan data available. Run SEARCH first.</div>';
-                    topSuspicious.innerHTML = '<h4>🔍 Top Suspicious Files</h4><div class="dashboard-empty">No data.</div>';
-                    topRecentPanel.innerHTML = '<h4>🕒 Most Recent Files</h4><div class="dashboard-empty">No data.</div>';
+                    topSuspicious.innerHTML = '<h4>Top Suspicious Files</h4><div class="dashboard-empty">No data.</div>';
+                    topRecentPanel.innerHTML = '<h4>Most Recent Files</h4><div class="dashboard-empty">No data.</div>';
                     return;
                 }
 
@@ -1326,6 +1404,7 @@ if (_BLACKLIST_) {
                 const duplicates = data.filter(d => d.duplicate_of !== false).length;
                 const htaccess = data.filter(d => d.is_htaccess).length;
                 const anomalies = data.filter(d => d.isAnomaly).length;
+                const criticalCount = data.filter(d => d.threatScore >= 10.0 || d.is_blacklisted).length;
 
                 let avgSize = 0, minSize = 0, maxSize = 0;
                 let avgTokens = 0, minTokens = 0, maxTokens = 0;
@@ -1348,9 +1427,8 @@ if (_BLACKLIST_) {
                     maxMtime = Math.max.apply(null, mtimes);
                 }
 
-                // Helper to create clickable cards that set filters
-                function makeCard(label, value, sub, cls, filterFn) {
-                    return `<div class="insight-card ${cls}" onclick="applyInsightFilter('${label}', ${filterFn})">
+                function makeCard(label, value, sub, cls, filterType) {
+                    return `<div class="insight-card ${cls}" onclick="applyInsightFilter('${filterType}')">
                         <div class="label">${label}</div>
                         <div class="value">${value}</div>
                         <div class="sub">${sub}</div>
@@ -1359,44 +1437,36 @@ if (_BLACKLIST_) {
 
                 grid.innerHTML = `
                     ${makeCard('Total Files', data.length, `${readable.length} readable, ${unreadable} unreadable`, 'info', 'all')}
-                    ${makeCard('Anomalies', anomalies, `${data.length ? ((anomalies / data.length) * 100).toFixed(1) : 0}% of total`, anomalies > 0 ? 'danger' : 'success', 'anomaly')}
+                    ${makeCard('Critical Threats', criticalCount, `${anomalies} total anomalies flagged`, criticalCount > 0 ? 'danger' : 'success', 'critical')}
                     ${makeCard('Blacklisted', blacklisted, `${duplicates} duplicates, ${htaccess} .htaccess`, 'warning', 'blacklisted')}
                     ${makeCard('Average Size', `${(avgSize / 1024).toFixed(1)} KB`, `Min ${(minSize / 1024).toFixed(1)} | Max ${(maxSize / 1024).toFixed(1)}`, 'info', 'all')}
                     ${makeCard('Average Tokens', avgTokens.toFixed(0), `Min ${minTokens} | Max ${maxTokens}`, 'purple', 'all')}
                     ${makeCard('Modification Range', formatDate(minMtime), `to ${formatDate(maxMtime)}`, 'info', 'all')}
                 `;
 
-                // Top Suspicious (clickable rows)
-                const topSusp = valid.slice().sort((a, b) =>
-                    Math.abs((b.zScores && b.zScores.susp) || 0) -
-                    Math.abs((a.zScores && a.zScores.susp) || 0)
-                ).slice(0, 5);
+                const topSusp = valid.slice().sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0)).slice(0, 5);
 
-                let suspHtml = '<h4>🔍 Top Suspicious Files</h4>';
+                let suspHtml = '<h4>Top Threat Score Files</h4>';
                 if (topSusp.length === 0) {
                     suspHtml += '<div class="dashboard-empty">No readable files.</div>';
                 } else {
                     suspHtml += '<table>';
-                    suspHtml += '<tr><th>File</th><th>|Z-Susp|</th><th>Suspicious</th></tr>';
+                    suspHtml += '<tr><th>File</th><th>Threat Score</th><th>Tokens</th></tr>';
                     topSusp.forEach(d => {
                         const name = String(d.path || '').split('/').pop() || d.path;
-                        const z = Math.abs((d.zScores && d.zScores.susp) || 0);
                         suspHtml += `<tr class="clickable-row" onclick="filterByPath('${escapeHtml(d.path)}')">
                             <td>${escapeHtml(name)}</td>
-                            <td>${z.toFixed(2)}</td>
-                            <td>${d.suspCount || 0}</td>
+                            <td><strong style="color:${d.threatScore >= 10 ? '#ff4444' : '#ffaa00'}">${d.threatScore.toFixed(1)}</strong></td>
+                            <td>${d.suspCount || 0} matched</td>
                         </tr>`;
                     });
                     suspHtml += '</table>';
                 }
                 topSuspicious.innerHTML = suspHtml;
 
-                // Most Recent (clickable rows)
-                const topRecent = valid.slice().sort((a, b) =>
-                    (Number(b.mtime) || 0) - (Number(a.mtime) || 0)
-                ).slice(0, 5);
+                const topRecent = valid.slice().sort((a, b) => (Number(b.mtime) || 0) - (Number(a.mtime) || 0)).slice(0, 5);
 
-                let recentHtml = '<h4>🕒 Most Recent Files</h4>';
+                let recentHtml = '<h4>Most Recent Files</h4>';
                 if (topRecent.length === 0) {
                     recentHtml += '<div class="dashboard-empty">No readable files.</div>';
                 } else {
@@ -1414,39 +1484,36 @@ if (_BLACKLIST_) {
                 topRecentPanel.innerHTML = recentHtml;
             }
 
-            // Filter functions called from insights
-            function applyInsightFilter(label, type) {
-                // Reset other filters, then set specific
-                document.getElementById('showAnomaliesOnly').checked = false;
+            function applyInsightFilter(type) {
                 document.getElementById('searchInput').value = '';
                 document.getElementById('searchTokensOnly').checked = false;
-                currentFilterAnomalies = false;
                 currentSearch = '';
                 searchTokensOnly = false;
 
-                if (type === 'anomaly') {
-                    document.getElementById('showAnomaliesOnly').checked = true;
-                    currentFilterAnomalies = true;
+                if (type === 'critical') {
+                    currentFilterMode = 'critical';
                 } else if (type === 'blacklisted') {
                     currentSearch = '__BLACKLIST__';
-                    searchTokensOnly = false;
+                    currentFilterMode = 'all';
+                } else if (type === 'anomaly') {
+                    currentFilterMode = 'anomalies';
+                } else {
+                    currentFilterMode = 'all';
                 }
+                document.getElementById('severityFilter').value = currentFilterMode;
                 renderTable(analyzedData);
             }
 
-            // Filter by a specific path (click on insight list item)
             function filterByPath(path) {
                 document.getElementById('searchInput').value = path;
                 currentSearch = path;
                 searchTokensOnly = false;
                 document.getElementById('searchTokensOnly').checked = false;
-                // Also turn off anomaly filter
-                document.getElementById('showAnomaliesOnly').checked = false;
-                currentFilterAnomalies = false;
+                currentFilterMode = 'all';
+                document.getElementById('severityFilter').value = 'all';
                 renderTable(analyzedData);
             }
 
-            // Override shouldShowFile to handle blacklist pseudo-filter
             const originalShouldShow = shouldShowFile;
             shouldShowFile = function(d) {
                 if (currentSearch === '__BLACKLIST__') {
@@ -1455,7 +1522,6 @@ if (_BLACKLIST_) {
                 return originalShouldShow(d);
             };
 
-            // Charts with tooltips and click filtering
             function toggleCharts() {
                 chartsVisible = !chartsVisible;
                 const panel = document.getElementById('chartsPanel');
@@ -1463,11 +1529,9 @@ if (_BLACKLIST_) {
                 if (chartsVisible) renderCharts(analyzedData);
             }
 
-            // Helper to position fixed tooltip at mouse
             function positionTooltip(e, tooltip) {
                 let leftPos = e.clientX + 12;
                 let topPos = e.clientY + 12;
-                // Get tooltip dimensions
                 const rect = tooltip.getBoundingClientRect();
                 if (leftPos + rect.width > window.innerWidth) {
                     leftPos = e.clientX - rect.width - 12;
@@ -1475,7 +1539,6 @@ if (_BLACKLIST_) {
                 if (topPos + rect.height > window.innerHeight) {
                     topPos = e.clientY - rect.height - 12;
                 }
-                // Ensure not negative
                 leftPos = Math.max(0, leftPos);
                 topPos = Math.max(0, topPos);
                 tooltip.style.left = leftPos + 'px';
@@ -1491,19 +1554,13 @@ if (_BLACKLIST_) {
                     return;
                 }
 
-                const valid = data.filter(d =>
-                    !d.is_unreadable &&
-                    d.size !== null &&
-                    d.total_tokens !== null &&
-                    d.mtime !== null
-                );
+                const valid = data.filter(d => !d.is_unreadable && d.size !== null && d.mtime !== null);
 
                 if (valid.length < 2) {
                     grid.innerHTML = '<div class="dashboard-empty">Not enough readable files to render charts.</div>';
                     return;
                 }
 
-                // Tooltip element for charts
                 const tooltip = document.getElementById('chart-tooltip');
 
                 function makeBox(title) {
@@ -1514,6 +1571,7 @@ if (_BLACKLIST_) {
                     titleEl.style.textAlign = 'center';
                     titleEl.style.color = '#ccc';
                     titleEl.style.marginBottom = '8px';
+                    titleEl.style.fontWeight = 'bold';
                     titleEl.textContent = title;
                     box.appendChild(titleEl);
 
@@ -1533,7 +1591,7 @@ if (_BLACKLIST_) {
                 }
 
                 function drawAxes(ctx, left, top, right, bottom) {
-                    ctx.strokeStyle = '#666';
+                    ctx.strokeStyle = '#555';
                     ctx.lineWidth = 1;
                     ctx.beginPath();
                     ctx.moveTo(left, top);
@@ -1542,41 +1600,65 @@ if (_BLACKLIST_) {
                     ctx.stroke();
                 }
 
-                function drawLabel(ctx, text, x, y, align) {
-                    ctx.fillStyle = '#aaa';
+                function drawLabel(ctx, text, x, y, align, color) {
+                    ctx.fillStyle = color || '#aaa';
                     ctx.font = '12px Ubuntu Mono, monospace';
                     ctx.textAlign = align || 'left';
                     ctx.fillText(text, x, y);
                 }
 
-                // Helper to draw points with interactivity
-                function drawScatter(ctx, left, top, right, bottom, points, xKey, yKey, labelX, labelY) {
-                    // points: array of data objects with x and y numeric values, and original data item
-                    const maxX = Math.max.apply(null, points.map(p => p.x)) || 1;
-                    const maxY = Math.max.apply(null, points.map(p => p.y)) || 1;
+                // 1. QUADRANT THREAT MATRIX: Shannon Entropy vs Composite Threat Score
+                {
+                    const ctx = makeBox('Threat Matrix: Shannon Entropy vs Composite Threat Score');
+                    clear(ctx);
+                    const left = 60, top = 25, right = 870, bottom = 250;
+                    drawAxes(ctx, left, top, right, bottom);
 
-                    // Store point coordinates for hit detection
+                    const maxEnt = 8.0;
+                    const maxScore = Math.max(20.0, ...valid.map(d => d.threatScore)) || 20.0;
+
+                    // Draw Quadrant Threshold Lines (Entropy = 5.5, ThreatScore = 8.0)
+                    const quadX = left + (5.5 / maxEnt) * (right - left);
+                    const quadY = bottom - (8.0 / maxScore) * (bottom - top);
+
+                    ctx.strokeStyle = '#444';
+                    ctx.setLineDash([4, 4]);
+                    ctx.beginPath();
+                    ctx.moveTo(quadX, top);
+                    ctx.lineTo(quadX, bottom);
+                    ctx.moveTo(left, quadY);
+                    ctx.lineTo(right, quadY);
+                    ctx.stroke();
+                    ctx.setLineDash([]); // Reset line dash
+
+                    // Quadrant Labels
+                    drawLabel(ctx, '🔴 OBFUSCATED WEBSHELL (High Threat, High Entropy)', right - 10, top + 15, 'right', '#ff4444');
+                    drawLabel(ctx, '🟠 RCE SCRIPT (High Threat, Normal Entropy)', left + 10, top + 15, 'left', '#ffaa00');
+                    drawLabel(ctx, '🔵 COMPRESSED ASSET (Low Threat, High Entropy)', right - 10, bottom - 10, 'right', '#4a8bc2');
+                    drawLabel(ctx, '⚪ NORMAL CODE', left + 10, bottom - 10, 'left', '#888');
+
                     const hitPoints = [];
 
-                    points.forEach((p, idx) => {
-                        const px = left + (p.x / maxX) * (right - left);
-                        const py = bottom - (p.y / maxY) * (bottom - top);
-                        const isAnomaly = p.item.isAnomaly;
-                        ctx.fillStyle = isAnomaly ? '#ff4444' : '#66a3ff';
+                    valid.forEach((d, idx) => {
+                        const ent = d.entropy !== null ? d.entropy : 0;
+                        const score = d.threatScore || 0;
+                        const px = left + Math.min(1.0, (ent / maxEnt)) * (right - left);
+                        const py = bottom - Math.min(1.0, (score / maxScore)) * (bottom - top);
+
+                        let color = '#888';
+                        if (score >= 10.0 && ent >= 5.5) color = '#ff4444';
+                        else if (score >= 8.0) color = '#ffaa00';
+                        else if (ent >= 5.8) color = '#4a8bc2';
+
+                        ctx.fillStyle = color;
                         ctx.beginPath();
-                        ctx.arc(px, py, 5, 0, Math.PI * 2);
+                        ctx.arc(px, py, 3, 0, Math.PI * 2);
                         ctx.fill();
 
-                        // Store for hit detection
-                        hitPoints.push({ x: px, y: py, data: p.item, index: idx });
+                        hitPoints.push({ x: px, y: py, data: d });
                     });
 
-                    // Add hover and click listeners on canvas
                     const canvas = ctx.canvas;
-                    // Remove old listeners to avoid duplicates
-                    canvas._listeners && canvas._listeners.forEach(l => canvas.removeEventListener(l.type, l.handler));
-                    canvas._listeners = [];
-
                     function getMousePos(e) {
                         const rect = canvas.getBoundingClientRect();
                         return {
@@ -1589,27 +1671,22 @@ if (_BLACKLIST_) {
                         for (let hp of hitPoints) {
                             const dx = hp.x - mx;
                             const dy = hp.y - my;
-                            if (dx * dx + dy * dy < radius * radius) {
-                                return hp;
-                            }
+                            if (dx * dx + dy * dy < radius * radius) return hp;
                         }
                         return null;
                     }
 
-                    // Mouse move: show tooltip
-                    const onMouseMove = function(e) {
+                    canvas.addEventListener('mousemove', function(e) {
                         const pos = getMousePos(e);
                         const hit = findHit(pos.x, pos.y);
                         if (hit) {
                             const d = hit.data;
                             const info = `
                                 <div><span class="label">File:</span> <span class="value">${escapeHtml(d.path)}</span></div>
-                                <div><span class="label">Size:</span> <span class="value">${(d.size/1024).toFixed(1)} KB</span></div>
+                                <div><span class="label">Threat Score:</span> <span class="value">${d.threatScore.toFixed(1)}</span></div>
+                                <div><span class="label">Entropy:</span> <span class="value">${d.entropy !== null ? d.entropy.toFixed(2) : 'N/A'}</span></div>
                                 <div><span class="label">Tokens:</span> <span class="value">${d.total_tokens}</span></div>
-                                <div><span class="label">Suspicious:</span> <span class="value">${d.suspCount}</span></div>
-                                <div><span class="label">Z‑Susp:</span> <span class="value">${d.zScores.susp.toFixed(2)}</span></div>
-                                <div><span class="label">MD5:</span> <span class="value mono">${escapeHtml(d.md5)}</span></div>
-                                <div><span class="label">Anomaly:</span> <span class="value">${d.isAnomaly ? '⚠️ Yes' : 'No'}</span></div>
+                                <div><span class="label">Matched Tokens:</span> <span class="value">${escapeHtml((d.matched_tokens || []).join(', '))}</span></div>
                             `;
                             tooltip.innerHTML = info;
                             tooltip.style.display = 'block';
@@ -1619,120 +1696,151 @@ if (_BLACKLIST_) {
                             tooltip.style.display = 'none';
                             canvas.style.cursor = 'crosshair';
                         }
-                    };
+                    });
 
-                    const onMouseLeave = function() {
-                        tooltip.style.display = 'none';
-                        canvas.style.cursor = 'crosshair';
-                    };
-
-                    const onClick = function(e) {
+                    canvas.addEventListener('click', function(e) {
                         const pos = getMousePos(e);
                         const hit = findHit(pos.x, pos.y);
-                        if (hit) {
-                            // Filter table to this file
-                            filterByPath(hit.data.path);
-                        }
-                    };
+                        if (hit) filterByPath(hit.data.path);
+                    });
 
-                    canvas.addEventListener('mousemove', onMouseMove);
-                    canvas.addEventListener('mouseleave', onMouseLeave);
-                    canvas.addEventListener('click', onClick);
-                    canvas._listeners = [
-                        { type: 'mousemove', handler: onMouseMove },
-                        { type: 'mouseleave', handler: onMouseLeave },
-                        { type: 'click', handler: onClick }
-                    ];
-
-                    // Labels
-                    drawLabel(ctx, labelX, (left + right) / 2, bottom + 35, 'center');
-                    drawLabel(ctx, labelY, 8, top + 10, 'left');
+                    drawLabel(ctx, 'Shannon Entropy (bits/byte)', (left + right) / 2, bottom + 35, 'center');
+                    drawLabel(ctx, 'Threat Score', 8, top + 10, 'left');
                 }
 
-                // 1. Tokens vs Suspicious
+                // 2. TIMELINE HISTOGRAM: File Modifications over Time
                 {
-                    const ctx = makeBox('Tokens vs Suspicious Count');
+                    const ctx = makeBox('Incident Timeline: File Modifications over Time');
                     clear(ctx);
-                    const left = 55, top = 20, right = 875, bottom = 250;
+                    const left = 60, top = 25, right = 870, bottom = 250;
                     drawAxes(ctx, left, top, right, bottom);
 
-                    const points = valid.map(d => ({
-                        x: d.total_tokens,
-                        y: d.suspCount,
-                        item: d
-                    }));
-                    drawScatter(ctx, left, top, right, bottom, points, 'total_tokens', 'suspCount', 'Total Tokens', 'Suspicious Count');
+                    const mtimes = valid.map(d => d.mtime).filter(t => t > 0).sort((a, b) => a - b);
+                    if (mtimes.length > 0) {
+                        const minT = mtimes[0];
+                        const maxT = mtimes[mtimes.length - 1];
+                        const span = Math.max(1, maxT - minT);
+
+                        const numBuckets = 20;
+                        const bucketSize = span / numBuckets;
+                        const buckets = [];
+                        for (let i = 0; i < numBuckets; i++) {
+                            buckets.push({ count: 0, maxThreat: 0, files: [] });
+                        }
+
+                        valid.forEach(d => {
+                            if (!d.mtime) return;
+                            let idx = Math.floor((d.mtime - minT) / bucketSize);
+                            if (idx >= numBuckets) idx = numBuckets - 1;
+                            if (idx < 0) idx = 0;
+                            buckets[idx].count++;
+                            if (d.threatScore > buckets[idx].maxThreat) buckets[idx].maxThreat = d.threatScore;
+                            buckets[idx].files.push(d);
+                        });
+
+                        const maxBucketCount = Math.max(1, ...buckets.map(b => b.count));
+                        const barW = (right - left) / numBuckets - 3;
+                        const hitBars = [];
+
+                        buckets.forEach((b, i) => {
+                            const bx = left + i * ((right - left) / numBuckets) + 1;
+                            const barH = (b.count / maxBucketCount) * (bottom - top);
+                            const by = bottom - barH;
+
+                            let color = '#4a8bc2';
+                            if (b.maxThreat >= 10.0) color = '#ff4444';
+                            else if (b.maxThreat >= 5.0) color = '#ffaa00';
+
+                            ctx.fillStyle = color;
+                            ctx.fillRect(bx, by, barW, barH);
+
+                            hitBars.push({ x: bx, y: by, w: barW, h: barH, bucket: b, time: minT + i * bucketSize });
+                        });
+
+                        const canvas = ctx.canvas;
+                        canvas.addEventListener('mousemove', function(e) {
+                            const rect = canvas.getBoundingClientRect();
+                            const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                            const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                            let found = false;
+                            for (let hb of hitBars) {
+                                if (mx >= hb.x && mx <= hb.x + hb.w && my >= hb.y && my <= bottom) {
+                                    const info = `
+                                        <div><span class="label">Timeframe:</span> <span class="value">${formatDate(hb.time)}</span></div>
+                                        <div><span class="label">Files Modified:</span> <span class="value">${hb.bucket.count}</span></div>
+                                        <div><span class="label">Max Threat Score:</span> <span class="value">${hb.bucket.maxThreat.toFixed(1)}</span></div>
+                                    `;
+                                    tooltip.innerHTML = info;
+                                    tooltip.style.display = 'block';
+                                    positionTooltip(e, tooltip);
+                                    canvas.style.cursor = 'pointer';
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                tooltip.style.display = 'none';
+                                canvas.style.cursor = 'crosshair';
+                            }
+                        });
+
+                        drawLabel(ctx, formatDate(minT), left, bottom + 35, 'left');
+                        drawLabel(ctx, formatDate(maxT), right, bottom + 35, 'right');
+                        drawLabel(ctx, 'File Count', 8, top + 10, 'left');
+                    }
                 }
 
-                // 2. Z-score bars - clickable
+                // 3. TOP THREAT SCORES BAR CHART
                 {
-                    const ctx = makeBox('Top Suspicious Z-Scores');
+                    const ctx = makeBox('Top Composite Threat Scores');
                     clear(ctx);
 
-                    const selected = valid.slice().sort((a, b) =>
-                        Math.abs((b.zScores && b.zScores.susp) || 0) -
-                        Math.abs((a.zScores && a.zScores.susp) || 0)
-                    ).slice(0, 12);
-
-                    const left = 180, top = 20, right = 875, bottom = 270;
+                    const selected = valid.slice().sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0)).slice(0, 12);
+                    const left = 200, top = 20, right = 870, bottom = 270;
                     const rowH = (bottom - top) / Math.max(1, selected.length);
-                    const maxZ = Math.max(
-                        currentThreshold,
-                        ...selected.map(d => Math.abs((d.zScores && d.zScores.susp) || 0))
-                    ) || 1;
+                    const maxScore = Math.max(10.0, ...selected.map(d => d.threatScore || 0));
 
-                    // Store hit areas for bars
                     const barHitAreas = [];
 
                     selected.forEach((d, i) => {
-                        const z = Math.abs((d.zScores && d.zScores.susp) || 0);
+                        const score = d.threatScore || 0;
                         const y = top + i * rowH + 3;
-                        const w = (z / maxZ) * (right - left);
+                        const w = (score / maxScore) * (right - left);
 
-                        ctx.fillStyle = z > currentThreshold ? '#ff4444' : '#4a8bc2';
+                        ctx.fillStyle = score >= 10.0 ? '#ff4444' : (score >= 5.0 ? '#ffaa00' : '#4a8bc2');
                         ctx.fillRect(left, y, w, Math.max(8, rowH - 6));
 
                         const name = String(d.path || '').split('/').pop() || d.path;
-                        drawLabel(ctx, name.length > 24 ? name.slice(0, 21) + '...' : name, left - 8, y + rowH / 2 + 4, 'right');
-                        drawLabel(ctx, z.toFixed(2), Math.min(right - 4, left + w + 6), y + rowH / 2 + 4, 'left');
+                        drawLabel(ctx, name.length > 26 ? name.slice(0, 23) + '...' : name, left - 8, y + rowH / 2 + 4, 'right');
+                        drawLabel(ctx, score.toFixed(1), Math.min(right - 4, left + w + 6), y + rowH / 2 + 4, 'left');
 
-                        barHitAreas.push({
-                            x: left,
-                            y: y,
-                            w: w,
-                            h: Math.max(8, rowH - 6),
-                            data: d
-                        });
+                        barHitAreas.push({ x: left, y: y, w: w, h: Math.max(8, rowH - 6), data: d });
                     });
 
-                    // Add click on bars to filter
                     const canvas = ctx.canvas;
                     canvas.addEventListener('click', function(e) {
                         const rect = canvas.getBoundingClientRect();
                         const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
                         const my = (e.clientY - rect.top) * (canvas.height / rect.height);
                         for (let bar of barHitAreas) {
-                            if (mx >= bar.x && mx <= bar.x + bar.w &&
-                                my >= bar.y && my <= bar.y + bar.h) {
+                            if (mx >= bar.x && mx <= bar.x + bar.w && my >= bar.y && my <= bar.y + bar.h) {
                                 filterByPath(bar.data.path);
                                 break;
                             }
                         }
                     });
-                    // Add hover for tooltip on bars
                     canvas.addEventListener('mousemove', function(e) {
                         const rect = canvas.getBoundingClientRect();
                         const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
                         const my = (e.clientY - rect.top) * (canvas.height / rect.height);
                         let found = false;
                         for (let bar of barHitAreas) {
-                            if (mx >= bar.x && mx <= bar.x + bar.w &&
-                                my >= bar.y && my <= bar.y + bar.h) {
+                            if (mx >= bar.x && mx <= bar.x + bar.w && my >= bar.y && my <= bar.y + bar.h) {
                                 const d = bar.data;
                                 const info = `
                                     <div><span class="label">File:</span> <span class="value">${escapeHtml(d.path)}</span></div>
-                                    <div><span class="label">Z‑Susp:</span> <span class="value">${d.zScores.susp.toFixed(2)}</span></div>
-                                    <div><span class="label">Suspicious:</span> <span class="value">${d.suspCount}</span></div>
+                                    <div><span class="label">Threat Score:</span> <span class="value">${d.threatScore.toFixed(1)}</span></div>
+                                    <div><span class="label">Matched Tokens:</span> <span class="value">${escapeHtml((d.matched_tokens || []).join(', '))}</span></div>
                                     <div><span class="label">MD5:</span> <span class="value mono">${escapeHtml(d.md5)}</span></div>
                                 `;
                                 tooltip.innerHTML = info;
@@ -1748,14 +1856,9 @@ if (_BLACKLIST_) {
                             canvas.style.cursor = 'crosshair';
                         }
                     });
-                    canvas.addEventListener('mouseleave', function() {
-                        tooltip.style.display = 'none';
-                        canvas.style.cursor = 'crosshair';
-                    });
                 }
             }
 
-            // Initialize on page load
             window.onload = function () {
                 if (typeof rawFileData !== 'undefined') {
                     currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
