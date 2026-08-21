@@ -600,6 +600,156 @@ if (_WHITELIST_) {
 if (_BLACKLIST_) {
     $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
 }
+// ── AJAX request handler ────────────────────────────────────────────────
+if (isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json');
+    $ajaxAction = $_POST['ajax_action'];
+
+    if ($ajaxAction == 'scan') {
+        if (isset($_POST['dir'])) {
+            $path = $_POST['dir'];
+        } else {
+            $path = getcwd();
+        }
+
+        $result = getSortedByPattern($path, $pattern);
+
+        if (isset($result['file_readable'])) {
+            $readable = $result['file_readable'];
+        } else {
+            $readable = array();
+        }
+
+        if (isset($result['file_not_readable'])) {
+            $notReadable = $result['file_not_readable'];
+        } else {
+            $notReadable = array();
+        }
+
+        $filtered = array();
+        foreach ($readable as $fp) {
+            $sum = md5_file($fp);
+            if (!in_array($sum, $whitelistMD5Sums)) {
+                $filtered[] = $fp;
+            }
+        }
+
+        echo json_encode(array(
+            'readable'     => array_values($filtered),
+            'not_readable' => array_values($notReadable),
+            'total'        => count($filtered) + count($notReadable),
+        ));
+        exit;
+    }
+
+    if ($ajaxAction == 'process') {
+        if (isset($_POST['paths']) && is_array($_POST['paths'])) {
+            $paths = $_POST['paths'];
+        } else {
+            $paths = array();
+        }
+
+        if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
+            $isUnreadable = true;
+        } else {
+            $isUnreadable = false;
+        }
+
+        if (isset($_POST['seen_hashes']) && is_array($_POST['seen_hashes'])) {
+            $seenHashes = $_POST['seen_hashes'];
+        } else {
+            $seenHashes = array();
+        }
+
+        $features  = array();
+        $newHashes = array();
+
+        if ($isUnreadable) {
+            foreach ($paths as $filePath) {
+                $mtime = @filemtime($filePath);
+                if (!$mtime) {
+                    $mtime = 0;
+                }
+                $features[] = array(
+                    'path'           => $filePath,
+                    'size'           => null,
+                    'mtime'          => $mtime,
+                    'total_tokens'   => null,
+                    'matched_tokens' => array('NOT_READABLE'),
+                    'md5'            => 'N/A',
+                    'is_blacklisted' => false,
+                    'is_htaccess'    => false,
+                    'duplicate_of'   => false,
+                    'error'          => null,
+                    'is_unreadable'  => true,
+                );
+            }
+        } else {
+            $localSeen = array();
+            foreach ($seenHashes as $entry) {
+                $parts = explode(':', $entry, 2);
+                if (count($parts) == 2) {
+                    $localSeen[$parts[0]] = $parts[1];
+                }
+            }
+
+            foreach ($paths as $filePath) {
+                if (!file_exists($filePath) || !is_readable($filePath)) {
+                    continue;
+                }
+
+                $fileSum = md5_file($filePath);
+                if (in_array($fileSum, $whitelistMD5Sums)) {
+                    continue;
+                }
+
+                $tokens        = getFileTokens($filePath);
+                $matchedTokens = compareTokens($tokenNeedles, $tokens);
+                $totalTokens   = count($tokens);
+                $size          = filesize($filePath);
+                $mtime         = filemtime($filePath);
+                $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
+                $isHtaccess    = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
+                $duplicateOf   = false;
+
+                if (isset($localSeen[$fileSum])) {
+                    $duplicateOf = $localSeen[$fileSum];
+                } else {
+                    $localSeen[$fileSum] = $filePath;
+                    $newHashes[] = $fileSum . ':' . $filePath;
+                }
+
+                $error = null;
+                if ($isBlacklisted) {
+                    if (!@unlink($filePath)) {
+                        $error = 'Failed to unlink';
+                    }
+                }
+
+                $features[] = array(
+                    'path'           => $filePath,
+                    'size'           => $size,
+                    'mtime'          => $mtime,
+                    'total_tokens'   => $totalTokens,
+                    'matched_tokens' => $matchedTokens,
+                    'md5'            => $fileSum,
+                    'is_blacklisted' => $isBlacklisted,
+                    'is_htaccess'    => $isHtaccess,
+                    'duplicate_of'   => $duplicateOf,
+                    'error'          => $error,
+                    'is_unreadable'  => false,
+                );
+            }
+        }
+
+        echo json_encode(array('features' => $features, 'new_hashes' => $newHashes));
+        exit;
+    }
+
+    echo json_encode(array('error' => 'Unknown action'));
+    exit;
+}
+// ────────────────────────────────────────────────────────────────────────
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -916,10 +1066,29 @@ if (_BLACKLIST_) {
                     <td><input type="text" name="dir" value="<?php echo getcwd(); ?>"></td>
                 </tr>
                 <tr>
-                    <td><input type="submit" name="submit" value="SEARCH"></td>
+                    <td><input type="submit" name="submit" value="SCAN" title="Classic full-page scan (may timeout on large directories)">&nbsp;
+                    <button type="button" onclick="startChunkedScan()" title="AJAX chunked scan — safe for large directories">AJAX SCAN</button></td>
+                </tr>
+                <tr>
+                    <td style="font-size:12px;color:#888;">
+                        Chunk size:&nbsp;<input type="number" id="chunkSizeInput" value="50" step="10" style="width:65px;" title="Files processed per AJAX request">
+                        &nbsp;<span style="font-size:11px;color:#666;">(files per batch)</span>
+                    </td>
                 </tr>
             </table>
         </form>
+
+        <!-- AJAX progress panel -->
+        <div id="ajaxProgress" style="display:none;width:90%;margin:10px auto;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                <span id="ajaxStatus" style="color:#ccc;font-size:13px;">Scanning...</span>
+                <button type="button" onclick="cancelChunkedScan()" style="padding:3px 10px;font-size:12px;">Cancel</button>
+            </div>
+            <div style="background:#333;border-radius:4px;height:12px;overflow:hidden;">
+                <div id="ajaxBar" style="height:100%;width:0%;background:linear-gradient(90deg,#4a8bc2,#ffaa00);transition:width 0.2s;"></div>
+            </div>
+            <div style="margin-top:4px;font-size:11px;color:#888;" id="ajaxSubStatus"></div>
+        </div>
 
         <?php
         if (isset($_POST['submit'])) {
@@ -956,7 +1125,7 @@ if (_BLACKLIST_) {
 
                 $error = null;
                 if ($isBlacklisted) {
-                    if (!unlink($filePath)) {
+                    if (!@unlink($filePath)) {
                         $error = "Failed to unlink";
                         $errors[] = $error;
                     }
@@ -1002,7 +1171,13 @@ if (_BLACKLIST_) {
             echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
             echo '<script>const rawFileData = ' . json_encode($rawFeatures) . ';</script>';
         }
+        // Always emit tokenWeights so AJAX scan mode can use them
+        if (!isset($_POST['submit'])) {
+            echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
+        }
         ?>
+        <!-- Warning banner for critical errors & failed deletions -->
+        <div id="warningBanner" class="error-banner" style="display:none;"></div>
 
         <!-- Controls -->
         <div class="control-bar">
@@ -1310,7 +1485,63 @@ if (_BLACKLIST_) {
                 }
             }
 
+            function renderWarnings(data) {
+                var banner = document.getElementById('warningBanner');
+                if (!banner) return;
+
+                if (!data || data.length === 0) {
+                    banner.style.display = 'none';
+                    banner.innerHTML = '';
+                    return;
+                }
+
+                var failedUnlinks = [];
+                var unreadable = [];
+
+                for (var i = 0; i < data.length; i++) {
+                    var d = data[i];
+                    if (d.is_blacklisted && d.error) {
+                        failedUnlinks.push(d);
+                    }
+                    if (d.is_unreadable) {
+                        unreadable.push(d);
+                    }
+                }
+
+                var html = '';
+
+                if (failedUnlinks.length > 0) {
+                    html += '<div style="margin-bottom:6px;">' +
+                        '<div style="margin-top:8px;text-align:left;max-height:160px;overflow-y:auto;background:#200;padding:8px 12px;border-radius:4px;border:1px solid #900;">';
+
+                    for (var j = 0; j < failedUnlinks.length; j++) {
+                        var f = failedUnlinks[j];
+                        html += '<div style="margin:3px 0;font-family:monospace;font-size:12px;"><span style="color:#ff6666;">✖</span> <code style="color:#ffaaaa;">' + escapeHtml(f.path) + '</code> <span style="color:#888;">(' + escapeHtml(f.error) + ')</span></div>';
+                    }
+
+                    html += '</div></div>';
+                }
+
+                if (unreadable.length > 0) {
+                    if (html !== '') {
+                        html += '<hr style="border:0;border-top:1px solid #633;margin:8px 0;">';
+                    }
+                    html += '<div style="font-size:12px;color:#ffaa55;">' +
+                        '⚠️ <strong>Permission Warning:</strong> ' + unreadable.length + ' file(s) could not be opened or read during scanning.' +
+                        '</div>';
+                }
+
+                if (html !== '') {
+                    banner.innerHTML = html;
+                    banner.style.display = 'block';
+                } else {
+                    banner.style.display = 'none';
+                    banner.innerHTML = '';
+                }
+            }
+
             function renderTable(data) {
+                renderWarnings(data);
                 let filtered = data.filter(d => shouldShowFile(d));
 
                 if (currentSort === 'threat') filtered.sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0));
@@ -2136,6 +2367,125 @@ if (_BLACKLIST_) {
                     });
                 }
             }
+
+            // ── Chunked AJAX scan ────────────────────────────────────────────
+            var _scanCancelled = false;
+            var _seenHashes = [];
+
+            function getChunkSize() {
+                var el = document.getElementById('chunkSizeInput');
+                var val = el ? parseInt(el.value, 10) : 25;
+                if (isNaN(val) || val < 1) {
+                    val = 25;
+                }
+                return val;
+            }
+
+
+            function startChunkedScan() {
+                var dirInput = document.querySelector('input[name="dir"]');
+                var dir = dirInput ? dirInput.value.trim() : '';
+                if (!dir) { alert('Enter a directory path first.'); return; }
+
+                var chunkSize = getChunkSize();
+                _scanCancelled = false;
+                _seenHashes = [];
+                var allFeatures = [];
+
+                var warnEl = document.getElementById('warningBanner');
+                if (warnEl) { warnEl.style.display = 'none'; warnEl.innerHTML = ''; }
+
+                document.getElementById('ajaxProgress').style.display = 'block';
+                document.getElementById('ajaxBar').style.width = '0%';
+                document.getElementById('ajaxStatus').textContent = 'Phase 1: Scanning directory\u2026';
+                document.getElementById('ajaxSubStatus').textContent = '';
+                document.getElementById('result').innerHTML = '';
+                analyzedData = [];
+
+                var body = new URLSearchParams();
+                body.set('ajax_action', 'scan');
+                body.set('dir', dir);
+
+                fetch('', { method: 'POST', body: body })
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (_scanCancelled) { return; }
+                        var readable    = data.readable    || [];
+                        var notReadable = data.not_readable || [];
+                        var total       = data.total || (readable.length + notReadable.length);
+
+                        document.getElementById('ajaxStatus').textContent =
+                            'Phase 2: Processing ' + total + ' files\u2026 (chunk size: ' + chunkSize + ')';
+
+                        // Build flat chunk list
+                        var chunks = [];
+                        for (var i = 0; i < readable.length; i += chunkSize) {
+                            chunks.push({ paths: readable.slice(i, i + chunkSize), isNotReadable: false });
+                        }
+                        for (var j = 0; j < notReadable.length; j += chunkSize) {
+                            chunks.push({ paths: notReadable.slice(j, j + chunkSize), isNotReadable: true });
+                        }
+
+                        return processChunk(chunks, 0, allFeatures, total, chunkSize);
+                    })
+                    .then(function() {
+                        if (_scanCancelled) { return; }
+                        document.getElementById('ajaxProgress').style.display = 'none';
+                        window.rawFileData = allFeatures;
+                        currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                        analyzedData = analyzeData(allFeatures, currentThreshold);
+                        renderTable(analyzedData);
+                    })
+                    .catch(function(err) {
+                        document.getElementById('ajaxProgress').style.display = 'none';
+                        document.getElementById('result').innerHTML =
+                            '<tr><td style="color:#ff6666;padding:15px;">AJAX scan error: ' + escapeHtml(err.message) + '</td></tr>';
+                    });
+            }
+
+            function processChunk(chunks, idx, allFeatures, totalFiles, chunkSize) {
+                if (_scanCancelled || idx >= chunks.length) { return Promise.resolve(); }
+
+                var chunk = chunks[idx];
+                var done  = Math.min(idx * chunkSize, totalFiles);
+                var pct   = totalFiles > 0 ? Math.round(done / totalFiles * 100) : 0;
+
+                document.getElementById('ajaxBar').style.width = pct + '%';
+                document.getElementById('ajaxSubStatus').textContent =
+                    'Chunk ' + (idx + 1) + '/' + chunks.length + ' \u2014 ' + done + '/' + totalFiles + ' files (' + pct + '%)';
+
+                var body = new URLSearchParams();
+                body.set('ajax_action', 'process');
+                body.set('is_not_readable', chunk.isNotReadable ? '1' : '0');
+                chunk.paths.forEach(function(p) { body.append('paths[]', p); });
+                _seenHashes.forEach(function(h) { body.append('seen_hashes[]', h); });
+
+                return fetch('', { method: 'POST', body: body })
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (_scanCancelled) { return; }
+                        var feats = data.features || [];
+                        feats.forEach(function(f) { allFeatures.push(f); });
+                        if (data.new_hashes) {
+                            data.new_hashes.forEach(function(h) { _seenHashes.push(h); });
+                        }
+
+                        // Incremental render every 3 chunks so user sees progress
+                        if ((idx + 1) % 3 === 0 || idx + 1 === chunks.length) {
+                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                            analyzedData = analyzeData(allFeatures, currentThreshold);
+                            renderTable(analyzedData);
+                        }
+
+                        return processChunk(chunks, idx + 1, allFeatures, totalFiles, chunkSize);
+                    });
+            }
+
+            function cancelChunkedScan() {
+                _scanCancelled = true;
+                document.getElementById('ajaxProgress').style.display = 'none';
+            }
+            // ────────────────────────────────────────────────────────────────
 
             window.onload = function () {
                 if (typeof rawFileData !== 'undefined') {
