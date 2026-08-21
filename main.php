@@ -1691,177 +1691,159 @@ if (_BLACKLIST_) {
                 // 1. QUADRANT THREAT MATRIX: Token Suspicion Ratio vs Composite Threat Score
                 {
                     const ctx = makeBox('Threat Matrix: Token Suspicion Ratio vs Threat Score');
-                    clear(ctx);
-
-                    // Plot area — leave room for axis labels
+                    const canvas = ctx.canvas;
                     const left = 70, top = 30, right = 860, bottom = 255;
-                    const W = right - left;
-                    const H = bottom - top;
+                    const W = right - left, H = bottom - top;
 
-                    // Axes
-                    drawAxes(ctx, left, top, right, bottom);
+                    // raw data points
+                    const pts = valid.map(d => ({
+                        ratio: d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0,
+                        score: d.threatScore || 0,
+                        data: d
+                    }));
 
-                    // X = suspCount / max(1, total_tokens)  [0..1]
-                    // Y = threatScore  [0..maxScore]
-                    let maxScore = 20.0;
-                    for (let i = 0; i < valid.length; i++) {
-                        if ((valid[i].threatScore || 0) > maxScore) maxScore = valid[i].threatScore;
-                    }
+                    // auto-fit initial axes to actual data range
+                    const xThresh = 0.15, yThresh = 8.0;
+                    let rawMaxRatio = 0.01, rawMaxScore = 1;
+                    pts.forEach(p => {
+                        if (p.ratio > rawMaxRatio) rawMaxRatio = p.ratio;
+                        if (p.score > rawMaxScore) rawMaxScore = p.score;
+                    });
+                    let view = {
+                        xLo: 0, xHi: rawMaxRatio * 1.15 + 0.001,
+                        yLo: 0, yHi: rawMaxScore * 1.12 + 0.5
+                    };
 
-                    // Quadrant thresholds
-                    const xThresh = 0.15;  // 15% of tokens are suspicious
-                    const yThresh = 8.0;
-
-                    const quadX = left + (xThresh) * W;
-                    const quadY = bottom - (yThresh / maxScore) * H;
-
-                    // Dashed quadrant lines
-                    ctx.save();
-                    ctx.strokeStyle = '#555';
-                    ctx.lineWidth = 1;
-                    ctx.setLineDash([5, 4]);
-                    ctx.beginPath();
-                    ctx.moveTo(quadX, top);
-                    ctx.lineTo(quadX, bottom);
-                    ctx.moveTo(left, quadY);
-                    ctx.lineTo(right, quadY);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.restore();
-
-                    // Quadrant labels (placed in each corner, inside plot area)
-                    ctx.font = '10px Ubuntu Mono, monospace';
-                    ctx.textAlign = 'right';
-                    ctx.fillStyle = '#ff4444';
-                    ctx.fillText('OBFUSCATED WEBSHELL', right - 4, top + 14);   // top-right
-
-                    ctx.textAlign = 'left';
-                    ctx.fillStyle = '#ffaa00';
-                    ctx.fillText('RCE SCRIPT', left + 4, top + 14);             // top-left
-
-                    ctx.textAlign = 'right';
-                    ctx.fillStyle = '#4a8bc2';
-                    ctx.fillText('DENSE NORMAL', right - 4, bottom - 6);        // bottom-right
-
-                    ctx.textAlign = 'left';
-                    ctx.fillStyle = '#777';
-                    ctx.fillText('BENIGN', left + 4, bottom - 6);               // bottom-left
-
-                    // Y-axis tick marks
-                    ctx.fillStyle = '#888';
-                    ctx.font = '10px Ubuntu Mono, monospace';
-                    ctx.textAlign = 'right';
-                    const yTicks = 5;
-                    for (let t = 0; t <= yTicks; t++) {
-                        const val = (maxScore * t) / yTicks;
-                        const y = bottom - (val / maxScore) * H;
-                        ctx.fillText(val.toFixed(0), left - 4, y + 4);
-                        ctx.save();
-                        ctx.strokeStyle = '#333';
-                        ctx.lineWidth = 1;
-                        ctx.beginPath();
-                        ctx.moveTo(left - 3, y);
-                        ctx.lineTo(left, y);
-                        ctx.stroke();
-                        ctx.restore();
-                    }
-
-                    // X-axis tick marks
-                    ctx.textAlign = 'center';
-                    const xTicks = 5;
-                    for (let t = 0; t <= xTicks; t++) {
-                        const ratio = t / xTicks;
-                        const x = left + ratio * W;
-                        ctx.fillText((ratio * 100).toFixed(0) + '%', x, bottom + 14);
-                        ctx.save();
-                        ctx.strokeStyle = '#333';
-                        ctx.lineWidth = 1;
-                        ctx.beginPath();
-                        ctx.moveTo(x, bottom);
-                        ctx.lineTo(x, bottom + 3);
-                        ctx.stroke();
-                        ctx.restore();
-                    }
-
-                    // Axis labels
-                    ctx.fillStyle = '#aaa';
-                    ctx.font = '11px Ubuntu Mono, monospace';
-                    ctx.textAlign = 'center';
-                    ctx.fillText('Suspicious Token Ratio (matched / total tokens)', left + W / 2, bottom + 28);
-
-                    ctx.save();
-                    ctx.translate(14, top + H / 2);
-                    ctx.rotate(-Math.PI / 2);
-                    ctx.fillText('Threat Score', 0, 0);
-                    ctx.restore();
-
-                    // Plot dots
                     const hitPoints = [];
 
-                    for (let i = 0; i < valid.length; i++) {
-                        const d = valid[i];
-                        const ratio = d.total_tokens > 0
-                            ? Math.min(1.0, (d.suspCount || 0) / d.total_tokens)
-                            : 0;
-                        const score = d.threatScore || 0;
+                    function drawThreatMatrix() {
+                        clear(ctx);
+                        const xRange = view.xHi - view.xLo || 1;
+                        const yRange = view.yHi - view.yLo || 1;
 
-                        const px = left + ratio * W;
-                        const py = bottom - Math.min(1.0, score / maxScore) * H;
+                        drawAxes(ctx, left, top, right, bottom);
 
-                        // Color by quadrant
-                        let color;
-                        if (score >= yThresh && ratio >= xThresh) {
-                            color = '#ff4444';  // top-right: obfuscated webshell
-                        } else if (score >= yThresh) {
-                            color = '#ffaa00';  // top-left: RCE with low ratio
-                        } else if (ratio >= xThresh) {
-                            color = '#4a8bc2';  // bottom-right: dense suspicious
-                        } else {
-                            color = '#555';     // bottom-left: benign
+                        // quadrant dividers
+                        const qx = left + ((xThresh - view.xLo) / xRange) * W;
+                        const qy = bottom - ((yThresh - view.yLo) / yRange) * H;
+                        ctx.save(); ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.setLineDash([5,4]);
+                        ctx.beginPath();
+                        if (qx > left && qx < right) { ctx.moveTo(qx, top); ctx.lineTo(qx, bottom); }
+                        if (qy > top && qy < bottom) { ctx.moveTo(left, qy); ctx.lineTo(right, qy); }
+                        ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+
+                        // quadrant labels
+                        ctx.font = '10px Ubuntu Mono, monospace';
+                        ctx.textAlign = 'right';  ctx.fillStyle = '#ff4444'; ctx.fillText('OBFUSCATED WEBSHELL', right-4, top+14);
+                        ctx.textAlign = 'left';   ctx.fillStyle = '#ffaa00'; ctx.fillText('RCE SCRIPT', left+4, top+14);
+                        ctx.textAlign = 'right';  ctx.fillStyle = '#4a8bc2'; ctx.fillText('DENSE NORMAL', right-4, bottom-6);
+                        ctx.textAlign = 'left';   ctx.fillStyle = '#777';    ctx.fillText('BENIGN', left+4, bottom-6);
+
+                        // Y ticks
+                        ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'right';
+                        for (let t = 0; t <= 5; t++) {
+                            const v = view.yLo + (yRange * t) / 5;
+                            const y = bottom - ((v - view.yLo) / yRange) * H;
+                            ctx.fillText(v.toFixed(1), left-4, y+4);
+                            ctx.save(); ctx.strokeStyle='#333'; ctx.lineWidth=1;
+                            ctx.beginPath(); ctx.moveTo(left-3,y); ctx.lineTo(left,y); ctx.stroke(); ctx.restore();
                         }
 
-                        ctx.fillStyle = color;
-                        ctx.beginPath();
-                        ctx.arc(px, py, 3.5, 0, Math.PI * 2);
-                        ctx.fill();
+                        // X ticks
+                        ctx.textAlign = 'center';
+                        for (let t = 0; t <= 5; t++) {
+                            const v = view.xLo + (xRange * t) / 5;
+                            const x = left + ((v - view.xLo) / xRange) * W;
+                            ctx.fillText((v * 100).toFixed(1) + '%', x, bottom+14);
+                            ctx.save(); ctx.strokeStyle='#333'; ctx.lineWidth=1;
+                            ctx.beginPath(); ctx.moveTo(x,bottom); ctx.lineTo(x,bottom+3); ctx.stroke(); ctx.restore();
+                        }
 
-                        hitPoints.push({ x: px, y: py, data: d });
+                        // axis labels
+                        ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
+                        ctx.fillText('Suspicious Token Ratio — scroll to zoom, drag to pan, dblclick to reset', left+W/2, bottom+28);
+                        ctx.save(); ctx.translate(14, top+H/2); ctx.rotate(-Math.PI/2);
+                        ctx.fillText('Threat Score', 0, 0); ctx.restore();
+
+                        // dots
+                        hitPoints.length = 0;
+                        pts.forEach(p => {
+                            const px = left + ((p.ratio - view.xLo) / xRange) * W;
+                            const py = bottom - ((p.score - view.yLo) / yRange) * H;
+                            if (px < left || px > right || py < top || py > bottom) return;
+                            let color;
+                            if (p.score >= yThresh && p.ratio >= xThresh) color = '#ff4444';
+                            else if (p.score >= yThresh)                  color = '#ffaa00';
+                            else if (p.ratio >= xThresh)                  color = '#4a8bc2';
+                            else                                           color = '#555';
+                            ctx.fillStyle = color;
+                            ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI*2); ctx.fill();
+                            hitPoints.push({ x: px, y: py, data: p.data, ratio: p.ratio });
+                        });
                     }
 
-                    const canvas = ctx.canvas;
-                    function getMousePos(e) {
+                    drawThreatMatrix();
+
+                    // wheel zoom around cursor
+                    canvas.addEventListener('wheel', function(e) {
+                        e.preventDefault();
                         const rect = canvas.getBoundingClientRect();
-                        return {
-                            x: (e.clientX - rect.left) * (canvas.width / rect.width),
-                            y: (e.clientY - rect.top) * (canvas.height / rect.height)
-                        };
-                    }
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                        const fx = Math.max(0, Math.min(1, (mx - left) / W));
+                        const fy = Math.max(0, Math.min(1, (my - top) / H));
+                        const f = e.deltaY > 0 ? 1.08 : 0.925;
+                        const xR = view.xHi - view.xLo, yR = view.yHi - view.yLo;
+                        const pivX = view.xLo + fx * xR, pivY = view.yHi - fy * yR;
+                        view.xLo = Math.max(0, pivX - fx * xR * f);
+                        view.xHi = pivX + (1 - fx) * xR * f;
+                        view.yLo = Math.max(0, pivY - (1 - fy) * yR * f);
+                        view.yHi = pivY + fy * yR * f;
+                        drawThreatMatrix();
+                    }, { passive: false });
 
-                    function findHit(mx, my, radius) {
-                        radius = radius || 10;
+                    // drag pan
+                    let tmDrag = false, tmLX = 0, tmLY = 0;
+                    canvas.addEventListener('mousedown', function(e) {
+                        if (e.button !== 0) return;
+                        tmDrag = true; tmLX = e.clientX; tmLY = e.clientY;
+                        canvas.style.cursor = 'grabbing'; e.preventDefault();
+                    });
+                    document.addEventListener('mousemove', function(e) {
+                        if (!tmDrag) return;
+                        const rect = canvas.getBoundingClientRect();
+                        const dx = (e.clientX - tmLX) / rect.width  * (view.xHi - view.xLo) * (canvas.width  / W);
+                        const dy = (e.clientY - tmLY) / rect.height * (view.yHi - view.yLo) * (canvas.height / H);
+                        view.xLo -= dx; view.xHi -= dx;
+                        view.yLo += dy; view.yHi += dy;
+                        if (view.xLo < 0) { view.xHi -= view.xLo; view.xLo = 0; }
+                        if (view.yLo < 0) { view.yHi -= view.yLo; view.yLo = 0; }
+                        tmLX = e.clientX; tmLY = e.clientY;
+                        drawThreatMatrix();
+                    });
+                    document.addEventListener('mouseup', function() {
+                        if (tmDrag) { tmDrag = false; canvas.style.cursor = 'crosshair'; }
+                    });
+
+                    // hover tooltip
+                    canvas.addEventListener('mousemove', function(e) {
+                        if (tmDrag) return;
+                        const rect = canvas.getBoundingClientRect();
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
+                        let hit = null;
                         for (let j = 0; j < hitPoints.length; j++) {
                             const hp = hitPoints[j];
-                            const dx = hp.x - mx;
-                            const dy = hp.y - my;
-                            if (dx * dx + dy * dy < radius * radius) return hp;
+                            if ((hp.x-mx)**2 + (hp.y-my)**2 < 100) { hit = hp; break; }
                         }
-                        return null;
-                    }
-
-                    canvas.addEventListener('mousemove', function(e) {
-                        const pos = getMousePos(e);
-                        const hit = findHit(pos.x, pos.y);
                         if (hit) {
                             const d = hit.data;
-                            const ratio = d.total_tokens > 0
-                                ? ((d.suspCount || 0) / d.total_tokens * 100).toFixed(1)
-                                : '0.0';
                             tooltip.innerHTML =
                                 '<div><span class="label">File:</span> <span class="value">' + escapeHtml(d.path) + '</span></div>' +
                                 '<div><span class="label">Threat Score:</span> <span class="value">' + d.threatScore.toFixed(1) + '</span></div>' +
-                                '<div><span class="label">Token Ratio:</span> <span class="value">' + ratio + '%</span></div>' +
-                                '<div><span class="label">Matched / Total:</span> <span class="value">' + (d.suspCount || 0) + ' / ' + d.total_tokens + '</span></div>' +
-                                '<div><span class="label">Matched:</span> <span class="value">' + escapeHtml((d.matched_tokens || []).join(', ')) + '</span></div>';
+                                '<div><span class="label">Token Ratio:</span> <span class="value">' + (hit.ratio*100).toFixed(1) + '%</span></div>' +
+                                '<div><span class="label">Matched / Total:</span> <span class="value">' + (d.suspCount||0) + ' / ' + d.total_tokens + '</span></div>' +
+                                '<div><span class="label">Matched:</span> <span class="value">' + escapeHtml((d.matched_tokens||[]).join(', ')) + '</span></div>';
                             tooltip.style.display = 'block';
                             positionTooltip(e, tooltip);
                             canvas.style.cursor = 'pointer';
@@ -1870,11 +1852,20 @@ if (_BLACKLIST_) {
                             canvas.style.cursor = 'crosshair';
                         }
                     });
-
                     canvas.addEventListener('click', function(e) {
-                        const pos = getMousePos(e);
-                        const hit = findHit(pos.x, pos.y);
-                        if (hit) filterByPath(hit.data.path);
+                        if (tmDrag) return;
+                        const rect = canvas.getBoundingClientRect();
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
+                        for (let j = 0; j < hitPoints.length; j++) {
+                            const hp = hitPoints[j];
+                            if ((hp.x-mx)**2 + (hp.y-my)**2 < 100) { filterByPath(hp.data.path); break; }
+                        }
+                    });
+                    // double-click resets to auto-fit
+                    canvas.addEventListener('dblclick', function() {
+                        view = { xLo:0, xHi:rawMaxRatio*1.15+0.001, yLo:0, yHi:rawMaxScore*1.12+0.5 };
+                        drawThreatMatrix();
                     });
                 }
 
@@ -2024,6 +2015,123 @@ if (_BLACKLIST_) {
                         if (!found) {
                             tooltip.style.display = 'none';
                             canvas.style.cursor = 'crosshair';
+                        }
+                    });
+                }
+
+                // 4. ENTROPY DISTRIBUTION — sorted scatter, Y range follows data density (no blank space)
+                {
+                    const ctx = makeBox('Entropy Distribution (sorted, data-density range)');
+                    clear(ctx);
+
+                    // Sort by entropy ascending
+                    const eData = valid.slice().sort((a, b) => (a.entropy || 0) - (b.entropy || 0));
+                    const entVals = eData.map(d => d.entropy || 0);
+                    const eMin = entVals[0] || 0;
+                    const eMax = entVals[entVals.length - 1] || 1;
+                    const ePad = Math.max(0.05, (eMax - eMin) * 0.06);
+                    const yLo = Math.max(0, eMin - ePad);
+                    const yHi = eMax + ePad;
+                    const eRange = yHi - yLo || 1;
+
+                    const left = 55, top = 25, right = 870, bottom = 260;
+                    const W = right - left, H = bottom - top;
+
+                    // Percentile gridlines (25 / 50 / 75)
+                    const p25 = entVals[Math.floor(entVals.length * 0.25)] || 0;
+                    const p50 = entVals[Math.floor(entVals.length * 0.50)] || 0;
+                    const p75 = entVals[Math.floor(entVals.length * 0.75)] || 0;
+                    [[p25,'#3a5a3a','P25'],[p50,'#5a5a2a','P50'],[p75,'#5a3a2a','P75']].forEach(function([pv, col, lbl]) {
+                        const py = bottom - ((pv - yLo) / eRange) * H;
+                        ctx.save();
+                        ctx.strokeStyle = col;
+                        ctx.lineWidth = 1;
+                        ctx.setLineDash([4, 4]);
+                        ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
+                        ctx.setLineDash([]);
+                        ctx.fillStyle = col;
+                        ctx.font = '10px Ubuntu Mono, monospace';
+                        ctx.textAlign = 'left';
+                        ctx.fillText(lbl + ' ' + pv.toFixed(2), left + 4, py - 3);
+                        ctx.restore();
+                    });
+
+                    drawAxes(ctx, left, top, right, bottom);
+
+                    // Y-axis ticks (5 steps across actual data range)
+                    ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'right';
+                    for (let t = 0; t <= 5; t++) {
+                        const v = yLo + (eRange * t) / 5;
+                        const y = bottom - ((v - yLo) / eRange) * H;
+                        ctx.fillText(v.toFixed(2), left - 4, y + 4);
+                        ctx.save(); ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+                        ctx.beginPath(); ctx.moveTo(left - 3, y); ctx.lineTo(left, y); ctx.stroke();
+                        ctx.restore();
+                    }
+
+                    // X-axis label
+                    ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
+                    ctx.fillText('Files sorted by entropy (low → high)', left + W / 2, bottom + 18);
+                    ctx.save(); ctx.translate(13, top + H / 2); ctx.rotate(-Math.PI / 2);
+                    ctx.fillText('Shannon Entropy', 0, 0); ctx.restore();
+
+                    // Plot dots
+                    const eHits = [];
+                    eData.forEach(function(d, i) {
+                        const px = left + (i / Math.max(1, eData.length - 1)) * W;
+                        const py = bottom - ((( d.entropy || 0) - yLo) / eRange) * H;
+                        let col;
+                        if (d.threatScore >= 15) col = '#ff4444';
+                        else if (d.threatScore >= 8)  col = '#ffaa00';
+                        else if ((d.entropy || 0) > 5.8) col = '#9b59b6';
+                        else col = '#4a8bc2';
+                        ctx.fillStyle = col;
+                        ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+                        eHits.push({ x: px, y: py, data: d });
+                    });
+
+                    // Legend
+                    const leg = [['#ff4444','Critical (≥15)'],['#ffaa00','High Risk (≥8)'],['#9b59b6','High Entropy (>5.8)'],['#4a8bc2','Normal']];
+                    let lx = left + 4;
+                    leg.forEach(function([c, lbl]) {
+                        ctx.fillStyle = c; ctx.beginPath(); ctx.arc(lx + 5, top + 12, 4, 0, Math.PI * 2); ctx.fill();
+                        ctx.fillStyle = '#aaa'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'left';
+                        ctx.fillText(lbl, lx + 13, top + 16);
+                        lx += ctx.measureText(lbl).width + 26;
+                    });
+
+                    const canvas = ctx.canvas;
+                    canvas.addEventListener('mousemove', function(e) {
+                        const rect = canvas.getBoundingClientRect();
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                        let hit = null;
+                        for (let h of eHits) {
+                            const dx = h.x - mx, dy = h.y - my;
+                            if (dx*dx + dy*dy < 100) { hit = h; break; }
+                        }
+                        if (hit) {
+                            const d = hit.data;
+                            tooltip.innerHTML =
+                                '<div><span class="label">File:</span> <span class="value">' + escapeHtml(d.path) + '</span></div>' +
+                                '<div><span class="label">Entropy:</span> <span class="value">' + (d.entropy||0).toFixed(4) + '</span></div>' +
+                                '<div><span class="label">Threat Score:</span> <span class="value">' + d.threatScore.toFixed(1) + '</span></div>' +
+                                '<div><span class="label">Matched Tokens:</span> <span class="value">' + escapeHtml((d.matched_tokens||[]).join(', ')) + '</span></div>';
+                            tooltip.style.display = 'block';
+                            positionTooltip(e, tooltip);
+                            canvas.style.cursor = 'pointer';
+                        } else {
+                            tooltip.style.display = 'none';
+                            canvas.style.cursor = 'crosshair';
+                        }
+                    });
+                    canvas.addEventListener('click', function(e) {
+                        const rect = canvas.getBoundingClientRect();
+                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                        for (let h of eHits) {
+                            const dx = h.x - mx, dy = h.y - my;
+                            if (dx*dx + dy*dy < 100) { filterByPath(h.data.path); break; }
                         }
                     });
                 }
