@@ -1071,7 +1071,7 @@ if (isset($_POST['ajax_action'])) {
                 </tr>
                 <tr>
                     <td style="font-size:12px;color:#888;">
-                        Chunk size:&nbsp;<input type="number" id="chunkSizeInput" value="50" step="10" style="width:65px;" title="Files processed per AJAX request">
+                        Chunk size:&nbsp;<input type="number" id="chunkSizeInput" value="500" step="50" style="width:65px;" title="Files processed per AJAX request">
                         &nbsp;<span style="font-size:11px;color:#666;">(files per batch)</span>
                     </td>
                 </tr>
@@ -1390,9 +1390,13 @@ if (isset($_POST['ajax_action'])) {
                     }
 
                     const entropy = shannonEntropy(d.matched_tokens);
-                    const threatScore = calculateThreatScore(
+                    let threatScore = calculateThreatScore(
                         d.matched_tokens, d.path, entropy, d.size, weights
                     );
+
+                    if (d.is_blacklisted) {
+                        threatScore = Math.max(threatScore, 100.0);
+                    }
 
                     const suspCount = d.matched_tokens ? d.matched_tokens.length : 0;
                     const zSize = zScore(d.size, stats.size.mean, stats.size.std);
@@ -1526,9 +1530,15 @@ if (isset($_POST['ajax_action'])) {
                     if (html !== '') {
                         html += '<hr style="border:0;border-top:1px solid #633;margin:8px 0;">';
                     }
-                    html += '<div style="font-size:12px;color:#ffaa55;">' +
-                        '⚠️ <strong>Permission Warning:</strong> ' + unreadable.length + ' file(s) could not be opened or read during scanning.' +
-                        '</div>';
+                    html += '<div style="margin-bottom:6px;">' +
+                        '<div style="margin-top:8px;text-align:left;max-height:160px;overflow-y:auto;background:#332b00;padding:8px 12px;border-radius:4px;border:1px solid #b37700;">';
+
+                    for (var k = 0; k < unreadable.length; k++) {
+                        var u = unreadable[k];
+                        html += '<div style="margin:3px 0;font-family:monospace;font-size:12px;"><span style="color:#ffaa00;">⚠️</span> <code style="color:#ffcc66;">' + escapeHtml(u.path) + '</code> <span style="color:#888;">(Permission denied)</span></div>';
+                    }
+
+                    html += '</div></div>';
                 }
 
                 if (html !== '') {
@@ -1568,10 +1578,10 @@ if (isset($_POST['ajax_action'])) {
                             badge = '<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">BLACKLIST</span> ';
                             if (d.error) status = d.error;
                         } else if (d.threatScore >= 15.0) {
-                            color = '#ff4444';
+                            color = '#dddbdb';
                             badge = `<span style="background:#990000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">CRITICAL (${d.threatScore.toFixed(1)})</span> `;
                         } else if (d.threatScore >= 8.0) {
-                            color = '#ffaa00';
+                            color = '#dddbdb';
                             badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
                         } else if (d.is_htaccess) {
                             color = '#66ccff';
@@ -1579,7 +1589,9 @@ if (isset($_POST['ajax_action'])) {
                         } else if (d.duplicate_of !== false) {
                             badge = '<span style="background:#444;color:#aaa;padding:2px 6px;border-radius:3px;font-size:11px;">DUPLICATE</span> ';
                             status = d.duplicate_of;
-                        } else if (d.matched_tokens && d.matched_tokens.length > 0) {
+                        }
+
+                        if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
                             let tokens = d.matched_tokens.map(t => {
                                 const essential = ['eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function', 'base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
                                 if (essential.includes(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
