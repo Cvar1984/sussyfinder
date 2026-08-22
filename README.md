@@ -346,7 +346,8 @@ You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_`
 
 ## Screenshots
 
-![Demo](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo.png)
+![Demo](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo1.png)
+![Demo](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo2.png)
 ![Profile](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/profile.png)
 
 > Clone the webshells submodule for testing purposes.
