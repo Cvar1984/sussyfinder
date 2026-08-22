@@ -1250,6 +1250,7 @@ if (isset($_POST['ajax_action'])) {
             let chartsVisible = false;
             let currentSearch = '';
             let searchTokensOnly = false;
+            let _timelineFilter = null; // {minTime, maxTime} or null
 
             // --- Client-side threat scoring (offloaded from PHP) ---
 
@@ -1470,6 +1471,10 @@ if (isset($_POST['ajax_action'])) {
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && d.threatScore < 10.0 && !d.is_blacklisted) return false;
                 if (currentFilterMode === 'obfuscated' && (d.entropy < 5.8 || d.is_unreadable)) return false;
+
+                if (_timelineFilter) {
+                    if (!d.mtime || d.mtime < _timelineFilter.minTime || d.mtime > _timelineFilter.maxTime) return false;
+                }
 
                 if (!currentSearch.trim()) return true;
 
@@ -1699,6 +1704,19 @@ if (isset($_POST['ajax_action'])) {
                 currentFilterMode = 'all';
                 currentSearch = '';
                 searchTokensOnly = false;
+                _timelineFilter = null;
+                renderTable(analyzedData);
+            }
+
+            function filterByTimeline(minTime, maxTime) {
+                _timelineFilter = { minTime: minTime, maxTime: maxTime };
+                currentSort = 'mtime';
+                currentSearch = '';
+                searchTokensOnly = false;
+                currentFilterMode = 'all';
+                document.getElementById('searchInput').value = '';
+                document.getElementById('searchTokensOnly').checked = false;
+                document.getElementById('severityFilter').value = 'all';
                 renderTable(analyzedData);
             }
 
@@ -1835,6 +1853,7 @@ if (isset($_POST['ajax_action'])) {
                 document.getElementById('searchTokensOnly').checked = false;
                 currentFilterMode = 'all';
                 document.getElementById('severityFilter').value = 'all';
+                _timelineFilter = null;
                 renderTable(analyzedData);
             }
 
@@ -2185,6 +2204,19 @@ if (isset($_POST['ajax_action'])) {
                             if (!found) {
                                 tooltip.style.display = 'none';
                                 canvas.style.cursor = 'crosshair';
+                            }
+                        });
+
+                        canvas.addEventListener('click', function(e) {
+                            var rect = canvas.getBoundingClientRect();
+                            var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+                            var my = (e.clientY - rect.top) * (canvas.height / rect.height);
+                            for (var hb_i = 0; hb_i < hitBars.length; hb_i++) {
+                                var hb = hitBars[hb_i];
+                                if (mx >= hb.x && mx <= hb.x + hb.w && my >= hb.y && my <= bottom) {
+                                    filterByTimeline(hb.time, hb.time + bucketSize);
+                                    break;
+                                }
                             }
                         });
 
