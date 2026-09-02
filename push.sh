@@ -4,6 +4,9 @@
 awk '!a[$0]++' blacklist.txt > blacklist.new
 mv blacklist.new blacklist.txt
 
+awk '!a[$0]++' whitelist.txt > whitelist.new
+mv whitelist.new whitelist.txt
+
 # Stage text files
 git add *.txt
 
