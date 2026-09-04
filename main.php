@@ -2144,8 +2144,27 @@ if (isset($_POST['ajax_action'])) {
                         const maxT = mtimes[mtimes.length - 1];
                         const span = Math.max(1, maxT - minT);
 
-                        const numBuckets = 20;
-                        const bucketSize = span / numBuckets;
+                        // Quantize into "nice" round time units (sec/min/hour/day/week/month)
+                        // instead of an arbitrary span/20 slice, so each bucket boundary
+                        // lands on a human-readable interval.
+                        const NICE_BUCKETS = [
+                            1, 5, 10, 15, 30,
+                            60, 300, 600, 900, 1800,
+                            3600, 7200, 21600, 43200,
+                            86400, 2 * 86400, 7 * 86400, 14 * 86400,
+                            30 * 86400, 90 * 86400, 180 * 86400, 365 * 86400
+                        ];
+                        const targetBuckets = 20;
+                        const idealSize = span / targetBuckets;
+                        let bucketSize = NICE_BUCKETS[NICE_BUCKETS.length - 1];
+                        for (const candidate of NICE_BUCKETS) {
+                            if (candidate >= idealSize) { bucketSize = candidate; break; }
+                        }
+
+                        // Align the first bucket to a clean boundary (e.g. day buckets
+                        // start at UTC midnight) rather than the raw earliest timestamp.
+                        const startT = Math.floor(minT / bucketSize) * bucketSize;
+                        const numBuckets = Math.max(1, Math.ceil((maxT - startT + 1) / bucketSize));
                         const buckets = [];
                         for (let i = 0; i < numBuckets; i++) {
                             buckets.push({ count: 0, maxThreat: 0, files: [] });
@@ -2153,7 +2172,7 @@ if (isset($_POST['ajax_action'])) {
 
                         valid.forEach(d => {
                             if (!d.mtime) return;
-                            let idx = Math.floor((d.mtime - minT) / bucketSize);
+                            let idx = Math.floor((d.mtime - startT) / bucketSize);
                             if (idx >= numBuckets) idx = numBuckets - 1;
                             if (idx < 0) idx = 0;
                             buckets[idx].count++;
@@ -2177,7 +2196,7 @@ if (isset($_POST['ajax_action'])) {
                             ctx.fillStyle = color;
                             ctx.fillRect(bx, by, barW, barH);
 
-                            hitBars.push({ x: bx, y: by, w: barW, h: barH, bucket: b, time: minT + i * bucketSize });
+                            hitBars.push({ x: bx, y: by, w: barW, h: barH, bucket: b, time: startT + i * bucketSize });
                         });
 
                         const canvas = ctx.canvas;
