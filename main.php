@@ -2823,6 +2823,47 @@ if (isset($_POST['ajax_action'])) {
                     });
             }
 
+            // One 'process' request for a batch of paths \u2014 returns the parsed
+            // JSON, or rejects (with a SyntaxError specifically when the body
+            // wasn't valid JSON at all, e.g. a hosting-level security rule
+            // blocked the request and returned an HTML page instead).
+            function fetchProcessBatch(paths, isNotReadable) {
+                var body = new URLSearchParams();
+                body.set('ajax_action', 'process');
+                body.set('is_not_readable', isNotReadable ? '1' : '0');
+                paths.forEach(function(p) { body.append('paths[]', p); });
+                _seenHashes.forEach(function(h) { body.append('seen_hashes[]', h); });
+                return fetch('', { method: 'POST', body: body }).then(function(r) { return r.json(); });
+            }
+
+            function applyProcessResult(data, allFeatures) {
+                reportServerWarnings(data);
+                var feats = data.features || [];
+                feats.forEach(function(f) { allFeatures.push(f); });
+                if (data.new_hashes) {
+                    data.new_hashes.forEach(function(h) { _seenHashes.push(h); });
+                }
+            }
+
+            // A batch that fails to parse as JSON usually means exactly one
+            // path in it tripped something server-side (a WAF/security rule,
+            // an open_basedir restriction, etc.) that blocked the whole
+            // request \u2014 not that every file in the batch is a problem. Retry
+            // one file at a time so everything else in the batch still gets
+            // analyzed, and only the genuinely bad path(s) get skipped.
+            function retryProcessIndividually(paths, isNotReadable, allFeatures) {
+                var i = 0;
+                function next() {
+                    if (i >= paths.length) { return Promise.resolve(); }
+                    var path = paths[i++];
+                    return fetchProcessBatch([path], isNotReadable)
+                        .then(function(data) { applyProcessResult(data, allFeatures); })
+                        .catch(function(err) { logWarning('Skipped ' + path + ' \u2014 ' + err.message, 'error'); })
+                        .then(next);
+                }
+                return next();
+            }
+
             function processChunk(chunks, idx, allFeatures, totalFiles, chunkSize) {
                 if (_scanCancelled || idx >= chunks.length) { return Promise.resolve(); }
 
@@ -2834,30 +2875,38 @@ if (isset($_POST['ajax_action'])) {
                 document.getElementById('ajaxSubStatus').textContent =
                     'Chunk ' + (idx + 1) + '/' + chunks.length + ' \u2014 ' + done + '/' + totalFiles + ' files (' + pct + '%)';
 
-                var body = new URLSearchParams();
-                body.set('ajax_action', 'process');
-                body.set('is_not_readable', chunk.isNotReadable ? '1' : '0');
-                chunk.paths.forEach(function(p) { body.append('paths[]', p); });
-                _seenHashes.forEach(function(h) { body.append('seen_hashes[]', h); });
-
-                return fetch('', { method: 'POST', body: body })
-                    .then(function(r) { return r.json(); })
+                return fetchProcessBatch(chunk.paths, chunk.isNotReadable)
                     .then(function(data) {
                         if (_scanCancelled) { return; }
-                        reportServerWarnings(data);
-                        var feats = data.features || [];
-                        feats.forEach(function(f) { allFeatures.push(f); });
-                        if (data.new_hashes) {
-                            data.new_hashes.forEach(function(h) { _seenHashes.push(h); });
+                        applyProcessResult(data, allFeatures);
+                    })
+                    .catch(function(err) {
+                        // A small obstacle (one bad path, one bad chunk) should
+                        // never stop the entire scan \u2014 always fall through to
+                        // the next chunk below, regardless of what happens here.
+                        if (_scanCancelled) { return; }
+                        if (err instanceof SyntaxError && chunk.paths.length > 1) {
+                            logWarning(
+                                'Chunk ' + (idx + 1) + '/' + chunks.length + ' returned an invalid response \u2014 retrying its ' + chunk.paths.length + ' file(s) individually',
+                                'warning'
+                            );
+                            return retryProcessIndividually(chunk.paths, chunk.isNotReadable, allFeatures);
                         }
-
+                        // A network-level failure would fail identically on every
+                        // retry, so there's nothing to gain from splitting it up.
+                        logWarning(
+                            'Chunk ' + (idx + 1) + '/' + chunks.length + ' failed (' + chunk.paths.length + ' file(s) skipped): ' + err.message,
+                            'error'
+                        );
+                    })
+                    .then(function() {
+                        if (_scanCancelled) { return; }
                         // Incremental render every 3 chunks so user sees progress
                         if ((idx + 1) % 3 === 0 || idx + 1 === chunks.length) {
                             currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
                             analyzedData = analyzeData(allFeatures, currentThreshold);
                             renderTable(analyzedData);
                         }
-
                         return processChunk(chunks, idx + 1, allFeatures, totalFiles, chunkSize);
                     });
             }
