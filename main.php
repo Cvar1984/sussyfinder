@@ -20,41 +20,38 @@
 
 $minute = 60;
 $limit = (60 * $minute); // 60 minutes
+set_time_limit($limit);
 ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
-set_time_limit($limit);
-
-// display_errors=1 would print raw PHP warning/notice text directly into the
-// output stream — for AJAX endpoints that's straight into what's supposed to
-// be a pure JSON body, breaking the client's response.json() parse the
-// moment anything (a suppressed unlink failure, a curl hiccup, a stray
-// notice) fires. Capture warnings into $phpWarnings instead so every AJAX
-// response can report them as a structured field, and still log them
-// server-side so nothing is silently lost.
 ini_set('display_errors', 0);
 error_reporting(E_ALL);
+
+define('_WHITELIST_', true);
+define('_BLACKLIST_', true);
+define('_MHR_', true);
+
+$mhrUsername = '';
+$mhrPassword = '';
 $GLOBALS['phpWarnings'] = array();
-set_error_handler(function ($errno, $errstr, $errfile, $errline) {
+
+/**
+ * Summary of errorHandler
+ * @param mixed $errno
+ * @param mixed $errstr
+ * @param mixed $errfile
+ * @param mixed $errline
+ * @return bool
+ */
+function errorHandler($errno, $errstr, $errfile, $errline) {
     if (!(error_reporting() & $errno)) {
         return false; // respect @ suppression — don't record intentionally-silenced failures
     }
     error_log($errstr . ' in ' . $errfile . ' on line ' . $errline);
     $GLOBALS['phpWarnings'][] = $errstr;
     return true;
-});
+}
 
-define('_WHITELIST_', true);
-define('_BLACKLIST_', true);
-
-// Team Cymru Malware Hash Registry — bulk hash lookup against every
-// non-blacklisted/non-whitelisted file's MD5, triggered manually via the
-// "MHR SCAN" button. Credentials are entered in that button's own form at
-// scan time (sign up at https://hash.cymru.com/signup) rather than stored
-// here; these are only a fallback default used when that form is left
-// blank, and empty means there is no default.
-define('_MHR_', true);
-$mhrUsername = '';
-$mhrPassword = '';
+set_error_handler('errorHandler');
 
 /**
  * Check if function is available
@@ -682,10 +679,6 @@ $tokenNeedles = array(
     '$SISTEMIT_COM_ENC' => 5.0,
 
     // Obfuscation Helpers & I/O Manipulation (Weight: 2.0)
-    // assert() can no longer eval string code by default since PHP 7.2
-    // (zend.assertions=-1 in production); it's overwhelmingly used as a
-    // benign runtime check in real code, same legacy-risk tier as
-    // preg_replace's removed /e modifier.
     'assert' => 2.0,
     'htmlspecialchars_decode' => 2.0,
     'hexdec' => 2.0,
