@@ -235,6 +235,16 @@ Example token weights include:
 
 Additional multipliers are applied when combinations of suspicious behaviors are present.
 
+#### Non-Critical Dampening
+
+Obfuscation and suspicious-I/O tokens (e.g. `base64_decode`, `gzinflate`, `move_uploaded_file`) are common in entirely legitimate code — compression libraries, mail clients, HTTP clients, media parsers, upload handlers. On their own they're a weak signal; they matter most in combination with a real execution primitive (see the multipliers below). When a file has **no** Critical RCE token, their weight is reduced:
+
+$$
+w_i' = w_i \times 0.3
+$$
+
+This does not apply to Routine-operations-tier tokens, and has no effect once a Critical RCE token is present in the file (the combination multipliers below take over instead).
+
 #### Critical + Obfuscation
 
 If a file contains both a critical execution token and an obfuscation token:
@@ -287,8 +297,6 @@ $$
 Anomaly =
 ThreatScore \geq 8
 \lor
-|Z_{size}| > T
-\lor
 |Z_{suspicious}| > T
 \lor
 |Z_{entropy}| > T
@@ -306,9 +314,19 @@ Where:
 SussyFinder additionally treats the following as anomalies:
 
 * Blacklisted files
-* `.htaccess` files
-* Duplicate files
 * Unreadable files
+
+File size (`Z_size`) is still computed and shown in the interface, but is not
+used to decide anomaly status: tested against real webshell samples, size
+alone never uniquely caught a malicious file while being the largest source
+of false positives — legitimate codebases routinely contain very large or
+very small files with no bearing on maliciousness.
+
+`.htaccess` files and byte-identical duplicates are shown with their own
+badges/counters but no longer auto-flagged as anomalies either — a shared
+Apache config file or a stock duplicate (e.g. WordPress's many identical
+"Silence is golden" `index.php` stubs) isn't inherently suspicious on its
+own. Only content/threat-based signals decide anomaly status.
 
 This means the statistical analysis is used alongside deterministic security indicators rather than as the sole detection mechanism.
 

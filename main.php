@@ -23,10 +23,38 @@ $limit = (60 * $minute); // 60 minutes
 ini_set('memory_limit', '-1');
 ini_set('max_execution_time', $limit);
 set_time_limit($limit);
-ini_set('display_errors', 1);
+
+// display_errors=1 would print raw PHP warning/notice text directly into the
+// output stream — for AJAX endpoints that's straight into what's supposed to
+// be a pure JSON body, breaking the client's response.json() parse the
+// moment anything (a suppressed unlink failure, a curl hiccup, a stray
+// notice) fires. Capture warnings into $phpWarnings instead so every AJAX
+// response can report them as a structured field, and still log them
+// server-side so nothing is silently lost.
+ini_set('display_errors', 0);
+error_reporting(E_ALL);
+$GLOBALS['phpWarnings'] = array();
+set_error_handler(function ($errno, $errstr, $errfile, $errline) {
+    if (!(error_reporting() & $errno)) {
+        return false; // respect @ suppression — don't record intentionally-silenced failures
+    }
+    error_log($errstr . ' in ' . $errfile . ' on line ' . $errline);
+    $GLOBALS['phpWarnings'][] = $errstr;
+    return true;
+});
 
 define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
+
+// Team Cymru Malware Hash Registry — bulk hash lookup against every
+// non-blacklisted/non-whitelisted file's MD5, triggered manually via the
+// "MHR SCAN" button. Credentials are entered in that button's own form at
+// scan time (sign up at https://hash.cymru.com/signup) rather than stored
+// here; these are only a fallback default used when that form is left
+// blank, and empty means there is no default.
+define('_MHR_', true);
+$mhrUsername = '';
+$mhrPassword = '';
 
 /**
  * Check if function is available
@@ -375,6 +403,108 @@ function urlFileArray($url)
 }
 
 /**
+ * Submit up to 1000 MD5/SHA1/SHA256 hashes to Team Cymru's Malware Hash
+ * Registry bulk lookup API in one request.
+ * https://hash.cymru.com/docs_rest
+ *
+ * @param array $hashes
+ * @param string $username
+ * @param string $password
+ * @return array Decoded response — {results, queries_remaining} on success,
+ *               {error, msg} on failure — mirroring the API's own shape.
+ */
+function mhrSubmitHashes($hashes, $username, $password)
+{
+    if (empty($username) || empty($password)) {
+        return array('error' => 'not configured', 'msg' => 'MHR username/password not set (_MHR_ requires an account — see https://hash.cymru.com/signup)');
+    }
+    if (empty($hashes)) {
+        return array('results' => array(), 'queries_remaining' => null);
+    }
+    if (count($hashes) > 1000) {
+        $hashes = array_slice($hashes, 0, 1000); // API hard limit — see docs_rest
+    }
+
+    $url  = 'https://hash.cymru.com/v2/submitHashes';
+    $body = implode("\n", $hashes);
+
+    // 1. Try cURL if a global handle exists
+    if (isset($GLOBALS['ch'])) {
+        $ch = $GLOBALS['ch'];
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        curl_setopt($ch, CURLOPT_USERPWD, $username . ':' . $password);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: text/plain; charset=utf-8'));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+        $content = curl_exec($ch);
+        if ($content !== false) {
+            $decoded = json_decode($content, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        } else {
+            trigger_error('cURL error submitting hashes to MHR: ' . curl_error($ch), E_USER_WARNING);
+        }
+    }
+
+    // 2. Fallback: file_get_contents with a POST stream context
+    if (isWorking('file_get_contents')) {
+        $context = stream_context_create(array(
+            'http' => array(
+                'method'        => 'POST',
+                'header'        => implode("\r\n", array(
+                    'Content-Type: text/plain; charset=utf-8',
+                    'Authorization: Basic ' . base64_encode($username . ':' . $password),
+                )),
+                'content'       => $body,
+                'ignore_errors' => true,
+            ),
+            'ssl' => array(
+                'verify_peer'      => false,
+                'verify_peer_name' => false,
+            ),
+        ));
+        $content = @file_get_contents($url, false, $context);
+        if ($content !== false) {
+            $decoded = json_decode($content, true);
+            if (is_array($decoded)) {
+                return $decoded;
+            }
+        }
+    }
+
+    trigger_error('Unable to reach Malware Hash Registry', E_USER_WARNING);
+    return array('error' => 'request failed', 'msg' => 'Unable to reach Malware Hash Registry');
+}
+
+/**
+ * Delete a file and return the specific failure reason (e.g. "unlink(...):
+ * Permission denied") instead of a generic "Failed to unlink", so the reason
+ * ends up attached to the file instead of being thrown away by
+ * @-suppression. The captured warning is consumed (removed from
+ * $phpWarnings) rather than just read, so it surfaces exactly once — via
+ * this file's own `error` field — instead of also duplicating into the
+ * generic warnings list every AJAX response carries.
+ *
+ * @param string $filePath
+ * @return string|null null on success, the reason string on failure
+ */
+function unlinkWithReason($filePath)
+{
+    $before = count($GLOBALS['phpWarnings']);
+    if (unlink($filePath)) {
+        return null;
+    }
+    if (count($GLOBALS['phpWarnings']) > $before) {
+        $captured = array_splice($GLOBALS['phpWarnings'], $before);
+        return end($captured);
+    }
+    return 'Failed to unlink';
+}
+
+/**
  * Calculate the Shannon entropy of a string.
  *
  * @param string $data The input string.
@@ -417,29 +547,51 @@ function calculateThreatScore($matchedTokens, $filePath, $entropy, $size, $token
     $hasObfuscation = false;
     $hasUploadReq = false;
 
-    $critTokens = array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function');
-    $obfTokens  = array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'hex2bin', 'bin2hex');
+    $critTokens = array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function');
+    // Full "High Obfuscation & De-encoding" (5.0) and upload/IO-request tiers —
+    // kept in sync with the weight categories in $tokenNeedles.
+    $obfTokens  = array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'rawurldecode', 'urldecode', 'hex2bin', 'bin2hex', 'exif_read_data', 'readgzfile', '$sistemit_com_enc');
     $reqTokens  = array('move_uploaded_file', '$_files', 'file_put_contents');
 
+    $tokensLower = array();
     if (is_array($matchedTokens)) {
         foreach ($matchedTokens as $token) {
-            $tokenLower = strtolower($token);
-            if (isset($tokenWeights[$tokenLower])) {
-                $score += (float)$tokenWeights[$tokenLower];
-            } else {
-                $score += 1.0;
-            }
-
-            if (in_array($tokenLower, $critTokens)) {
-                $hasCritical = true;
-            }
-            if (in_array($tokenLower, $obfTokens)) {
-                $hasObfuscation = true;
-            }
-            if (in_array($tokenLower, $reqTokens)) {
-                $hasUploadReq = true;
-            }
+            $tokensLower[] = strtolower($token);
         }
+    }
+    foreach ($tokensLower as $tokenLower) {
+        if (in_array($tokenLower, $critTokens)) {
+            $hasCritical = true;
+            break;
+        }
+    }
+    // Obfuscation/upload-handling functions (compression, encoding, file upload
+    // helpers) are everyday building blocks of legitimate code — ZIP libraries,
+    // mail clients, HTTP clients, media parsers. They're only a strong signal in
+    // combination with a real code-execution primitive (already captured by the
+    // combo multipliers below); standing alone they get a reduced weight so a
+    // large legitimate library doesn't cross the anomaly bar on that basis alone.
+    $nonCriticalDampen = $hasCritical ? 1.0 : 0.3;
+
+    foreach ($tokensLower as $tokenLower) {
+        if (isset($tokenWeights[$tokenLower])) {
+            $w = (float)$tokenWeights[$tokenLower];
+        } else {
+            $w = 1.0;
+        }
+
+        $isObf = in_array($tokenLower, $obfTokens);
+        $isReq = in_array($tokenLower, $reqTokens);
+        if ($isObf) {
+            $hasObfuscation = true;
+        }
+        if ($isReq) {
+            $hasUploadReq = true;
+        }
+        if ($isObf || $isReq) {
+            $w *= $nonCriticalDampen;
+        }
+        $score += $w;
     }
 
     // Combination Multipliers
@@ -450,13 +602,17 @@ function calculateThreatScore($matchedTokens, $filePath, $entropy, $size, $token
         $score *= 1.8; // RCE + Upload handling combo
     }
 
-    // Path location penalty (e.g. uploads, tmp, cache, images)
+    // Path location penalty (e.g. uploads, tmp, cache, images) — directory only,
+    // so a legitimately-named file like media.php or cache.php doesn't trip the
+    // "suspicious location" bonus just from its filename.
     $pathLower = strtolower(str_replace('\\', '/', $filePath));
-    if (strpos($pathLower, 'upload') !== false ||
-        strpos($pathLower, 'cache') !== false ||
-        strpos($pathLower, 'tmp') !== false ||
-        strpos($pathLower, 'images') !== false ||
-        strpos($pathLower, 'media') !== false) {
+    $lastSlash = strrpos($pathLower, '/');
+    $dirLower  = ($lastSlash === false) ? '' : substr($pathLower, 0, $lastSlash);
+    if (strpos($dirLower, 'upload') !== false ||
+        strpos($dirLower, 'cache') !== false ||
+        strpos($dirLower, 'tmp') !== false ||
+        strpos($dirLower, 'images') !== false ||
+        strpos($dirLower, 'media') !== false) {
         if ($score > 0 || $entropy > 5.5) {
             $score += 5.0; // Extra suspicion for code in upload/cache locations
         }
@@ -506,7 +662,6 @@ $tokenNeedles = array(
     'system' => 10.0,
     'passthru' => 10.0,
     'proc_open' => 10.0,
-    'assert' => 10.0,
     'create_function' => 10.0,
     'pcntl_fork' => 10.0,
     'posix_kill' => 10.0,
@@ -527,6 +682,11 @@ $tokenNeedles = array(
     '$SISTEMIT_COM_ENC' => 5.0,
 
     // Obfuscation Helpers & I/O Manipulation (Weight: 2.0)
+    // assert() can no longer eval string code by default since PHP 7.2
+    // (zend.assertions=-1 in production); it's overwhelmingly used as a
+    // benign runtime check in real code, same legacy-risk tier as
+    // preg_replace's removed /e modifier.
+    'assert' => 2.0,
     'htmlspecialchars_decode' => 2.0,
     'hexdec' => 2.0,
     'chr' => 2.0,
@@ -600,8 +760,33 @@ if (_WHITELIST_) {
 if (_BLACKLIST_) {
     $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
 }
+/**
+ * Emit a clean JSON response for an AJAX action. Folds in any PHP warnings
+ * captured during this request and, as a last-resort safety net, discards
+ * (and reports, rather than silently drops) any stray buffered output that
+ * isn't part of the intended payload — so a single unexpected warning or
+ * accidental echo can never corrupt the JSON body the client is about to
+ * parse.
+ *
+ * @param array $data
+ * @return void
+ */
+function ajaxRespond($data)
+{
+    $stray = ob_get_clean();
+    $warnings = (isset($data['warnings']) && is_array($data['warnings'])) ? $data['warnings'] : array();
+    $warnings = array_merge($warnings, $GLOBALS['phpWarnings']);
+    if (trim($stray) !== '') {
+        $warnings[] = 'Unexpected output suppressed: ' . substr(trim($stray), 0, 500);
+    }
+    $data['warnings'] = array_values($warnings);
+    echo json_encode($data);
+    exit;
+}
+
 // ── AJAX request handler ────────────────────────────────────────────────
 if (isset($_POST['ajax_action'])) {
+    ob_start();
     header('Content-Type: application/json');
     $ajaxAction = $_POST['ajax_action'];
 
@@ -634,12 +819,11 @@ if (isset($_POST['ajax_action'])) {
             }
         }
 
-        echo json_encode(array(
+        ajaxRespond(array(
             'readable'     => array_values($filtered),
             'not_readable' => array_values($notReadable),
             'total'        => count($filtered) + count($notReadable),
         ));
-        exit;
     }
 
     if ($ajaxAction == 'process') {
@@ -721,9 +905,7 @@ if (isset($_POST['ajax_action'])) {
 
                 $error = null;
                 if ($isBlacklisted) {
-                    if (!@unlink($filePath)) {
-                        $error = 'Failed to unlink';
-                    }
+                    $error = unlinkWithReason($filePath);
                 }
 
                 $features[] = array(
@@ -742,12 +924,46 @@ if (isset($_POST['ajax_action'])) {
             }
         }
 
-        echo json_encode(array('features' => $features, 'new_hashes' => $newHashes));
-        exit;
+        ajaxRespond(array('features' => $features, 'new_hashes' => $newHashes));
     }
 
-    echo json_encode(array('error' => 'Unknown action'));
-    exit;
+    if ($ajaxAction == 'mhr_check') {
+        if (isset($_POST['hashes']) && is_array($_POST['hashes'])) {
+            $hashes = array_values(array_unique(array_filter(array_map('strval', $_POST['hashes']))));
+        } else {
+            $hashes = array();
+        }
+
+        if (!_MHR_) {
+            ajaxRespond(array('error' => 'not configured', 'msg' => 'MHR integration is disabled (_MHR_ is false in main.php)'));
+        }
+
+        $mhrUser = (isset($_POST['mhr_user']) && $_POST['mhr_user'] !== '') ? trim($_POST['mhr_user']) : $mhrUsername;
+        $mhrPass = (isset($_POST['mhr_pass']) && $_POST['mhr_pass'] !== '') ? $_POST['mhr_pass'] : $mhrPassword;
+
+        ajaxRespond(mhrSubmitHashes($hashes, $mhrUser, $mhrPass));
+    }
+
+    if ($ajaxAction == 'mhr_unlink') {
+        if (isset($_POST['paths']) && is_array($_POST['paths'])) {
+            $paths = $_POST['paths'];
+        } else {
+            $paths = array();
+        }
+
+        $results = array();
+        foreach ($paths as $filePath) {
+            if (!file_exists($filePath)) {
+                $results[] = array('path' => $filePath, 'error' => null); // already gone
+                continue;
+            }
+            $results[] = array('path' => $filePath, 'error' => unlinkWithReason($filePath));
+        }
+
+        ajaxRespond(array('results' => $results));
+    }
+
+    ajaxRespond(array('error' => 'Unknown action'));
 }
 // ────────────────────────────────────────────────────────────────────────
 ?>
@@ -1090,6 +1306,16 @@ if (isset($_POST['ajax_action'])) {
             <div style="margin-top:4px;font-size:11px;color:#888;" id="ajaxSubStatus"></div>
         </div>
 
+        <!-- Malware Hash Registry (Team Cymru) bulk lookup — manual, run after a scan -->
+        <div id="mhrPanel" style="display:none;width:90%;margin:10px auto;padding:8px 12px;background:#252525;border-radius:6px;font-size:13px;">
+            <label>MHR Username: <input type="text" id="mhrUsername" autocomplete="username" style="width:140px;"></label>
+            &nbsp;
+            <label>MHR Password: <input type="password" id="mhrPassword" autocomplete="current-password" style="width:140px;"></label>
+            &nbsp;
+            <button type="button" onclick="runMhrCheckClick()" title="Submit non-blacklisted/non-whitelisted MD5s to hash.cymru.com in batches of 1000">MHR SCAN</button>
+            <span id="mhrStatus" style="margin-left:10px;color:#888;"></span>
+        </div>
+
         <?php
         if (isset($_POST['submit'])) {
             $path = $_POST['dir'];
@@ -1125,8 +1351,8 @@ if (isset($_POST['ajax_action'])) {
 
                 $error = null;
                 if ($isBlacklisted) {
-                    if (!@unlink($filePath)) {
-                        $error = "Failed to unlink";
+                    $error = unlinkWithReason($filePath);
+                    if ($error !== null) {
                         $errors[] = $error;
                     }
                 }
@@ -1175,6 +1401,8 @@ if (isset($_POST['ajax_action'])) {
         if (!isset($_POST['submit'])) {
             echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
         }
+        echo '<script>const mhrEnabled = ' . json_encode((bool)_MHR_) . ';</script>';
+        echo '<script>const serverWarnings = ' . json_encode(array_values($GLOBALS['phpWarnings'])) . ';</script>';
         ?>
         <!-- Warning banner for critical errors & failed deletions -->
         <div id="warningBanner" class="error-banner" style="display:none;"></div>
@@ -1290,33 +1518,49 @@ if (isset($_POST['ajax_action'])) {
                 var hasObfuscation = false;
                 var hasUploadReq = false;
 
-                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','assert','create_function'];
-                var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','hex2bin','bin2hex'];
+                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','create_function'];
+                // Full "High Obfuscation & De-encoding" (5.0) and upload/IO-request tiers —
+                // kept in sync with the weight categories in $tokenNeedles.
+                var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','rawurldecode','urldecode','hex2bin','bin2hex','exif_read_data','readgzfile','$sistemit_com_enc'];
                 var reqTokens  = ['move_uploaded_file','$_files','file_put_contents'];
 
-                if (Array.isArray(matchedTokens)) {
-                    for (var i = 0; i < matchedTokens.length; i++) {
-                        var token = matchedTokens[i].toLowerCase();
-                        if (weights && typeof weights[token] !== 'undefined') {
-                            score += parseFloat(weights[token]);
-                        } else {
-                            score += 1.0;
-                        }
-                        if (critTokens.indexOf(token) !== -1) hasCritical = true;
-                        if (obfTokens.indexOf(token)  !== -1) hasObfuscation = true;
-                        if (reqTokens.indexOf(token)  !== -1) hasUploadReq = true;
-                    }
+                var tokens = Array.isArray(matchedTokens) ? matchedTokens.map(function (t) { return t.toLowerCase(); }) : [];
+
+                // Obfuscation/upload-handling functions (compression, encoding, file upload
+                // helpers) are everyday building blocks of legitimate code — ZIP libraries,
+                // mail clients, HTTP clients, media parsers. They're only a strong signal in
+                // combination with a real code-execution primitive (already captured by the
+                // combo multipliers below); standing alone they get a reduced weight so a
+                // large legitimate library doesn't cross the anomaly bar on that basis alone.
+                for (var c = 0; c < tokens.length; c++) {
+                    if (critTokens.indexOf(tokens[c]) !== -1) { hasCritical = true; break; }
+                }
+                var nonCriticalDampen = hasCritical ? 1.0 : 0.3;
+
+                for (var i = 0; i < tokens.length; i++) {
+                    var token = tokens[i];
+                    var w = (weights && typeof weights[token] !== 'undefined') ? parseFloat(weights[token]) : 1.0;
+                    var isObf = obfTokens.indexOf(token) !== -1;
+                    var isReq = reqTokens.indexOf(token) !== -1;
+                    if (isObf) hasObfuscation = true;
+                    if (isReq) hasUploadReq = true;
+                    if (isObf || isReq) w *= nonCriticalDampen;
+                    score += w;
                 }
 
                 if (hasCritical && hasObfuscation) score *= 2.5;
                 if (hasCritical && hasUploadReq)   score *= 1.8;
 
+                // Directory only — a legitimately-named file like media.php or cache.php
+                // shouldn't trip the "suspicious location" bonus just from its filename.
                 var pathLow = (filePath || '').toLowerCase().replace(/\\/g, '/');
-                if (pathLow.indexOf('upload')  !== -1 ||
-                    pathLow.indexOf('cache')   !== -1 ||
-                    pathLow.indexOf('tmp')     !== -1 ||
-                    pathLow.indexOf('images')  !== -1 ||
-                    pathLow.indexOf('media')   !== -1) {
+                var lastSlash = pathLow.lastIndexOf('/');
+                var dirLow = lastSlash === -1 ? '' : pathLow.slice(0, lastSlash);
+                if (dirLow.indexOf('upload')  !== -1 ||
+                    dirLow.indexOf('cache')   !== -1 ||
+                    dirLow.indexOf('tmp')     !== -1 ||
+                    dirLow.indexOf('images')  !== -1 ||
+                    dirLow.indexOf('media')   !== -1) {
                     if (score > 0 || entropy > 5.5) score += 5.0;
                 }
 
@@ -1399,6 +1643,10 @@ if (isset($_POST['ajax_action'])) {
                         threatScore = Math.max(threatScore, 100.0);
                     }
 
+                    if (d.mhr_hit) {
+                        threatScore = Math.max(threatScore, 100.0);
+                    }
+
                     const suspCount = d.matched_tokens ? d.matched_tokens.length : 0;
                     const zSize = zScore(d.size, stats.size.mean, stats.size.std);
                     const zMtime = zScore(d.mtime, stats.mtime.mean, stats.mtime.std);
@@ -1409,15 +1657,26 @@ if (isset($_POST['ajax_action'])) {
                     const expectedSusp = d.total_tokens * avgSuspPerToken;
                     const residual = suspCount - expectedSusp;
 
+                    // is_htaccess and duplicate_of are informational categories (still
+                    // shown via their own badges/stat cards) but aren't content signals
+                    // by themselves — an .htaccess file or a byte-identical duplicate
+                    // (e.g. WordPress's dozens of stock "Silence is golden" index.php
+                    // stubs) is not inherently suspicious, so they no longer force
+                    // isAnomaly on their own. Only content/threat-based signals do.
+                    //
+                    // zSize is computed and still shown (chart/columns/tooltips) but not
+                    // used as a trigger: tested against 203 real webshells + ~1450 legit
+                    // WordPress/Laravel files, it never uniquely caught a webshell (every
+                    // one it flagged was already caught by threatScore or another signal)
+                    // while being the single largest false-positive source — plain file
+                    // size just isn't a meaningful malice signal on its own.
                     const isAnomaly = (threatScore >= 8.0) ||
-                        (Math.abs(zSize) > threshold) ||
                         (Math.abs(zSusp) > threshold) ||
                         (Math.abs(zEntropy) > threshold) ||
                         (Math.abs(zMtime) > threshold) ||
                         (residual > 5) ||
                         d.is_blacklisted ||
-                        d.is_htaccess ||
-                        d.duplicate_of !== false;
+                        d.mhr_hit === true;
 
                     return {
                         ...d,
@@ -1430,6 +1689,16 @@ if (isset($_POST['ajax_action'])) {
                         suspCount: suspCount
                     };
                 });
+            }
+
+            function shortenUnlinkError(msg) {
+                if (!msg) return msg;
+                // The file path is already shown right next to this message
+                // (the row's own file link, or the <code> path beside it in
+                // the warning panel) — repeating it inside "unlink(/long/
+                // path): reason" just pushes the actual reason off-screen for
+                // anything with a longish path. Keep only the reason.
+                return msg.replace(/^unlink\([^)]*\):\s*/, '');
             }
 
             function escapeHtml(value) {
@@ -1494,39 +1763,70 @@ if (isset($_POST['ajax_action'])) {
                 }
             }
 
-            function renderWarnings(data) {
+            // ── Unified warning panel ──────────────────────────────────────────
+            // Every failed action, warning, and error — client or server side —
+            // surfaces through here instead of scattered alerts/console logs/
+            // one-off banners that can say the same thing twice in different
+            // places. Two kinds of content are combined into one render:
+            //  1. Data-driven: recomputed fresh from the current result set
+            //     every render (failed deletions with their file paths,
+            //     unreadable files) — never stale, never duplicated.
+            //  2. Event log: one-off occurrences that aren't derivable from
+            //     the result set (a scan request failing outright, an MHR
+            //     auth error) — accumulated across the session, only cleared
+            //     when a new scan starts.
+            var _eventLog = [];
+            var _lastRenderedData = [];
+
+            function resetWarningPanel() {
+                _eventLog = [];
+                renderWarningPanel(_lastRenderedData);
+            }
+
+            function logWarning(message, level) {
+                _eventLog.push({ message: message, level: level || 'warning', time: new Date() });
+                renderWarningPanel(_lastRenderedData);
+                var banner = document.getElementById('warningBanner');
+                if (banner) { banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+            }
+
+            // Folds warnings reported by the server (see $phpWarnings / the
+            // ajaxRespond() "warnings" field in main.php) into the same panel,
+            // instead of letting PHP print them inline and risk corrupting
+            // the JSON response they'd be riding along in.
+            function reportServerWarnings(data) {
+                if (data && Array.isArray(data.warnings)) {
+                    data.warnings.forEach(function (w) { logWarning(w, 'warning'); });
+                }
+            }
+
+            function renderWarningPanel(data) {
+                _lastRenderedData = data || _lastRenderedData;
                 var banner = document.getElementById('warningBanner');
                 if (!banner) return;
-
-                if (!data || data.length === 0) {
-                    banner.style.display = 'none';
-                    banner.innerHTML = '';
-                    return;
-                }
 
                 var failedUnlinks = [];
                 var unreadable = [];
 
-                for (var i = 0; i < data.length; i++) {
-                    var d = data[i];
-                    if (d.is_blacklisted && d.error) {
+                (_lastRenderedData || []).forEach(function (d) {
+                    if ((d.is_blacklisted || d.mhr_hit) && d.error) {
                         failedUnlinks.push(d);
                     }
                     if (d.is_unreadable) {
                         unreadable.push(d);
                     }
-                }
+                });
 
                 var html = '';
 
                 if (failedUnlinks.length > 0) {
                     html += '<div style="margin-bottom:6px;">' +
-                        '<div style="margin-top:8px;text-align:left;max-height:160px;overflow-y:auto;background:#200;padding:8px 12px;border-radius:4px;border:1px solid #900;">';
+                        '<div style="font-size:11px;color:#ff9999;margin-top:6px;">Failed to delete (' + failedUnlinks.length + ') — file path and reason:</div>' +
+                        '<div style="margin-top:4px;text-align:left;max-height:200px;overflow-y:auto;background:#200;padding:8px 12px;border-radius:4px;border:1px solid #900;">';
 
-                    for (var j = 0; j < failedUnlinks.length; j++) {
-                        var f = failedUnlinks[j];
-                        html += '<div style="margin:3px 0;font-family:monospace;font-size:12px;"><span style="color:#ff6666;">✖</span> <code style="color:#ffaaaa;">' + escapeHtml(f.path) + '</code> <span style="color:#888;">(' + escapeHtml(f.error) + ')</span></div>';
-                    }
+                    failedUnlinks.forEach(function (f) {
+                        html += '<div style="margin:3px 0;font-family:monospace;font-size:12px;"><span style="color:#ff6666;">✖</span> <code style="color:#ffaaaa;">' + escapeHtml(f.path) + '</code> <span style="color:#888;">(' + escapeHtml(shortenUnlinkError(f.error)) + ')</span></div>';
+                    });
 
                     html += '</div></div>';
                 }
@@ -1538,12 +1838,30 @@ if (isset($_POST['ajax_action'])) {
                     html += '<div style="margin-bottom:6px;">' +
                         '<div style="margin-top:8px;text-align:left;max-height:160px;overflow-y:auto;background:#332b00;padding:8px 12px;border-radius:4px;border:1px solid #b37700;">';
 
-                    for (var k = 0; k < unreadable.length; k++) {
-                        var u = unreadable[k];
+                    unreadable.forEach(function (u) {
                         html += '<div style="margin:3px 0;font-family:monospace;font-size:12px;"><span style="color:#ffaa00;">⚠️</span> <code style="color:#ffcc66;">' + escapeHtml(u.path) + '</code> <span style="color:#888;">(Permission denied)</span></div>';
-                    }
+                    });
 
                     html += '</div></div>';
+                }
+
+                if (_eventLog.length > 0) {
+                    if (html !== '') {
+                        html += '<hr style="border:0;border-top:1px solid #555;margin:8px 0;">';
+                    }
+                    html += '<div style="text-align:left;max-height:200px;overflow-y:auto;background:#2a2200;padding:8px 12px;border-radius:4px;border:1px solid #665500;">';
+
+                    _eventLog.forEach(function (e) {
+                        var isError = e.level === 'error';
+                        var icon = isError ? '✖' : '⚠️';
+                        var color = isError ? '#ff6666' : '#ffcc66';
+                        html += '<div style="margin:3px 0;font-family:monospace;font-size:12px;">' +
+                            '<span style="color:' + color + ';">' + icon + '</span> ' +
+                            '<span style="color:#888;">[' + e.time.toLocaleTimeString() + ']</span> ' +
+                            '<span style="color:' + color + ';">' + escapeHtml(e.message) + '</span></div>';
+                    });
+
+                    html += '</div>';
                 }
 
                 if (html !== '') {
@@ -1554,9 +1872,10 @@ if (isset($_POST['ajax_action'])) {
                     banner.innerHTML = '';
                 }
             }
+            // ────────────────────────────────────────────────────────────────
 
             function renderTable(data) {
-                renderWarnings(data);
+                renderWarningPanel(data);
                 let filtered = data.filter(d => shouldShowFile(d));
 
                 if (currentSort === 'threat') filtered.sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0));
@@ -1581,7 +1900,11 @@ if (isset($_POST['ajax_action'])) {
                         } else if (d.is_blacklisted) {
                             color = '#f72f2f';
                             badge = '<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">BLACKLIST</span> ';
-                            if (d.error) status = d.error;
+                            if (d.error) status = shortenUnlinkError(d.error);
+                        } else if (d.mhr_hit) {
+                            color = '#f72f2f';
+                            badge = `<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">MHR HIT (${d.mhr_detection_rate}%)</span> `;
+                            status = d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown'));
                         } else if (d.threatScore >= 15.0) {
                             color = '#dddbdb';
                             badge = `<span style="background:#990000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">CRITICAL (${d.threatScore.toFixed(1)})</span> `;
@@ -1640,6 +1963,7 @@ if (isset($_POST['ajax_action'])) {
                         let line = d.path;
                         if (d.is_unreadable) line += ' (NOT_READABLE)';
                         else if (d.is_blacklisted) line += ' (BLACKLIST)';
+                        else if (d.mhr_hit) line += ' (MHR HIT ' + d.mhr_detection_rate + '%)';
                         else if (d.is_htaccess) line += ' (HTACCESS)';
                         else if (d.duplicate_of !== false) line += ' (' + d.duplicate_of + ')';
                         else if (d.matched_tokens && d.matched_tokens.length > 0) {
@@ -1657,7 +1981,7 @@ if (isset($_POST['ajax_action'])) {
                     .join('\n');
                 copyText(text)
                     .then(() => alert('Results copied!'))
-                    .catch(() => alert('Failed to copy.'));
+                    .catch(() => logWarning('Failed to copy results to clipboard.', 'error'));
             }
 
             function sortResults(mode) {
@@ -2448,15 +2772,14 @@ if (isset($_POST['ajax_action'])) {
             function startChunkedScan() {
                 var dirInput = document.querySelector('input[name="dir"]');
                 var dir = dirInput ? dirInput.value.trim() : '';
-                if (!dir) { alert('Enter a directory path first.'); return; }
+                if (!dir) { logWarning('Enter a directory path first.', 'error'); return; }
 
                 var chunkSize = getChunkSize();
                 _scanCancelled = false;
                 _seenHashes = [];
                 var allFeatures = [];
 
-                var warnEl = document.getElementById('warningBanner');
-                if (warnEl) { warnEl.style.display = 'none'; warnEl.innerHTML = ''; }
+                resetWarningPanel();
 
                 document.getElementById('ajaxProgress').style.display = 'block';
                 document.getElementById('ajaxBar').style.width = '0%';
@@ -2473,6 +2796,7 @@ if (isset($_POST['ajax_action'])) {
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (_scanCancelled) { return; }
+                        reportServerWarnings(data);
                         var readable    = data.readable    || [];
                         var notReadable = data.not_readable || [];
                         var total       = data.total || (readable.length + notReadable.length);
@@ -2495,14 +2819,14 @@ if (isset($_POST['ajax_action'])) {
                         if (_scanCancelled) { return; }
                         document.getElementById('ajaxProgress').style.display = 'none';
                         window.rawFileData = allFeatures;
+                        window.lastScanFeatures = allFeatures;
                         currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
                         analyzedData = analyzeData(allFeatures, currentThreshold);
                         renderTable(analyzedData);
                     })
                     .catch(function(err) {
                         document.getElementById('ajaxProgress').style.display = 'none';
-                        document.getElementById('result').innerHTML =
-                            '<tr><td style="color:#ff6666;padding:15px;">AJAX scan error: ' + escapeHtml(err.message) + '</td></tr>';
+                        logWarning('AJAX scan error: ' + err.message, 'error');
                     });
             }
 
@@ -2527,6 +2851,7 @@ if (isset($_POST['ajax_action'])) {
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (_scanCancelled) { return; }
+                        reportServerWarnings(data);
                         var feats = data.features || [];
                         feats.forEach(function(f) { allFeatures.push(f); });
                         if (data.new_hashes) {
@@ -2550,11 +2875,190 @@ if (isset($_POST['ajax_action'])) {
             }
             // ────────────────────────────────────────────────────────────────
 
+            // ── Malware Hash Registry (Team Cymru) bulk lookup ─────────────────
+            // Manual, triggered by the "MHR SCAN" button after a scan has
+            // completed — against every file that isn't already known-good
+            // (whitelisted, filtered out server-side before this point) or
+            // known-bad (locally blacklisted — no need to ask a third party
+            // about a hash already identified). Deduplicates by MD5 and
+            // submits in batches of at most 1000 hashes per request per the
+            // API's documented limit. A hit is treated the same as a local
+            // blacklist match: forced to a minimum threat score of 100 and
+            // unlinked from disk.
+            var _mhrQueriesRemaining = null;
+
+            function runMhrCheckClick() {
+                var features = window.lastScanFeatures;
+                if (!features || features.length === 0) {
+                    logWarning('Run a scan first.', 'error');
+                    return;
+                }
+                var user = (document.getElementById('mhrUsername').value || '').trim();
+                var pass = document.getElementById('mhrPassword').value || '';
+                if (!user || !pass) {
+                    logWarning('Enter your MHR username and password first.', 'error');
+                    return;
+                }
+                runMhrCheck(features, user, pass);
+            }
+
+            function runMhrCheck(features, mhrUser, mhrPass) {
+                if (typeof mhrEnabled === 'undefined' || !mhrEnabled) { return Promise.resolve(); }
+
+                var seen = {};
+                var hashes = [];
+                features.forEach(function (f) {
+                    if (f.is_unreadable || f.is_blacklisted) { return; }
+                    var md5 = f.md5;
+                    if (!md5 || md5 === 'N/A' || seen[md5]) { return; }
+                    seen[md5] = true;
+                    hashes.push(md5);
+                });
+
+                var statusEl = document.getElementById('mhrStatus');
+
+                if (hashes.length === 0) {
+                    if (statusEl) { statusEl.textContent = 'Nothing to check.'; }
+                    return Promise.resolve();
+                }
+
+                var batches = [];
+                for (var i = 0; i < hashes.length; i += 1000) {
+                    batches.push(hashes.slice(i, i + 1000));
+                }
+
+                var hitMap = {};
+
+                function runBatch(idx) {
+                    if (idx >= batches.length) { return Promise.resolve(); }
+
+                    if (statusEl) {
+                        statusEl.textContent = 'Checking Malware Hash Registry… batch ' +
+                            (idx + 1) + '/' + batches.length + ' (' + batches[idx].length + ' hashes)';
+                    }
+
+                    var body = new URLSearchParams();
+                    body.set('ajax_action', 'mhr_check');
+                    body.set('mhr_user', mhrUser);
+                    body.set('mhr_pass', mhrPass);
+                    batches[idx].forEach(function (h) { body.append('hashes[]', h); });
+
+                    return fetch('', { method: 'POST', body: body })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            reportServerWarnings(data);
+                            if (data && data.error) {
+                                var errMsg = 'MHR error: ' + (data.msg || data.message || data.error);
+                                if (statusEl) { statusEl.textContent = errMsg; }
+                                logWarning(errMsg, 'error');
+                                return; // misconfigured, rate-limited, bad credentials, etc. — stop rather than retry
+                            }
+                            if (data && typeof data.queries_remaining !== 'undefined') {
+                                _mhrQueriesRemaining = data.queries_remaining;
+                            }
+                            (data && data.results ? data.results : []).forEach(function (r) {
+                                if (r.md5 && r.antivirus_detection_rate !== null && typeof r.antivirus_detection_rate !== 'undefined') {
+                                    hitMap[r.md5.toLowerCase()] = r;
+                                }
+                            });
+                            return runBatch(idx + 1);
+                        })
+                        .catch(function (err) {
+                            var errMsg = 'MHR check failed: ' + err.message;
+                            if (statusEl) { statusEl.textContent = errMsg; }
+                            logWarning(errMsg, 'error');
+                        });
+                }
+
+                return runBatch(0).then(function () {
+                    var hitCount = Object.keys(hitMap).length;
+                    if (hitCount === 0) {
+                        if (statusEl) {
+                            statusEl.textContent = 'No matches' +
+                                (_mhrQueriesRemaining !== null ? ' — ' + _mhrQueriesRemaining + ' queries remaining' : '') + '.';
+                        }
+                        return;
+                    }
+
+                    var hitFiles = [];
+                    features.forEach(function (f) {
+                        if (!f.md5) { return; }
+                        var hit = hitMap[f.md5.toLowerCase()];
+                        if (hit) {
+                            f.mhr_hit = true;
+                            f.mhr_detection_rate = hit.antivirus_detection_rate;
+                            f.mhr_last_seen = hit.last_run_date;
+                            hitFiles.push(f);
+                        }
+                    });
+
+                    if (statusEl) {
+                        statusEl.textContent = 'Unlinking ' + hitFiles.length + ' matched file(s)…';
+                    }
+
+                    var body = new URLSearchParams();
+                    body.set('ajax_action', 'mhr_unlink');
+                    hitFiles.forEach(function (f) { body.append('paths[]', f.path); });
+
+                    return fetch('', { method: 'POST', body: body })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            reportServerWarnings(data);
+                            var errorsByPath = {};
+                            (data && data.results ? data.results : []).forEach(function (r) {
+                                if (r.error) { errorsByPath[r.path] = r.error; }
+                            });
+                            hitFiles.forEach(function (f) {
+                                if (errorsByPath[f.path]) {
+                                    f.error = errorsByPath[f.path];
+                                }
+                            });
+
+                            // renderTable() refreshes the data-driven part of the panel (the
+                            // per-file failed-deletion list with paths, via renderWarningPanel)
+                            // *before* logWarning adds the one summary line below it — so the
+                            // outcome is reported exactly once, not twice in different words.
+                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                            analyzedData = analyzeData(features, currentThreshold);
+                            renderTable(analyzedData);
+
+                            var failCount = Object.keys(errorsByPath).length;
+                            if (statusEl) { statusEl.textContent = 'Done.'; }
+                            logWarning(
+                                'Malware Hash Registry: ' + hitCount + ' hash match(es) — ' +
+                                (hitCount - failCount) + ' unlinked' +
+                                (failCount > 0 ? ', ' + failCount + ' failed to delete (see file list above)' : '') +
+                                (_mhrQueriesRemaining !== null ? ' — ' + _mhrQueriesRemaining + ' queries remaining' : ''),
+                                failCount > 0 ? 'error' : 'warning'
+                            );
+                        })
+                        .catch(function (err) {
+                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                            analyzedData = analyzeData(features, currentThreshold);
+                            renderTable(analyzedData);
+                            var errMsg = 'MHR unlink request failed: ' + err.message;
+                            if (statusEl) { statusEl.textContent = errMsg; }
+                            logWarning(errMsg, 'error');
+                        });
+                });
+            }
+            // ────────────────────────────────────────────────────────────────
+
             window.onload = function () {
+                var mhrPanelEl = document.getElementById('mhrPanel');
+                if (mhrPanelEl && typeof mhrEnabled !== 'undefined' && mhrEnabled) {
+                    mhrPanelEl.style.display = 'block';
+                }
+
                 if (typeof rawFileData !== 'undefined') {
+                    window.lastScanFeatures = rawFileData;
                     currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
                     analyzedData = analyzeData(rawFileData, currentThreshold);
                     renderTable(analyzedData);
+                }
+
+                if (typeof serverWarnings !== 'undefined' && serverWarnings.length > 0) {
+                    reportServerWarnings({ warnings: serverWarnings });
                 }
             };
         </script>
