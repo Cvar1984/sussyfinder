@@ -502,127 +502,124 @@ function unlinkWithReason($filePath)
 }
 
 /**
- * Calculate the Shannon entropy of a string.
+ * Decode a POST field as a JSON array, defaulting to an empty array when
+ * the field is missing or isn't valid JSON.
  *
- * @param string $data The input string.
- * @return float The calculated Shannon entropy.
+ * @param string $key
+ * @return array
  */
-function shannonEntropy($data)
+function postJsonArray($key)
 {
-    $len = strlen($data);
-
-    if ($len === 0) {
-        return 0;
+    if (isset($_POST[$key])) {
+        $decoded = json_decode($_POST[$key], true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
     }
-
-    $freq = count_chars($data, 1);
-    $entropy = 0;
-
-    foreach ($freq as $count) {
-        $p = $count / $len;
-        $entropy -= $p * log($p, 2);
-    }
-    return $entropy;
+    return array();
 }
-
 
 /**
- * Calculate composite threat score using weighted tokens and combination rules.
- * Backward compatible with PHP 4.3.
+ * Scan a list of readable file paths and build their feature rows, applying
+ * the whitelist/blacklist checks, token matching, and duplicate-of
+ * detection used throughout this file's scanning.
  *
- * @param array $matchedTokens
- * @param string $filePath
- * @param float $entropy
- * @param int $size
- * @param array $tokenWeights Master token weights array
- * @return float
+ * @param array $paths
+ * @param array $whitelistMD5Sums
+ * @param array $blacklistMD5Sums
+ * @param array $tokenNeedles
+ * @param array $localSeen hash => first-seen path; read and updated in place
+ * @param array $newlySeen appended with "hash:path" for each entry newly
+ *                         added to $localSeen during this call; pass a
+ *                         throwaway array if the caller doesn't need it
+ * @return array list of feature rows (see the 'path'/'size'/... shape used throughout)
  */
-function calculateThreatScore($matchedTokens, $filePath, $entropy, $size, $tokenWeights = array())
+function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenNeedles, &$localSeen, &$newlySeen)
 {
-    $score = 0.0;
-    $hasCritical = false;
-    $hasObfuscation = false;
-    $hasUploadReq = false;
+    $features = array();
 
-    $critTokens = array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function');
-    // Full "High Obfuscation & De-encoding" (5.0) and upload/IO-request tiers —
-    // kept in sync with the weight categories in $tokenNeedles.
-    $obfTokens  = array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'rawurldecode', 'urldecode', 'hex2bin', 'bin2hex', 'exif_read_data', 'readgzfile', '$sistemit_com_enc');
-    $reqTokens  = array('move_uploaded_file', '$_files', 'file_put_contents');
-
-    $tokensLower = array();
-    if (is_array($matchedTokens)) {
-        foreach ($matchedTokens as $token) {
-            $tokensLower[] = strtolower($token);
+    foreach ($paths as $filePath) {
+        if (!file_exists($filePath) || !is_readable($filePath)) {
+            continue;
         }
-    }
-    foreach ($tokensLower as $tokenLower) {
-        if (in_array($tokenLower, $critTokens)) {
-            $hasCritical = true;
-            break;
-        }
-    }
-    // Obfuscation/upload-handling functions (compression, encoding, file upload
-    // helpers) are everyday building blocks of legitimate code — ZIP libraries,
-    // mail clients, HTTP clients, media parsers. They're only a strong signal in
-    // combination with a real code-execution primitive (already captured by the
-    // combo multipliers below); standing alone they get a reduced weight so a
-    // large legitimate library doesn't cross the anomaly bar on that basis alone.
-    $nonCriticalDampen = $hasCritical ? 1.0 : 0.3;
 
-    foreach ($tokensLower as $tokenLower) {
-        if (isset($tokenWeights[$tokenLower])) {
-            $w = (float)$tokenWeights[$tokenLower];
+        $fileSum = md5_file($filePath);
+        if (in_array($fileSum, $whitelistMD5Sums)) {
+            continue;
+        }
+
+        $tokens        = getFileTokens($filePath);
+        $matchedTokens = compareTokens($tokenNeedles, $tokens);
+        $totalTokens   = count($tokens);
+        $size          = filesize($filePath);
+        $mtime         = filemtime($filePath);
+        $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
+        $isHtaccess    = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
+        $duplicateOf   = false;
+
+        if (isset($localSeen[$fileSum])) {
+            $duplicateOf = $localSeen[$fileSum];
         } else {
-            $w = 1.0;
+            $localSeen[$fileSum] = $filePath;
+            $newlySeen[] = $fileSum . ':' . $filePath;
         }
 
-        $isObf = in_array($tokenLower, $obfTokens);
-        $isReq = in_array($tokenLower, $reqTokens);
-        if ($isObf) {
-            $hasObfuscation = true;
+        $error = null;
+        if ($isBlacklisted) {
+            $error = unlinkWithReason($filePath);
         }
-        if ($isReq) {
-            $hasUploadReq = true;
-        }
-        if ($isObf || $isReq) {
-            $w *= $nonCriticalDampen;
-        }
-        $score += $w;
+
+        $features[] = array(
+            'path'           => $filePath,
+            'size'           => $size,
+            'mtime'          => $mtime,
+            'total_tokens'   => $totalTokens,
+            'matched_tokens' => $matchedTokens,
+            'md5'            => $fileSum,
+            'is_blacklisted' => $isBlacklisted,
+            'is_htaccess'    => $isHtaccess,
+            'duplicate_of'   => $duplicateOf,
+            'error'          => $error,
+            'is_unreadable'  => false,
+        );
     }
 
-    // Combination Multipliers
-    if ($hasCritical && $hasObfuscation) {
-        $score *= 2.5; // High confidence RCE + Obfuscation combo
-    }
-    if ($hasCritical && $hasUploadReq) {
-        $score *= 1.8; // RCE + Upload handling combo
-    }
-
-    // Path location penalty (e.g. uploads, tmp, cache, images) — directory only,
-    // so a legitimately-named file like media.php or cache.php doesn't trip the
-    // "suspicious location" bonus just from its filename.
-    $pathLower = strtolower(str_replace('\\', '/', $filePath));
-    $lastSlash = strrpos($pathLower, '/');
-    $dirLower  = ($lastSlash === false) ? '' : substr($pathLower, 0, $lastSlash);
-    if (strpos($dirLower, 'upload') !== false ||
-        strpos($dirLower, 'cache') !== false ||
-        strpos($dirLower, 'tmp') !== false ||
-        strpos($dirLower, 'images') !== false ||
-        strpos($dirLower, 'media') !== false) {
-        if ($score > 0 || $entropy > 5.5) {
-            $score += 5.0; // Extra suspicion for code in upload/cache locations
-        }
-    }
-
-    // High Entropy Bonus for small PHP files (< 20KB with entropy > 5.8)
-    if ($size !== null && $size < 20480 && $entropy > 5.8) {
-        $score += 3.0;
-    }
-
-    return round($score, 2);
+    return $features;
 }
 
+/**
+ * Build feature rows for paths that could not be read.
+ *
+ * @param array $paths
+ * @return array
+ */
+function scanUnreadablePaths($paths)
+{
+    $features = array();
+
+    foreach ($paths as $filePath) {
+        $mtime = @filemtime($filePath);
+        if (!$mtime) {
+            $mtime = 0;
+        }
+
+        $features[] = array(
+            'path'           => $filePath,
+            'size'           => null,
+            'mtime'          => $mtime,
+            'total_tokens'   => null,
+            'matched_tokens' => array('NOT_READABLE'),
+            'md5'            => 'N/A',
+            'is_blacklisted' => false,
+            'is_htaccess'    => false,
+            'duplicate_of'   => false,
+            'error'          => null,
+            'is_unreadable'  => true,
+        );
+    }
+
+    return $features;
+}
 
 // $ext = array(
 //     'php',
@@ -820,11 +817,7 @@ if (isset($_POST['ajax_action'])) {
     }
 
     if ($ajaxAction == 'process') {
-        if (isset($_POST['paths']) && is_array($_POST['paths'])) {
-            $paths = $_POST['paths'];
-        } else {
-            $paths = array();
-        }
+        $paths = postJsonArray('paths_json');
 
         if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
             $isUnreadable = true;
@@ -832,35 +825,12 @@ if (isset($_POST['ajax_action'])) {
             $isUnreadable = false;
         }
 
-        if (isset($_POST['seen_hashes']) && is_array($_POST['seen_hashes'])) {
-            $seenHashes = $_POST['seen_hashes'];
-        } else {
-            $seenHashes = array();
-        }
+        $seenHashes = postJsonArray('seen_hashes_json');
 
-        $features  = array();
         $newHashes = array();
 
         if ($isUnreadable) {
-            foreach ($paths as $filePath) {
-                $mtime = @filemtime($filePath);
-                if (!$mtime) {
-                    $mtime = 0;
-                }
-                $features[] = array(
-                    'path'           => $filePath,
-                    'size'           => null,
-                    'mtime'          => $mtime,
-                    'total_tokens'   => null,
-                    'matched_tokens' => array('NOT_READABLE'),
-                    'md5'            => 'N/A',
-                    'is_blacklisted' => false,
-                    'is_htaccess'    => false,
-                    'duplicate_of'   => false,
-                    'error'          => null,
-                    'is_unreadable'  => true,
-                );
-            }
+            $features = scanUnreadablePaths($paths);
         } else {
             $localSeen = array();
             foreach ($seenHashes as $entry) {
@@ -870,51 +840,7 @@ if (isset($_POST['ajax_action'])) {
                 }
             }
 
-            foreach ($paths as $filePath) {
-                if (!file_exists($filePath) || !is_readable($filePath)) {
-                    continue;
-                }
-
-                $fileSum = md5_file($filePath);
-                if (in_array($fileSum, $whitelistMD5Sums)) {
-                    continue;
-                }
-
-                $tokens        = getFileTokens($filePath);
-                $matchedTokens = compareTokens($tokenNeedles, $tokens);
-                $totalTokens   = count($tokens);
-                $size          = filesize($filePath);
-                $mtime         = filemtime($filePath);
-                $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
-                $isHtaccess    = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
-                $duplicateOf   = false;
-
-                if (isset($localSeen[$fileSum])) {
-                    $duplicateOf = $localSeen[$fileSum];
-                } else {
-                    $localSeen[$fileSum] = $filePath;
-                    $newHashes[] = $fileSum . ':' . $filePath;
-                }
-
-                $error = null;
-                if ($isBlacklisted) {
-                    $error = unlinkWithReason($filePath);
-                }
-
-                $features[] = array(
-                    'path'           => $filePath,
-                    'size'           => $size,
-                    'mtime'          => $mtime,
-                    'total_tokens'   => $totalTokens,
-                    'matched_tokens' => $matchedTokens,
-                    'md5'            => $fileSum,
-                    'is_blacklisted' => $isBlacklisted,
-                    'is_htaccess'    => $isHtaccess,
-                    'duplicate_of'   => $duplicateOf,
-                    'error'          => $error,
-                    'is_unreadable'  => false,
-                );
-            }
+            $features = scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenNeedles, $localSeen, $newHashes);
         }
 
         ajaxRespond(array('features' => $features, 'new_hashes' => $newHashes));
@@ -995,25 +921,105 @@ if (isset($_POST['ajax_action'])) {
             }
 
             input,
-            button {
+            button,
+            select {
                 font-family: 'Ubuntu Mono', monospace;
-                padding: 5px;
-                border-radius: 5px;
-                border: 1px solid #555;
+                font-size: 13px;
+                padding: 6px 10px;
+                border-radius: 6px;
+                border: 1px solid #444;
                 background: #2a2a2a;
                 color: #d0d0d0;
             }
 
-            button:hover,
-            input[type=submit]:hover,
-            input[type=text]:hover {
-                border-color: #ff6666;
-                color: #ff6666;
+            button {
                 cursor: pointer;
+                transition: background 0.15s, border-color 0.15s, color 0.15s;
             }
 
-            input[type=text] {
-                width: 100%;
+            button:hover,
+            input[type=text]:hover,
+            input[type=number]:hover {
+                border-color: #ff6666;
+                color: #ff6666;
+            }
+
+            button.btn-primary {
+                background: #2f5f8a;
+                border-color: #2f5f8a;
+                color: #fff;
+                font-weight: bold;
+            }
+
+            button.btn-primary:hover {
+                background: #3a75a8;
+                border-color: #3a75a8;
+                color: #fff;
+            }
+
+            .navbar {
+                display: flex;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 10px;
+                width: 90%;
+                margin: 15px auto;
+                padding: 10px 16px;
+                background: #242424;
+                border: 1px solid #3a3a3a;
+                border-radius: 8px;
+            }
+
+            .navbar-brand {
+                font-size: 18px;
+                font-weight: bold;
+                color: #f0f0f0;
+                white-space: nowrap;
+            }
+
+            .navbar-group {
+                display: flex;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+
+            .navbar .dir-input {
+                flex: 1 1 260px;
+                min-width: 160px;
+            }
+
+            .navbar .chunk-input {
+                width: 70px;
+            }
+
+            .toolbar {
+                display: flex;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
+                width: 90%;
+                margin: 0 auto 15px;
+                padding: 8px 16px;
+                background: #242424;
+                border: 1px solid #3a3a3a;
+                border-radius: 8px;
+                font-size: 12px;
+            }
+
+            .toolbar label {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                white-space: nowrap;
+            }
+
+            .toolbar .search-input {
+                width: 160px;
+            }
+
+            .toolbar .z-input {
+                width: 55px;
             }
 
             #result td {
@@ -1029,16 +1035,6 @@ if (isset($_POST['ajax_action'])) {
 
             #result tr:nth-child(even) td {
                 background: #242424;
-            }
-
-            .control-bar {
-                text-align: center;
-                margin: 10px 0;
-            }
-
-            .control-bar button,
-            .control-bar input {
-                margin: 0 5px;
             }
 
             .error-banner {
@@ -1069,15 +1065,6 @@ if (isset($_POST['ajax_action'])) {
 
             .token-highlight {
                 color: #ff8a03ff;
-            }
-
-            .dashboard-controls {
-                text-align: center;
-                margin: 10px auto 15px;
-            }
-
-            .dashboard-controls button {
-                margin: 0 5px;
             }
 
             .dashboard-panel {
@@ -1266,26 +1253,14 @@ if (isset($_POST['ajax_action'])) {
     </head>
 
     <body>
-        <form method="post">
-            <table align="center" width="30%">
-                <tr>
-                    <th>Sussy Finder</th>
-                </tr>
-                <tr>
-                    <td><input type="text" name="dir" value="<?php echo getcwd(); ?>"></td>
-                </tr>
-                <tr>
-                    <td><input type="submit" name="submit" value="SCAN" title="Classic full-page scan (may timeout on large directories)">&nbsp;
-                    <button type="button" onclick="startChunkedScan()" title="AJAX chunked scan — safe for large directories">AJAX SCAN</button></td>
-                </tr>
-                <tr>
-                    <td style="font-size:12px;color:#888;">
-                        Chunk size:&nbsp;<input type="number" id="chunkSizeInput" value="500" step="50" style="width:65px;" title="Files processed per AJAX request">
-                        &nbsp;<span style="font-size:11px;color:#666;">(files per batch)</span>
-                    </td>
-                </tr>
-            </table>
-        </form>
+        <nav class="navbar">
+            <span class="navbar-brand">Sussy Finder</span>
+            <div class="navbar-group">
+                <input type="text" name="dir" class="dir-input" value="<?php echo getcwd(); ?>" title="Directory to scan">
+                <input type="number" id="chunkSizeInput" class="chunk-input" value="500" step="50" title="Files processed per AJAX request">
+                <button type="button" class="btn-primary" onclick="startChunkedScan()" title="Chunked scan — safe for large directories">Scan</button>
+            </div>
+        </nav>
 
         <!-- AJAX progress panel -->
         <div id="ajaxProgress" style="display:none;width:90%;margin:10px auto;">
@@ -1310,130 +1285,42 @@ if (isset($_POST['ajax_action'])) {
         </div>
 
         <?php
-        if (isset($_POST['submit'])) {
-            $path = $_POST['dir'];
-            $result = getSortedByPattern($path, $pattern);
-            $fileReadable = $result['file_readable'];
-            $fileNotReadable = $result['file_not_readable'];
-
-            $rawFeatures = array();
-            $duplicateFiles = array();
-            $errors = array();
-
-            foreach ($fileReadable as $filePath) {
-                $fileSum = md5_file($filePath);
-                if (in_array($fileSum, $whitelistMD5Sums))
-                    continue;
-
-                // Token extraction only — entropy and threat score computed client-side
-                $tokens = getFileTokens($filePath);
-                $matchedTokens = compareTokens($tokenNeedles, $tokens);
-                $totalTokens = count($tokens);
-                $size = filesize($filePath);
-                $mtime = filemtime($filePath);
-
-                $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
-                $isHtaccess = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
-
-                $duplicateOf = false;
-                if (($dupPath = array_search($fileSum, $duplicateFiles)) !== false) {
-                    $duplicateOf = $dupPath;
-                } else {
-                    $duplicateFiles[$filePath] = $fileSum;
-                }
-
-                $error = null;
-                if ($isBlacklisted) {
-                    $error = unlinkWithReason($filePath);
-                    if ($error !== null) {
-                        $errors[] = $error;
-                    }
-                }
-
-                $rawFeatures[] = array(
-                    'path' => $filePath,
-                    'size' => $size,
-                    'mtime' => $mtime,
-                    'total_tokens' => $totalTokens,
-                    'matched_tokens' => $matchedTokens,
-                    'md5' => $fileSum,
-                    'is_blacklisted' => $isBlacklisted,
-                    'is_htaccess' => $isHtaccess,
-                    'duplicate_of' => $duplicateOf,
-                    'error' => $error,
-                    'is_unreadable' => false,
-                );
-            }
-
-            foreach ($fileNotReadable as $filePath) {
-                $mtime = @filemtime($filePath);
-
-                if (!$mtime) {
-                    $mtime = 0;
-                }
-
-                $rawFeatures[] = array(
-                    'path' => $filePath,
-                    'size' => null,
-                    'mtime' => $mtime,
-                    'total_tokens' => null,
-                    'matched_tokens' => array('NOT_READABLE'),
-                    'md5' => 'N/A',
-                    'is_blacklisted' => false,
-                    'is_htaccess' => false,
-                    'duplicate_of' => false,
-                    'error' => null,
-                    'is_unreadable' => true,
-                );
-            }
-            // Emit token weight map so JS can replicate PHP scoring exactly
-            echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
-            echo '<script>const rawFileData = ' . json_encode($rawFeatures) . ';</script>';
-        }
-        // Always emit tokenWeights so AJAX scan mode can use them
-        if (!isset($_POST['submit'])) {
-            echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
-        }
+        // Emit token weight map so JS can replicate PHP scoring exactly
+        echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
         echo '<script>const mhrEnabled = ' . json_encode((bool)_MHR_) . ';</script>';
         echo '<script>const serverWarnings = ' . json_encode(array_values($GLOBALS['phpWarnings'])) . ';</script>';
         ?>
         <!-- Warning banner for critical errors & failed deletions -->
         <div id="warningBanner" class="error-banner" style="display:none;"></div>
 
-        <!-- Controls -->
-        <div class="control-bar">
-            <button type="button" onclick="copyResults()">Copy Results</button>
-            <button type="button" onclick="sortResults('threat')">Sort by Threat Score</button>
-            <button type="button" onclick="sortResults('mtime')">Sort by Time</button>
-            <button type="button" onclick="sortResults('tokens')">Sort by Tokens</button>
-            <button type="button" onclick="sortResults('zSusp')">Sort by Z‑Score</button>
-            <button type="button" onclick="sortResults('residual')">Sort by Residual</button>
-            <label style="margin-left:15px;">
-                Filter:
-                <select id="severityFilter" onchange="applySeverityFilter()" style="padding:4px; border-radius:5px; background:#2a2a2a; color:#d0d0d0; border:1px solid #555;">
-                    <option value="all">All Files</option>
-                    <option value="anomalies">Only Anomalies</option>
-                    <option value="critical">Critical Threat</option>
-                    <option value="obfuscated">High Entropy</option>
-                </select>
-            </label>
-            <label style="margin-left:10px;">
-                Z‑threshold: <input type="number" id="zThreshold" value="3.5" step="0.1" style="width:55px;" onchange="applyThreshold()">
-            </label>
-            <label style="margin-left:15px;">
-                🔍 Search:
-                <input type="text" id="searchInput" placeholder="e.g. eval or .php" style="width:160px;" oninput="applySearch()">
-            </label>
-            <label style="margin-left:5px;">
-                <input type="checkbox" id="searchTokensOnly" onchange="applySearch()"> Tokens only
-            </label>
-        </div>
+        <!-- Result controls -->
+        <div class="toolbar">
+            <button type="button" onclick="copyResults()">Copy</button>
 
-        <!-- Dashboard controls and panels -->
-        <div class="dashboard-controls">
-            <button type="button" onclick="toggleInsights()">Show Insights</button>
-            <button type="button" onclick="toggleCharts()">Show Charts</button>
-            <button type="button" onclick="clearFilters()">Clear Filters</button>
+            <select id="sortSelect" onchange="sortResults(this.value)" title="Sort results">
+                <option value="threat">Sort: Threat Score</option>
+                <option value="mtime">Sort: Time</option>
+                <option value="tokens">Sort: Tokens</option>
+                <option value="zSusp">Sort: Z‑Score</option>
+                <option value="residual">Sort: Residual</option>
+            </select>
+
+            <select id="severityFilter" onchange="applySeverityFilter()" title="Filter results">
+                <option value="all">All Files</option>
+                <option value="anomalies">Only Anomalies</option>
+                <option value="critical">Critical Threat</option>
+                <option value="obfuscated">High Entropy</option>
+            </select>
+
+            <label>Z‑threshold: <input type="number" id="zThreshold" class="z-input" value="3.5" step="0.1" onchange="applyThreshold()"></label>
+
+            <label>🔍 <input type="text" id="searchInput" class="search-input" placeholder="e.g. eval or .php" oninput="applySearch()"></label>
+
+            <label><input type="checkbox" id="searchTokensOnly" onchange="applySearch()"> Tokens only</label>
+
+            <button type="button" onclick="toggleInsights()">Insights</button>
+            <button type="button" onclick="toggleCharts()">Charts</button>
+            <button type="button" onclick="clearFilters()">Clear</button>
         </div>
 
         <div id="insightsPanel" class="dashboard-panel">
@@ -1984,13 +1871,6 @@ if (isset($_POST['ajax_action'])) {
 
             function applySeverityFilter() {
                 currentFilterMode = document.getElementById('severityFilter').value;
-                renderTable(analyzedData);
-            }
-
-            function toggleAnomalies() {
-                const checked = document.getElementById('showAnomaliesOnly').checked;
-                currentFilterMode = checked ? 'anomalies' : 'all';
-                document.getElementById('severityFilter').value = currentFilterMode;
                 renderTable(analyzedData);
             }
 
@@ -2831,8 +2711,8 @@ if (isset($_POST['ajax_action'])) {
                 var body = new URLSearchParams();
                 body.set('ajax_action', 'process');
                 body.set('is_not_readable', isNotReadable ? '1' : '0');
-                paths.forEach(function(p) { body.append('paths[]', p); });
-                _seenHashes.forEach(function(h) { body.append('seen_hashes[]', h); });
+                body.set('paths_json', JSON.stringify(paths));
+                body.set('seen_hashes_json', JSON.stringify(_seenHashes));
                 return fetch('', { method: 'POST', body: body }).then(function(r) { return r.json(); });
             }
 
@@ -3090,13 +2970,6 @@ if (isset($_POST['ajax_action'])) {
                 var mhrPanelEl = document.getElementById('mhrPanel');
                 if (mhrPanelEl && typeof mhrEnabled !== 'undefined' && mhrEnabled) {
                     mhrPanelEl.style.display = 'block';
-                }
-
-                if (typeof rawFileData !== 'undefined') {
-                    window.lastScanFeatures = rawFileData;
-                    currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
-                    analyzedData = analyzeData(rawFileData, currentThreshold);
-                    renderTable(analyzedData);
                 }
 
                 if (typeof serverWarnings !== 'undefined' && serverWarnings.length > 0) {
