@@ -434,6 +434,14 @@ function mhrSubmitHashes($hashes, $username, $password)
         curl_setopt($ch, CURLOPT_USERPWD, $username . ':' . $password);
         curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: text/plain; charset=utf-8'));
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        // hash.cymru.com's HTTP/2 endpoint intermittently drops the stream
+        // mid-response ("HTTP/2 stream 0 was not closed cleanly"); HTTP/1.1
+        // doesn't hit that failure mode. Bounded timeouts so a broken
+        // connection fails fast into the file_get_contents fallback below
+        // instead of hanging.
+        curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
 
         $content = curl_exec($ch);
         if ($content !== false) {
@@ -457,6 +465,7 @@ function mhrSubmitHashes($hashes, $username, $password)
                 )),
                 'content'       => $body,
                 'ignore_errors' => true,
+                'timeout'       => 30,
             ),
             'ssl' => array(
                 'verify_peer'      => false,
@@ -1243,6 +1252,21 @@ if (isset($_POST['ajax_action'])) {
                 color: #ffcc66;
             }
 
+            /* VirusTotal lookup badge */
+            .vt-badge {
+                cursor: pointer;
+                background: #75799a;
+                color: #fff;
+                margin-left: 6px;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            .vt-badge:hover {
+                background: #989dcb;
+            }
+
             @media (max-width: 768px) {
                 .insight-columns,
                 .charts-grid {
@@ -1616,6 +1640,10 @@ if (isset($_POST['ajax_action'])) {
                 });
             }
 
+            function checkVT(hash) {
+                window.open('https://www.virustotal.com/gui/file/' + encodeURIComponent(hash), '_blank', 'noopener');
+            }
+
             function shouldShowFile(d) {
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && d.threatScore < 10.0 && !d.is_blacklisted) return false;
@@ -1816,13 +1844,14 @@ if (isset($_POST['ajax_action'])) {
                             verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)}`;
                         }
 
-                        const warningSign = d.isAnomaly ? '⚠️ ' : '';
                         const fileLink = `<span class="file-link" onclick="copyText('${escapeHtml(d.path)}')">${escapeHtml(d.path)}</span>`;
                         let md5Btn = '';
+                        let vtBadge = '';
                         if (!d.is_unreadable && d.md5 && d.md5 !== 'N/A') {
                             md5Btn = `<span class="copy-hash-btn" onclick="copyText('${escapeHtml(d.md5)}')" title="Copy MD5 hash">📋</span>`;
+                            vtBadge = `<span class="vt-badge" onclick="checkVT('${escapeHtml(d.md5)}')" title="check on VirusTotal">VT</span>`;
                         }
-                        let mainLine = warningSign + badge + fileLink + md5Btn;
+                        let mainLine = badge + fileLink + md5Btn + vtBadge;
                         if (status) mainLine += ' (' + status + ')';
 
                         html += `<tr>
@@ -2895,9 +2924,14 @@ if (isset($_POST['ajax_action'])) {
                             return runBatch(idx + 1);
                         })
                         .catch(function (err) {
-                            var errMsg = 'MHR check failed: ' + err.message;
+                            // A network-level failure (a dropped connection, a
+                            // truncated response) is specific to this batch, not
+                            // a config problem — skip it and keep checking the
+                            // rest rather than abandoning the whole MHR scan.
+                            var errMsg = 'MHR batch ' + (idx + 1) + '/' + batches.length + ' failed: ' + err.message;
                             if (statusEl) { statusEl.textContent = errMsg; }
                             logWarning(errMsg, 'error');
+                            return runBatch(idx + 1);
                         });
                 }
 
