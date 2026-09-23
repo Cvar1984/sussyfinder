@@ -2728,20 +2728,29 @@ if (isset($_POST['ajax_action'])) {
             // A batch that fails to parse as JSON usually means exactly one
             // path in it tripped something server-side (a WAF/security rule,
             // an open_basedir restriction, etc.) that blocked the whole
-            // request \u2014 not that every file in the batch is a problem. Retry
-            // one file at a time so everything else in the batch still gets
-            // analyzed, and only the genuinely bad path(s) get skipped.
-            function retryProcessIndividually(paths, isNotReadable, allFeatures) {
-                var i = 0;
-                function next() {
-                    if (i >= paths.length) { return Promise.resolve(); }
-                    var path = paths[i++];
-                    return fetchProcessBatch([path], isNotReadable)
-                        .then(function(data) { applyProcessResult(data, allFeatures); })
-                        .catch(function(err) { logWarning('Skipped ' + path + ' \u2014 ' + err.message, 'error'); })
-                        .then(next);
-                }
-                return next();
+            // request \u2014 not that every file in the batch is a problem.
+            // Bisect the batch and retry each half, splitting again on
+            // failure, down to individual files if needed \u2014 so a batch of
+            // 500 with one bad file costs a handful of requests instead of
+            // 500 individual ones.
+            function retryProcessBisect(paths, isNotReadable, allFeatures) {
+                return fetchProcessBatch(paths, isNotReadable)
+                    .then(function(data) { applyProcessResult(data, allFeatures); })
+                    .catch(function(err) {
+                        if (!(err instanceof SyntaxError) || paths.length <= 1) {
+                            if (paths.length === 1) {
+                                logWarning('Skipped ' + paths[0] + ' \u2014 ' + err.message, 'error');
+                            } else {
+                                logWarning('Failed to process ' + paths.length + ' file(s): ' + err.message, 'error');
+                            }
+                            return;
+                        }
+                        var mid = Math.ceil(paths.length / 2);
+                        var left = paths.slice(0, mid);
+                        var right = paths.slice(mid);
+                        return retryProcessBisect(left, isNotReadable, allFeatures)
+                            .then(function() { return retryProcessBisect(right, isNotReadable, allFeatures); });
+                    });
             }
 
             function processChunk(chunks, idx, allFeatures, totalFiles, chunkSize) {
@@ -2767,10 +2776,10 @@ if (isset($_POST['ajax_action'])) {
                         if (_scanCancelled) { return; }
                         if (err instanceof SyntaxError && chunk.paths.length > 1) {
                             logWarning(
-                                'Chunk ' + (idx + 1) + '/' + chunks.length + ' returned an invalid response \u2014 retrying its ' + chunk.paths.length + ' file(s) individually',
+                                'Chunk ' + (idx + 1) + '/' + chunks.length + ' returned an invalid response \u2014 retrying its ' + chunk.paths.length + ' file(s) in smaller batches',
                                 'warning'
                             );
-                            return retryProcessIndividually(chunk.paths, chunk.isNotReadable, allFeatures);
+                            return retryProcessBisect(chunk.paths, chunk.isNotReadable, allFeatures);
                         }
                         // A network-level failure would fail identically on every
                         // retry, so there's nothing to gain from splitting it up.
