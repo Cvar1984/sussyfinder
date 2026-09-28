@@ -53,6 +53,61 @@ function errorHandler($errno, $errstr, $errfile, $errline) {
 
 set_error_handler('errorHandler');
 
+if (!function_exists('json_encode')) {
+    /**
+     * json_encode() for PHP < 5.2: null, bools, numbers, strings and
+     * (nested) arrays. Lists become [...], other arrays {...}. "/" is escaped
+     * like the native one so "</script>" can't end an inline <script> early.
+     *
+     * @param mixed $value
+     * @return string
+     */
+    function json_encode($value)
+    {
+        static $escape = null;
+        if ($escape === null) {
+            $escape = array('"' => '\\"', '\\' => '\\\\', '/' => '\\/');
+            for ($i = 0; $i < 0x20; $i++) {
+                $escape[chr($i)] = sprintf('\\u%04x', $i);
+            }
+        }
+
+        if (is_null($value)) {
+            return 'null';
+        }
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+        if (is_int($value) || is_float($value)) {
+            return str_replace(',', '.', (string) $value); // locales with a decimal comma
+        }
+        if (!is_array($value)) {
+            return '"' . strtr((string) $value, $escape) . '"';
+        }
+
+        $isList = true;
+        $expected = 0;
+        foreach ($value as $key => $item) {
+            if ($key !== $expected++) {
+                $isList = false;
+                break;
+            }
+        }
+        $parts = array();
+        foreach ($value as $key => $item) {
+            if ($isList) {
+                $parts[] = json_encode($item);
+            } else {
+                $parts[] = json_encode((string) $key) . ':' . json_encode($item);
+            }
+        }
+        if ($isList) {
+            return '[' . implode(',', $parts) . ']';
+        }
+        return '{' . implode(',', $parts) . '}';
+    }
+}
+
 /**
  * Check if function is available
  *
@@ -246,16 +301,50 @@ function getSortedByPattern($path, $patterns)
 }
 
 /**
- * Tokenize PHP source, normalising short open tags first
+ * Tokenize PHP source, normalising short open tags first. Inside "...",
+ * `...` and heredocs only variables and {$...} expressions are kept: the rest
+ * is literal text, which PHP 4/5.0 (and array keys in "$a[key]" on any
+ * version) hand out as T_STRING tokens that would otherwise read as code.
  *
  * @param string $fileContent
- * @return array raw token_get_all() output
+ * @return array token_get_all() output minus literal string text
  */
 function getFileTokens($fileContent)
 {
     $fileContent = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $fileContent);
-    $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
-    return @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
+    // Short open tags ("<?if(...)", "<? echo") become "<?php " so detection doesn't
+    // depend on this host's short_open_tag; "<?=", "<?php" and "<?xml" stay as they are
+    $fileContent = preg_replace('/<\?(?!php|=|xml)/i', '<?php ', $fileContent);
+    $tokens = @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
+
+    $output = array();
+    $quote = null;  // closing '"' or '`', or T_END_HEREDOC, while inside a string
+    $depth = 0;     // brace depth inside a {$...} expression
+    foreach ($tokens as $token) {
+        $id = is_array($token) ? $token[0] : 0;
+        $text = is_array($token) ? $token[1] : $token;
+        if ($depth > 0) {
+            if ($text == '{') {
+                $depth++;
+            } elseif ($text == '}') {
+                $depth--;
+            }
+        } elseif ($quote !== null) {
+            if ($id == T_CURLY_OPEN || $id == T_DOLLAR_OPEN_CURLY_BRACES) {
+                $depth = 1;
+            } elseif (($id == 0 && $text === $quote) || ($id != 0 && $id === $quote)) {
+                $quote = null;
+            } elseif ($id != T_VARIABLE) {
+                continue;
+            }
+        } elseif ($id == T_START_HEREDOC) {
+            $quote = T_END_HEREDOC;
+        } elseif ($id == 0 && ($text == '"' || $text == '`')) {
+            $quote = $text;
+        }
+        $output[] = $token;
+    }
+    return $output;
 }
 
 /**
@@ -504,7 +593,10 @@ function urlFileArray($url)
 
         $content = curl_exec($GLOBALS['ch']);
 
-        if ($content === false) {
+        // Anything but a non-empty string is a failure: a real list is never
+        // empty, and PHP 4.3's file_get_contents() returns NULL, not false,
+        // when it can't take the stream context
+        if (!is_string($content) || $content === '') {
             $error_msg = curl_error($GLOBALS['ch']);
             trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
         } else {
@@ -531,7 +623,7 @@ function urlFileArray($url)
 
         $content = @file_get_contents($url, false, $context);
 
-        if ($content !== false) {
+        if (is_string($content) && $content !== '') {
             return explode("\n", $content);
         } else {
             trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
@@ -542,7 +634,7 @@ function urlFileArray($url)
     if (isWorking('file')) {
         $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
 
-        if ($content !== false) {
+        if (is_array($content) && !empty($content)) {
             return $content;
         } else {
             trigger_error("Failed to fetch URL using file()", E_USER_WARNING);
@@ -572,6 +664,9 @@ function mhrSubmitHashes($hashes, $username, $password)
     }
     if (empty($hashes)) {
         return array('results' => array(), 'queries_remaining' => null);
+    }
+    if (!function_exists('json_decode')) {
+        return array('error' => 'unsupported', 'msg' => 'MHR lookups need PHP 5.2+ (json_decode)');
     }
     if (count($hashes) > 1000) {
         $hashes = array_slice($hashes, 0, 1000); // API hard limit — see docs_rest
@@ -666,21 +761,23 @@ function unlinkWithReason($filePath)
 }
 
 /**
- * Decode a POST field as a JSON array, defaulting to an empty array when
- * the field is missing or isn't valid JSON.
+ * Read a POST field holding a NUL-separated list. NUL is the one byte a file
+ * path can't contain, and one field (unlike paths[]=...) stays clear of
+ * max_input_vars no matter how many entries it holds.
  *
  * @param string $key
  * @return array
  */
-function postJsonArray($key)
+function postList($key)
 {
-    if (isset($_POST[$key])) {
-        $decoded = json_decode($_POST[$key], true);
-        if (is_array($decoded)) {
-            return $decoded;
-        }
+    if (!isset($_POST[$key]) || $_POST[$key] === '') {
+        return array();
     }
-    return array();
+    $value = $_POST[$key];
+    if (function_exists('get_magic_quotes_gpc') && @get_magic_quotes_gpc()) {
+        $value = stripslashes($value); // PHP < 5.4 may have escaped quotes, backslashes and NUL
+    }
+    return explode("\0", $value);
 }
 
 /**
@@ -964,7 +1061,7 @@ $tokenNeedles = array(
     'mysqli_query' => 0.1
 );
 
-// test/bench.js includes this file for its functions and needle map only
+// test/run.js includes this file for its functions and needle map only
 if (defined('SUSSY_LIB')) {
     return;
 }
@@ -1044,7 +1141,7 @@ if (isset($_POST['ajax_action'])) {
     }
 
     if ($ajaxAction == 'process') {
-        $paths = postJsonArray('paths_json');
+        $paths = postList('paths');
 
         if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
             $isUnreadable = true;
@@ -1052,7 +1149,7 @@ if (isset($_POST['ajax_action'])) {
             $isUnreadable = false;
         }
 
-        $seenHashes = postJsonArray('seen_hashes_json');
+        $seenHashes = postList('seen_hashes');
 
         $newHashes = array();
 
@@ -1607,7 +1704,7 @@ if (isset($_POST['ajax_action'])) {
 
             // Whole-file Shannon entropy (bits/byte, computed server-side) above
             // this means packed/encoded content: 98/202 test webshells vs 1/1927
-            // benign files (node test/bench.js).
+            // benign files (node test/run.js).
             const HIGH_ENTROPY = 5.5;
 
             /**
@@ -1795,7 +1892,7 @@ if (isset($_POST['ajax_action'])) {
                     // while being the single largest false-positive source — plain file
                     // size just isn't a meaningful malice signal on its own. zSusp
                     // dropped out for the same reason (0 unique catches, 5 false
-                    // positives in node test/bench.js): the weighted threatScore
+                    // positives in node test/run.js): the weighted threatScore
                     // already covers "many suspicious tokens".
                     //
                     // Entropy only matters on the high side; a near-empty stub
@@ -2969,8 +3066,8 @@ if (isset($_POST['ajax_action'])) {
                 var body = new URLSearchParams();
                 body.set('ajax_action', 'process');
                 body.set('is_not_readable', isNotReadable ? '1' : '0');
-                body.set('paths_json', JSON.stringify(paths));
-                body.set('seen_hashes_json', JSON.stringify(_seenHashes));
+                body.set('paths', paths.join('\0'));
+                body.set('seen_hashes', _seenHashes.join('\0'));
                 return fetch('', { method: 'POST', body: body }).then(function(r) { return r.json(); });
             }
 

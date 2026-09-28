@@ -337,15 +337,18 @@ This means the statistical analysis is used alongside deterministic security ind
 
 ### Benchmark
 
-`node test/bench.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. It also runs structural-detector self-checks and fails if any of them break.
+`node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. It also runs structural-detector self-checks and fails if any of them break.
+
+`node test/run.js --php all` does the same on every PHP version in `PHTest/` (Docker, PHP 4.1–8.5), plus a page/AJAX smoke test per version, and lists files that match differently than on the newest PHP.
 
 * `--list` — print missed webshells and false positives
 * `--tokens` — print how often each token appears in webshells vs. benign files, for tuning weights
 * `--threshold 3.5` — Z-score threshold to evaluate
+* `--php all` or `--php 4.3.11,8.5.6` — run on PHTest versions instead of the local `php`
 
 ## Requirements
 
-* PHP 4.3 / 5.x / 7.x / 8.x (with `token_get_all` support)
+* PHP 4.3 / 5.x / 7.x / 8.x (with `token_get_all` support); Malware Hash Registry lookups need PHP 5.2+
 * Web server (Apache, Nginx, etc.) or PHP built-in server
 * Internet access (optional) to fetch whitelist/blacklist from GitHub – can be disabled via constants
 
