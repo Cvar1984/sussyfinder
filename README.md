@@ -12,10 +12,11 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 ## Features
 
 * **Recursive directory scanning** with symlink loop protection
-* **Token-based detection** – scans PHP tokens for known obfuscation, shell execution, file I/O, and credential-related functions
+* **Token-based detection** – scans PHP tokens for known obfuscation, shell execution, file I/O, and credential-related functions (method names like `$pdo->exec()` and text inside strings/comments are ignored)
+* **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
-* **Shannon entropy calculation** – detects heavily obfuscated or encoded content
-* **Client-side statistical analysis** – computes Z-scores (size, tokens, suspicious token count, entropy) and residuals to flag outliers
+* **Shannon entropy calculation** – per-file byte entropy detects heavily obfuscated or encoded content
+* **Client-side statistical analysis** – computes robust (median/MAD) Z-scores for size, mtime, tokens, suspicious token count, entropy and the ctime–mtime gap, plus residuals and file-owner rarity, to flag outliers
 * **Interactive web interface** with:
 
   * Sort by modification time, suspicious token count, Z-score, or residual
@@ -31,7 +32,7 @@ SussyFinder uses several statistical techniques to identify files whose characte
 
 ### Shannon Entropy
 
-Shannon entropy measures the amount of information or randomness in a dataset. SussyFinder applies it to the characters contained in the extracted suspicious tokens.
+Shannon entropy measures the amount of information or randomness in a dataset. SussyFinder applies it to the raw bytes of each file (computed server-side).
 
 The entropy is calculated as:
 
@@ -66,86 +67,49 @@ For example:
 | `ABCDEF`            |      $\approx 2.58$ |
 | Random/encoded data |              Higher |
 
-SussyFinder gives additional weight to small PHP files with high entropy:
+Plain PHP source sits around 4.5–5.2 bits/byte. SussyFinder treats a file as high-entropy above:
 
 $$
-Entropy > 5.8
+Entropy > 5.5
 $$
 
-and
+On the bundled test corpus this threshold matches 98 of 202 webshells and 1 of 1927 legitimate WordPress/Laravel files.
+
+### Median and MAD
+
+Mean and standard deviation are pulled toward the very outliers being hunted (and toward huge vendor files), which lets them hide. SussyFinder uses the median and the median absolute deviation (MAD) instead:
 
 $$
-Size < 20480\ \text{bytes}
+\tilde{x} = \operatorname{median}(x_1, \dots, x_n)
+\qquad
+MAD = \operatorname{median}(|x_i - \tilde{x}|)
 $$
 
-When both conditions are met, the threat score receives an additional bonus.
-
-### Mean
-
-The arithmetic mean is used as the baseline for the statistical measurements.
+The spread is scaled so it matches a standard deviation on normally distributed data:
 
 $$
-\mu = \frac{1}{n}\sum_{i=1}^{n}x_i
+s = 1.4826 \times MAD
 $$
 
-Where:
-
-* $\mu$ = mean
-* $x_i$ = individual observation
-* $n$ = number of observations
-
-SussyFinder calculates the mean for:
-
-* File size
-* Modification time
-* Total token count
-* Suspicious token count
-* Shannon entropy
-
-### Population Variance
-
-The variance measures how far observations are distributed around the mean.
+When more than half the values tie (MAD = 0, e.g. most files match no suspicious tokens), the mean absolute deviation is used instead:
 
 $$
-\sigma^2 =
-\frac{1}{n}
-\sum_{i=1}^{n}(x_i-\mu)^2
+s = 1.253314 \times \frac{1}{n}\sum_{i=1}^{n}|x_i - \tilde{x}|
 $$
-
-### Standard Deviation
-
-Standard deviation is the square root of variance:
-
-$$
-\sigma = \sqrt{
-\frac{1}{n}
-\sum_{i=1}^{n}(x_i-\mu)^2
-}
-$$
-
-A large standard deviation indicates that the values vary significantly across the scanned files.
 
 ### Z-Score
 
-SussyFinder uses Z-scores to determine how far a file's characteristics are from the dataset mean.
+SussyFinder uses robust (modified) Z-scores to determine how far a file's characteristics are from the rest of the dataset (Iglewicz & Hoaglin):
 
 $$
-Z = \frac{x-\mu}{\sigma}
+Z = \frac{x-\tilde{x}}{s}
 $$
 
 Where:
 
 * $x$ = observed value
-* $\mu$ = mean
-* $\sigma$ = standard deviation
-
-The absolute value can be used to measure how unusual a value is:
-
-$$
-|Z|
-$$
-
-A larger $|Z|$ indicates a more statistically unusual observation.
+* $\tilde{x}$ = median
+* $s$ = scaled spread from above
 
 SussyFinder calculates Z-scores for:
 
@@ -154,14 +118,19 @@ SussyFinder calculates Z-scores for:
 * Total tokens
 * Suspicious token count
 * Shannon entropy
+* ctime − mtime gap: attackers backdate mtime with `touch`, but can't set ctime that way, so a planted file's gap stands out from its neighbours'. Gaps under a day (chmod, in-place edits) are ignored by flooring $s$ at 86400 seconds.
 
 The default anomaly threshold is:
 
 $$
-|Z| > 3.5
+Z > 3.5
 $$
 
 This threshold can be changed through the **Z-threshold** control in the web interface.
+
+### File Owner Rarity
+
+A file owned by a user who owns less than 5% of the scanned files (e.g. the web-server user among FTP-deployed files) was probably written by the application, not deployed. With at least 20 files scanned, such files are marked **RARE** and flagged.
 
 ### Residual Analysis
 
@@ -231,7 +200,22 @@ Example token weights include:
 | Critical RCE       | `eval`, `exec`, `system`        | $10.0$ |
 | Obfuscation        | `base64_decode`, `gzinflate`    |  $5.0$ |
 | Suspicious I/O     | `move_uploaded_file`, `$_FILES` |  $2.0$ |
+| User input         | `$_GET`, `$_POST`, `$_COOKIE`   |  $0.5$ |
 | Routine operations | `include`, `fopen`, `substr`    |  $0.1$ |
+
+Structural signals appear among the matched tokens with an `@` prefix (no real PHP token can look like that):
+
+| Signal          | Meaning                                                  | Weight |
+| --------------- | -------------------------------------------------------- | -----: |
+| `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    | $10.0$ |
+| `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             | $10.0$ |
+| `` ` ``         | Backtick operator (shell execution)                      | $10.0$ |
+| `@concat_name`  | Function name hidden in a string (the name is added too) |  $5.0$ |
+| `@halt_payload` | Over 1 KiB of data after `__halt_compiler()`             |  $5.0$ |
+| `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |  $2.0$ |
+| `@long_line`    | A line over 5000 characters                              |  $2.0$ |
+
+`@input_call`, `@preg_e` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
 
 Additional multipliers are applied when combinations of suspicious behaviors are present.
 
@@ -261,9 +245,25 @@ $$
 Score' = Score \times 1.8
 $$
 
+#### Critical + User Input
+
+If a file contains both a critical execution token and a user-input token:
+
+$$
+Score' = Score \times 2.0
+$$
+
+#### Upload Folder
+
+Upload folders hold user files, so real code in one was almost always planted. A non-`.htaccess` file with more than 5 tokens inside an `uploads` directory gets:
+
+$$
+Score' = Score + 10
+$$
+
 #### Suspicious Path Bonus
 
-If the file is located in directories such as:
+Otherwise, if the file is located in directories such as:
 
 * `upload`
 * `cache`
@@ -277,9 +277,9 @@ $$
 Score' = Score + 5
 $$
 
-#### High-Entropy Small File Bonus
+#### High-Entropy Bonus
 
-For files smaller than 20 KiB with high entropy:
+For files with entropy above 5.5:
 
 $$
 Score' = Score + 3
@@ -297,11 +297,13 @@ $$
 Anomaly =
 ThreatScore \geq 8
 \lor
-|Z_{suspicious}| > T
-\lor
-|Z_{entropy}| > T
+Z_{entropy} > T
 \lor
 |Z_{mtime}| > T
+\lor
+|Z_{ctime-mtime}| > T
+\lor
+RareOwner
 \lor
 Residual > 5
 $$
@@ -320,7 +322,10 @@ File size (`Z_size`) is still computed and shown in the interface, but is not
 used to decide anomaly status: tested against real webshell samples, size
 alone never uniquely caught a malicious file while being the largest source
 of false positives — legitimate codebases routinely contain very large or
-very small files with no bearing on maliciousness.
+very small files with no bearing on maliciousness. The suspicious-token
+count Z-score (`Z_suspicious`) was dropped as a trigger for the same reason
+(0 unique catches, 5 false positives); the weighted threat score already
+covers "many suspicious tokens".
 
 `.htaccess` files and byte-identical duplicates are shown with their own
 badges/counters but no longer auto-flagged as anomalies either — a shared
@@ -329,6 +334,14 @@ Apache config file or a stock duplicate (e.g. WordPress's many identical
 own. Only content/threat-based signals decide anomaly status.
 
 This means the statistical analysis is used alongside deterministic security indicators rather than as the sole detection mechanism.
+
+### Benchmark
+
+`node test/bench.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. It also runs structural-detector self-checks and fails if any of them break.
+
+* `--list` — print missed webshells and false positives
+* `--tokens` — print how often each token appears in webshells vs. benign files, for tuning weights
+* `--threshold 3.5` — Z-score threshold to evaluate
 
 ## Requirements
 

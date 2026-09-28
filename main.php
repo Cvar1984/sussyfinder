@@ -246,90 +246,245 @@ function getSortedByPattern($path, $patterns)
 }
 
 /**
- * Get lowercase Array of tokens in a file
+ * Tokenize PHP source, normalising short open tags first
  *
- * @param string $filename
- * @return array
+ * @param string $fileContent
+ * @return array raw token_get_all() output
  */
-function getFileTokens($filename)
+function getFileTokens($fileContent)
 {
-    // Replace short PHP tags with PHP tags
-    $fileContent = file_get_contents($filename);
     $fileContent = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $fileContent);
     $fileContent = preg_replace('/<\?([^p=\w])/m', '<?php ', $fileContent);
+    return @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
+}
 
-    $tokens = @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
-
-    $output = array();
-
-    foreach ($tokens as $token) {
-        if (is_array($token)) {
-            $output[] = $token[1];
-        } else {
-            $output[] = $token;
-        }
+/**
+ * Lowercased, trimmed, de-duplicated code token texts as a lookup set.
+ * String/HTML/comment content is left out ("...`{$t}`..." would otherwise
+ * yield a lone "`"), as are method/function names (->exec(), ::system(),
+ * function eval()) since those aren't the global functions. A leading "\"
+ * is dropped so PHP 8's fully-qualified "\system" still matches "system".
+ *
+ * @param array $tokens token_get_all() output
+ * @return array text => true
+ */
+function tokenTextSet($tokens)
+{
+    $ignore = array(T_WHITESPACE => 1, T_COMMENT => 1);
+    $content = array(T_ENCAPSED_AND_WHITESPACE => 1, T_INLINE_HTML => 1);
+    $member = array(T_OBJECT_OPERATOR => 1, T_PAAMAYIM_NEKUDOTAYIM => 1, T_FUNCTION => 1);
+    if (defined('T_DOC_COMMENT')) {
+        $ignore[constant('T_DOC_COMMENT')] = 1;
+    }
+    if (defined('T_NULLSAFE_OBJECT_OPERATOR')) {
+        $member[constant('T_NULLSAFE_OBJECT_OPERATOR')] = 1;
     }
 
-    // Remove any duplicate or empty tokens from the output array
-    $output = array_values(array_unique(array_filter(array_map("trim", $output))));
+    $set = array();
+    $prev = 0;
+    foreach ($tokens as $token) {
+        if (!is_array($token)) {
+            $token = array(0, $token);
+        }
+        if (isset($ignore[$token[0]])) {
+            continue;
+        }
+        if (!isset($content[$token[0]]) && !($token[0] == T_STRING && isset($member[$prev]))) {
+            $set[ltrim(strtolower(trim($token[1])), '\\')] = true;
+        }
+        $prev = $token[0];
+    }
+    unset($set['']);
+    return $set;
+}
+
+/**
+ * Return the needles (keys of the weight map) present in a token set
+ *
+ * @param array $tokenNeedles needle => weight
+ * @param array $tokenSet from tokenTextSet()
+ * @return array
+ */
+function compareTokens($tokenNeedles, $tokenSet)
+{
+    $output = array();
+    foreach ($tokenNeedles as $needle => $weight) {
+        if (isset($tokenSet[strtolower($needle)])) {
+            $output[] = $needle;
+        }
+    }
     return $output;
 }
 
 /**
- * recursively search for a specific case within an array, including nested arrays.
+ * Value of a T_CONSTANT_ENCAPSED_STRING token, escapes decoded
  *
- * @param string $needle
- * @param array $haystack
- * @return array matching case within an array
+ * @param string $text the token text, quotes included
+ * @return string
  */
-function inStringArray($needle, $haystack)
+function stringTokenValue($text)
 {
-    $matches = array();
-    foreach ($haystack as $key => $value) {
-        if (is_string($value)) {
-            // Check if string is found using strcasecmp
-            if (strcasecmp($value, $needle) === 0) {
-                $matches[] = $key;
+    $value = substr($text, 1, -1);
+    if (substr($text, 0, 1) == '"') {
+        return stripcslashes($value);
+    }
+    return str_replace(array("\\'", '\\\\'), array("'", '\\'), $value);
+}
+
+/**
+ * Detect code shapes that plain token matching can't see. Returns
+ * "@"-prefixed pseudo-needles (no PHP token is "@" + letters, so they never
+ * collide with real ones) plus any needle function name that was hidden in
+ * a string: 'ba'.'se64_decode', "\x73ystem", 'system'('id').
+ *
+ * @param array  $tokens       token_get_all() output
+ * @param string $content      raw file content
+ * @param array  $tokenNeedles needle => weight
+ * @return array
+ */
+function findStructuralSignals($tokens, $content, $tokenNeedles)
+{
+    $needleSet = array_change_key_case($tokenNeedles, CASE_LOWER);
+    $inputVars = array('$_get' => 1, '$_post' => 1, '$_request' => 1, '$_cookie' => 1, '$_server' => 1, '$_files' => 1);
+    $skip = array(T_WHITESPACE => 1, T_COMMENT => 1);
+    if (defined('T_DOC_COMMENT')) {
+        $skip[constant('T_DOC_COMMENT')] = 1;
+    }
+
+    // Significant tokens only, as (id, text); single-char tokens get id 0
+    $sig = array();
+    $haltBytes = -1;
+    foreach ($tokens as $token) {
+        if (!is_array($token)) {
+            $token = array(0, $token);
+        }
+        if ($haltBytes >= 0) {
+            $haltBytes += strlen($token[1]);
+            continue;
+        }
+        if (isset($skip[$token[0]])) {
+            continue;
+        }
+        if (strtolower($token[1]) == '__halt_compiler') {
+            $haltBytes = 0;
+        }
+        $sig[] = $token;
+    }
+
+    $found = array();
+    $n = count($sig);
+    for ($i = 0; $i < $n; $i++) {
+        $id = $sig[$i][0];
+        $text = $sig[$i][1];
+
+        // String literal, or a chain of them joined with "."
+        if ($id == T_CONSTANT_ENCAPSED_STRING) {
+            $value = stringTokenValue($text);
+            $parts = 1;
+            $escaped = (substr($text, 0, 1) == '"' && strpos($text, '\\') !== false);
+            while ($i + 2 < $n && $sig[$i + 1][1] == '.' && $sig[$i + 2][0] == T_CONSTANT_ENCAPSED_STRING) {
+                $i += 2;
+                $value .= stringTokenValue($sig[$i][1]);
+                $parts++;
             }
-        } elseif (is_array($value)) {
-            // Recursively search within sub-arrays
-            $subMatches = inStringArray($needle, $value);
-            if (!empty($subMatches)) {
-                // Prepend current key to sub-matches
-                foreach ($subMatches as $subMatch) {
-                    $matches[] = $key . '[' . $subMatch . ']';
+            $isCall = ($i + 1 < $n && $sig[$i + 1][1] == '(');
+            if ($isCall) {
+                $found['@dyn_call'] = true;
+            }
+            $name = strtolower($value);
+            if (($parts > 1 || $escaped || $isCall) && isset($needleSet[$name]) && preg_match('/^[a-z_][a-z0-9_]*$/', $name)) {
+                $found[$name] = true;
+                $found['@concat_name'] = true;
+            }
+            continue;
+        }
+
+        // preg_replace('/.../e', ...) evaluates the replacement as PHP
+        if ($id == T_STRING && ltrim(strtolower($text), '\\') == 'preg_replace' && $i + 2 < $n && $sig[$i + 1][1] == '(' && $sig[$i + 2][0] == T_CONSTANT_ENCAPSED_STRING) {
+            $regex = stringTokenValue($sig[$i + 2][1]);
+            $delim = substr($regex, 0, 1);
+            $pairs = array('(' => ')', '[' => ']', '{' => '}', '<' => '>');
+            if (isset($pairs[$delim])) {
+                $delim = $pairs[$delim];
+            }
+            $end = strrpos($regex, $delim);
+            if ($end > 0 && strpos(substr($regex, $end + 1), 'e') !== false) {
+                $found['@preg_e'] = true;
+            }
+            continue;
+        }
+
+        // Call through something other than a function name: $f(), $a['x'](), (...)()
+        if ($text == '(' && $id == 0 && $i > 0) {
+            $prev = $sig[$i - 1];
+            $before = ($i > 1) ? $sig[$i - 2][0] : 0;
+            if ($prev[0] == T_VARIABLE) {
+                if ($before != T_NEW && $before != T_OBJECT_OPERATOR && $before != T_PAAMAYIM_NEKUDOTAYIM) {
+                    $found['@dyn_call'] = true;
+                }
+            } elseif ($prev[1] == ')') {
+                $found['@dyn_call'] = true;
+            } elseif ($prev[1] == ']') {
+                // Walk back over [..][..] to the variable being indexed
+                $j = $i - 1;
+                while ($j >= 0 && $sig[$j][1] == ']') {
+                    $depth = 0;
+                    for (; $j >= 0; $j--) {
+                        if ($sig[$j][1] == ']') {
+                            $depth++;
+                        } elseif ($sig[$j][1] == '[') {
+                            $depth--;
+                            if ($depth == 0) {
+                                break;
+                            }
+                        }
+                    }
+                    $j--;
+                }
+                if ($j >= 0 && $sig[$j][0] == T_VARIABLE) {
+                    $found['@dyn_call'] = true;
+                    if (isset($inputVars[strtolower($sig[$j][1])])) {
+                        $found['@input_call'] = true;
+                    }
                 }
             }
         }
     }
-    return $matches;
-}
 
+    // Packed payloads tend to sit on one huge line
+    $maxLine = 0;
+    foreach (explode("\n", $content) as $line) {
+        if (strlen($line) > $maxLine) {
+            $maxLine = strlen($line);
+        }
+    }
+    if ($maxLine > 5000) {
+        $found['@long_line'] = true;
+    }
+    if ($haltBytes > 1024) {
+        $found['@halt_payload'] = true;
+    }
+
+    return array_keys($found);
+}
 /**
- * Compare tokens and return array of matched tokens
+ * Shannon entropy in bits per byte (0 = one repeated byte, 8 = random)
  *
- * @param array $tokenNeedles
- * @param array $tokenHaystack
- * @return array
+ * @param string $data
+ * @return float
  */
-function compareTokens($tokenNeedles, $tokenHaystack)
+function shannonEntropy($data)
 {
-    $output = array();
-    $needles = array();
-    if (is_array($tokenNeedles)) {
-        $keys = array_keys($tokenNeedles);
-        if (isset($keys[0]) && is_int($keys[0])) {
-            $needles = array_values($tokenNeedles);
-        } else {
-            $needles = $keys;
-        }
+    $len = strlen($data);
+    $entropy = 0.0;
+    if ($len == 0) {
+        return $entropy;
     }
-    foreach ($needles as $tokenNeedle) {
-        if (inStringArray($tokenNeedle, $tokenHaystack)) {
-            $output[] = $tokenNeedle;
-        }
+    foreach (count_chars($data, 1) as $count) {
+        $p = $count / $len;
+        $entropy -= $p * log($p) / log(2);
     }
-    return $output;
+    return $entropy;
 }
 
 /**
@@ -534,8 +689,8 @@ function postJsonArray($key)
  * detection used throughout this file's scanning.
  *
  * @param array $paths
- * @param array $whitelistMD5Sums
- * @param array $blacklistMD5Sums
+ * @param array $whitelistMD5Sums md5 => anything (array_flip'd list)
+ * @param array $blacklistMD5Sums md5 => anything (array_flip'd list)
  * @param array $tokenNeedles
  * @param array $localSeen hash => first-seen path; read and updated in place
  * @param array $newlySeen appended with "hash:path" for each entry newly
@@ -552,17 +707,29 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             continue;
         }
 
-        $fileSum = md5_file($filePath);
-        if (in_array($fileSum, $whitelistMD5Sums)) {
+        $content = file_get_contents($filePath);
+        if ($content === false) {
+            $features = array_merge($features, scanUnreadablePaths(array($filePath)));
             continue;
         }
 
-        $tokens        = getFileTokens($filePath);
-        $matchedTokens = compareTokens($tokenNeedles, $tokens);
-        $totalTokens   = count($tokens);
-        $size          = filesize($filePath);
+        $fileSum = md5($content);
+        if (isset($whitelistMD5Sums[$fileSum])) {
+            continue;
+        }
+
+        $tokens        = getFileTokens($content);
+        $tokenSet      = tokenTextSet($tokens);
+        $matchedTokens = array_values(array_unique(array_merge(
+            compareTokens($tokenNeedles, $tokenSet),
+            findStructuralSignals($tokens, $content, $tokenNeedles)
+        )));
+        $totalTokens   = count($tokenSet);
+        $size          = strlen($content);
         $mtime         = filemtime($filePath);
-        $isBlacklisted = in_array($fileSum, $blacklistMD5Sums);
+        $ctime         = filectime($filePath); // stat before a blacklist unlink below
+        $owner         = fileowner($filePath);
+        $isBlacklisted = isset($blacklistMD5Sums[$fileSum]);
         $isHtaccess    = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
         $duplicateOf   = false;
 
@@ -582,6 +749,9 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             'path'           => $filePath,
             'size'           => $size,
             'mtime'          => $mtime,
+            'ctime'          => $ctime,
+            'owner'          => $owner,
+            'entropy'        => shannonEntropy($content),
             'total_tokens'   => $totalTokens,
             'matched_tokens' => $matchedTokens,
             'md5'            => $fileSum,
@@ -616,6 +786,9 @@ function scanUnreadablePaths($paths)
             'path'           => $filePath,
             'size'           => null,
             'mtime'          => $mtime,
+            'ctime'          => 0,
+            'owner'          => null,
+            'entropy'        => null,
             'total_tokens'   => null,
             'matched_tokens' => array('NOT_READABLE'),
             'md5'            => 'N/A',
@@ -669,6 +842,9 @@ $tokenNeedles = array(
     'pcntl_fork' => 10.0,
     'posix_kill' => 10.0,
     'posix_setuid' => 10.0,
+    '`' => 10.0, // backtick operator = shell_exec
+    '@input_call' => 10.0, // $_GET['a']($_GET['b'])
+    '@preg_e' => 10.0, // preg_replace('/.../e') evaluates the replacement
 
     // High Obfuscation & De-encoding (Weight: 5.0)
     'base64_decode' => 5.0,
@@ -683,6 +859,8 @@ $tokenNeedles = array(
     'exif_read_data' => 5.0,
     'readgzfile' => 5.0,
     '$SISTEMIT_COM_ENC' => 5.0,
+    '@concat_name' => 5.0, // function name hidden in a string: 'ba'.'se64_decode', "\x73ystem"
+    '@halt_payload' => 5.0, // data appended after __halt_compiler()
 
     // Obfuscation Helpers & I/O Manipulation (Weight: 2.0)
     'assert' => 2.0,
@@ -693,7 +871,7 @@ $tokenNeedles = array(
     'goto' => 2.0,
     'extract' => 2.0,
     'parse_str' => 2.0,
-    'popen ' => 2.0,
+    'popen' => 2.0,
     'fsockopen' => 2.0,
     'posix_setsid' => 2.0,
     'posix_setpgid' => 2.0,
@@ -706,9 +884,25 @@ $tokenNeedles = array(
     '$auth_pass' => 2.0,
     '$password' => 2.0,
     '$pass' => 2.0,
-    'preg_replace' => 2.0,
+    'proc_get_status' => 2.0,
+    'posix_mkfifo' => 2.0,
+    'php_uname' => 2.0,
+    '@dyn_call' => 2.0, // call through a variable/expression: $f(), $a['x'](), (...)()
+    '@long_line' => 2.0, // a line over 5000 chars
+
+    // User input (Weight: 0.5) — everywhere in legit code, only matters in combination
+    '$_get' => 0.5,
+    '$_post' => 0.5,
+    '$_request' => 0.5,
+    '$_cookie' => 0.5,
+    'getallheaders' => 0.5,
 
     // Low / Routine Tokens (Weight: 0.1)
+    'preg_replace' => 0.1, // the dangerous /e form is scored as @preg_e
+    'call_user_func' => 0.1,
+    'call_user_func_array' => 0.1,
+    'register_shutdown_function' => 0.1,
+    'register_tick_function' => 0.1,
     'implode' => 0.1,
     'strtr' => 0.1,
     'substr' => 0.1,
@@ -748,16 +942,40 @@ $tokenNeedles = array(
     '__halt_compiler' => 0.1,
     '__compiler_halt_offset__' => 0.1,
     'error_reporting' => 0.1,
-    'get_magic_quotes_gpc' => 0.1
+    'get_magic_quotes_gpc' => 0.1,
+    'phpinfo' => 0.1,
+    'posix_getuid' => 0.1,
+    'posix_geteuid' => 0.1,
+    'posix_getegid' => 0.1,
+    'posix_getpwuid' => 0.1,
+    'posix_getgrgid' => 0.1,
+    'posix_getlogin' => 0.1,
+    'posix_ttyname' => 0.1,
+    'get_cfg_var' => 0.1,
+    'diskfreespace' => 0.1,
+    'getlastmod' => 0.1,
+    'getmyinode' => 0.1,
+    'getmypid' => 0.1,
+    'getmyuid' => 0.1,
+    'getmygid' => 0.1,
+    'mysql_connect' => 0.1,
+    'mysqli_connect' => 0.1,
+    'mysql_query' => 0.1,
+    'mysqli_query' => 0.1
 );
+
+// test/bench.js includes this file for its functions and needle map only
+if (defined('SUSSY_LIB')) {
+    return;
+}
 
 $whitelistMD5Sums = array();
 $blacklistMD5Sums = array();
 if (_WHITELIST_) {
-    $whitelistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt');
+    $whitelistMD5Sums = array_flip(array_map('trim', urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt')));
 }
 if (_BLACKLIST_) {
-    $blacklistMD5Sums = urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt');
+    $blacklistMD5Sums = array_flip(array_map('trim', urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt')));
 }
 /**
  * Emit a clean JSON response for an AJAX action. Folds in any PHP warnings
@@ -813,7 +1031,7 @@ if (isset($_POST['ajax_action'])) {
         $filtered = array();
         foreach ($readable as $fp) {
             $sum = md5_file($fp);
-            if (!in_array($sum, $whitelistMD5Sums)) {
+            if (!isset($whitelistMD5Sums[$sum])) {
                 $filtered[] = $fp;
             }
         }
@@ -988,13 +1206,14 @@ if (isset($_POST['ajax_action'])) {
 
             .navbar-group {
                 display: flex;
+                flex: 1;
                 align-items: center;
                 flex-wrap: wrap;
                 gap: 8px;
             }
 
             .navbar .dir-input {
-                flex: 1 1 260px;
+                flex: 1 1 100%;
                 min-width: 160px;
             }
 
@@ -1280,7 +1499,7 @@ if (isset($_POST['ajax_action'])) {
         <nav class="navbar">
             <span class="navbar-brand">Sussy Finder</span>
             <div class="navbar-group">
-                <input type="text" name="dir" class="dir-input" value="<?php echo getcwd(); ?>" title="Directory to scan">
+                <input type="text" name="dir" class="dir-input" value="<?php echo getcwd(); ?>" title="Directory to scan" onkeydown="if (event.key === 'Enter') { startChunkedScan(); }">
                 <input type="number" id="chunkSizeInput" class="chunk-input" value="500" step="50" title="Files processed per AJAX request">
                 <button type="button" class="btn-primary" onclick="startChunkedScan()" title="Chunked scan — safe for large directories">Scan</button>
             </div>
@@ -1386,49 +1605,31 @@ if (isset($_POST['ajax_action'])) {
 
             // --- Client-side threat scoring (offloaded from PHP) ---
 
-            /**
-             * Compute Shannon entropy from an array of token strings.
-             * Treats each character in each token as a symbol.
-             */
-            function shannonEntropy(tokens) {
-                if (!tokens || tokens.length === 0) return 0;
-                var combined = tokens.join('');
-                var len = combined.length;
-                if (len === 0) return 0;
-                var freq = {};
-                for (var i = 0; i < len; i++) {
-                    var ch = combined[i];
-                    freq[ch] = (freq[ch] || 0) + 1;
-                }
-                var entropy = 0;
-                for (var ch in freq) {
-                    var p = freq[ch] / len;
-                    entropy -= p * Math.log2(p);
-                }
-                return entropy;
-            }
+            // Whole-file Shannon entropy (bits/byte, computed server-side) above
+            // this means packed/encoded content: 98/202 test webshells vs 1/1927
+            // benign files (node test/bench.js).
+            const HIGH_ENTROPY = 5.5;
 
             /**
-             * Compute composite threat score — exact JS port of PHP calculateThreatScore().
-             * @param {string[]} matchedTokens
-             * @param {string}   filePath
-             * @param {number}   entropy
-             * @param {number}   size       file size in bytes, or null
-             * @param {Object}   weights    tokenWeights map (key -> weight)
+             * Compute composite threat score for one feature row.
+             * @param {Object} d       feature row from the server
+             * @param {Object} weights tokenWeights map (key -> weight)
              */
-            function calculateThreatScore(matchedTokens, filePath, entropy, size, weights) {
+            function calculateThreatScore(d, weights) {
                 var score = 0.0;
                 var hasCritical = false;
                 var hasObfuscation = false;
                 var hasUploadReq = false;
+                var hasInput = false;
 
-                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','create_function'];
+                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','create_function','`','@input_call','@preg_e'];
                 // Full "High Obfuscation & De-encoding" (5.0) and upload/IO-request tiers —
                 // kept in sync with the weight categories in $tokenNeedles.
-                var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','rawurldecode','urldecode','hex2bin','bin2hex','exif_read_data','readgzfile','$sistemit_com_enc'];
+                var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','rawurldecode','urldecode','hex2bin','bin2hex','exif_read_data','readgzfile','$sistemit_com_enc','@concat_name','@halt_payload'];
                 var reqTokens  = ['move_uploaded_file','$_files','file_put_contents'];
+                var inputTokens = ['$_get','$_post','$_request','$_cookie','getallheaders'];
 
-                var tokens = Array.isArray(matchedTokens) ? matchedTokens.map(function (t) { return t.toLowerCase(); }) : [];
+                var tokens = Array.isArray(d.matched_tokens) ? d.matched_tokens.map(function (t) { return t.toLowerCase(); }) : [];
 
                 // Obfuscation/upload-handling functions (compression, encoding, file upload
                 // helpers) are everyday building blocks of legitimate code — ZIP libraries,
@@ -1437,7 +1638,8 @@ if (isset($_POST['ajax_action'])) {
                 // combo multipliers below); standing alone they get a reduced weight so a
                 // large legitimate library doesn't cross the anomaly bar on that basis alone.
                 for (var c = 0; c < tokens.length; c++) {
-                    if (critTokens.indexOf(tokens[c]) !== -1) { hasCritical = true; break; }
+                    if (critTokens.indexOf(tokens[c]) !== -1) { hasCritical = true; }
+                    if (inputTokens.indexOf(tokens[c]) !== -1) { hasInput = true; }
                 }
                 var nonCriticalDampen = hasCritical ? 1.0 : 0.3;
 
@@ -1454,39 +1656,53 @@ if (isset($_POST['ajax_action'])) {
 
                 if (hasCritical && hasObfuscation) score *= 2.5;
                 if (hasCritical && hasUploadReq)   score *= 1.8;
+                if (hasCritical && hasInput)       score *= 2.0;
 
                 // Directory only — a legitimately-named file like media.php or cache.php
                 // shouldn't trip the "suspicious location" bonus just from its filename.
-                var pathLow = (filePath || '').toLowerCase().replace(/\\/g, '/');
-                var lastSlash = pathLow.lastIndexOf('/');
-                var dirLow = lastSlash === -1 ? '' : pathLow.slice(0, lastSlash);
-                if (dirLow.indexOf('upload')  !== -1 ||
+                var dirs = (d.path || '').toLowerCase().replace(/\\/g, '/').split('/');
+                dirs.pop();
+                var dirLow = dirs.join('/');
+                if (dirs.indexOf('uploads') !== -1 && !d.is_htaccess && d.total_tokens > 5) {
+                    // Upload folders hold user files; real code in one was almost always planted
+                    score += 10.0;
+                } else if (dirLow.indexOf('upload')  !== -1 ||
                     dirLow.indexOf('cache')   !== -1 ||
                     dirLow.indexOf('tmp')     !== -1 ||
                     dirLow.indexOf('images')  !== -1 ||
                     dirLow.indexOf('media')   !== -1) {
-                    if (score > 0 || entropy > 5.5) score += 5.0;
+                    if (score > 0 || d.entropy > HIGH_ENTROPY) score += 5.0;
                 }
 
-                if (size !== null && size < 20480 && entropy > 5.8) score += 3.0;
+                if (d.entropy > HIGH_ENTROPY) score += 3.0;
 
                 return Math.round(score * 100) / 100;
             }
 
-            // --- End client-side threat scoring ---
-
-            function computeStats(values) {
-                const filtered = values.filter(v => v !== null && !isNaN(v));
-                const n = filtered.length;
-                if (n === 0) return { mean: 0, std: 0 };
-                const mean = filtered.reduce((a, b) => a + b, 0) / n;
-                const variance = filtered.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-                return { mean, std: Math.sqrt(variance) };
+            function medianOf(sorted) {
+                const m = sorted.length >> 1;
+                return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
             }
 
-            function zScore(value, mean, std) {
-                if (std === 0 || value === null) return 0;
-                return (value - mean) / std;
+            // Median/MAD instead of mean/std: the outliers being hunted (and huge
+            // vendor files) can't inflate the spread and hide themselves. Scaled so
+            // z matches a standard z-score on normal data (Iglewicz & Hoaglin).
+            // minScale stops a near-constant metric from turning noise into outliers.
+            function computeStats(values, minScale) {
+                const v = values.filter(x => x !== null && !isNaN(x)).sort((a, b) => a - b);
+                if (v.length === 0) return { median: 0, scale: 0 };
+                const median = medianOf(v);
+                const mad = medianOf(v.map(x => Math.abs(x - median)).sort((a, b) => a - b));
+                // MAD is 0 when over half the values tie (e.g. most files match no
+                // tokens) — fall back to the mean absolute deviation
+                const meanAD = v.reduce((a, x) => a + Math.abs(x - median), 0) / v.length;
+                const scale = mad > 0 ? 1.4826 * mad : 1.253314 * meanAD;
+                return { median: median, scale: Math.max(scale, minScale || 0) };
+            }
+
+            function zScore(value, s) {
+                if (s.scale === 0 || value === null) return 0;
+                return (value - s.median) / s.scale;
             }
 
             function formatDate(timestamp) {
@@ -1503,34 +1719,39 @@ if (isset($_POST['ajax_action'])) {
 
             function analyzeData(rawData, threshold) {
                 const valid = rawData.filter(d => !d.is_unreadable);
-                const sizes = valid.map(d => d.size);
-                const mtimes = valid.map(d => d.mtime);
                 const tokens = valid.map(d => d.total_tokens);
                 const susp = valid.map(d => d.matched_tokens ? d.matched_tokens.length : 0);
-                // Compute entropy and threat score client-side (not in PHP payload)
-                const entropies = valid.map(d => {
-                    return shannonEntropy(d.matched_tokens);
-                });
+                const sum = a => a.reduce((x, y) => x + y, 0);
 
                 const weights = (typeof tokenWeights !== 'undefined') ? tokenWeights : {};
 
                 const stats = {
-                    size: computeStats(sizes),
-                    mtime: computeStats(mtimes),
+                    size: computeStats(valid.map(d => d.size)),
+                    mtime: computeStats(valid.map(d => d.mtime)),
                     tokens: computeStats(tokens),
                     susp: computeStats(susp),
-                    entropy: computeStats(entropies),
+                    entropy: computeStats(valid.map(d => d.entropy)),
+                    // Attackers backdate mtime with touch, but can't set ctime that way,
+                    // so a planted file's ctime-mtime gap stands out from its neighbours'.
+                    // Gaps under a day (chmod, in-place edits) aren't meaningful.
+                    ctimeGap: computeStats(valid.map(d => d.ctime - d.mtime), 86400),
                 };
 
-                const avgSuspPerToken = stats.susp.mean / Math.max(1, stats.tokens.mean);
+                const avgSuspPerToken = sum(susp) / Math.max(1, sum(tokens));
+
+                // A file owned by a user who owns almost nothing else (e.g. the web
+                // server user among FTP-deployed files) was likely written by the app.
+                const ownerCount = {};
+                valid.forEach(d => { ownerCount[d.owner] = (ownerCount[d.owner] || 0) + 1; });
 
                 return rawData.map((d, idx) => {
                     if (d.is_unreadable) {
                         return {
                             ...d,
                             entropy: 0,
-                            zScores: { size: 0, mtime: 0, tokens: 0, susp: 0, entropy: 0 },
+                            zScores: { size: 0, mtime: 0, tokens: 0, susp: 0, entropy: 0, ctime: 0 },
                             residual: 0,
+                            rareOwner: false,
                             isAnomaly: true,
                             threatScore: 0,
                             date: formatDate(d.mtime),
@@ -1538,10 +1759,7 @@ if (isset($_POST['ajax_action'])) {
                         };
                     }
 
-                    const entropy = shannonEntropy(d.matched_tokens);
-                    let threatScore = calculateThreatScore(
-                        d.matched_tokens, d.path, entropy, d.size, weights
-                    );
+                    let threatScore = calculateThreatScore(d, weights);
 
                     if (d.is_blacklisted) {
                         threatScore = Math.max(threatScore, 100.0);
@@ -1552,11 +1770,13 @@ if (isset($_POST['ajax_action'])) {
                     }
 
                     const suspCount = d.matched_tokens ? d.matched_tokens.length : 0;
-                    const zSize = zScore(d.size, stats.size.mean, stats.size.std);
-                    const zMtime = zScore(d.mtime, stats.mtime.mean, stats.mtime.std);
-                    const zTokens = zScore(d.total_tokens, stats.tokens.mean, stats.tokens.std);
-                    const zSusp = zScore(suspCount, stats.susp.mean, stats.susp.std);
-                    const zEntropy = zScore(entropy, stats.entropy.mean, stats.entropy.std);
+                    const zSize = zScore(d.size, stats.size);
+                    const zMtime = zScore(d.mtime, stats.mtime);
+                    const zTokens = zScore(d.total_tokens, stats.tokens);
+                    const zSusp = zScore(suspCount, stats.susp);
+                    const zEntropy = zScore(d.entropy, stats.entropy);
+                    const zCtime = zScore(d.ctime - d.mtime, stats.ctimeGap);
+                    const rareOwner = valid.length >= 20 && ownerCount[d.owner] / valid.length < 0.05;
 
                     const expectedSusp = d.total_tokens * avgSuspPerToken;
                     const residual = suspCount - expectedSusp;
@@ -1573,20 +1793,27 @@ if (isset($_POST['ajax_action'])) {
                     // WordPress/Laravel files, it never uniquely caught a webshell (every
                     // one it flagged was already caught by threatScore or another signal)
                     // while being the single largest false-positive source — plain file
-                    // size just isn't a meaningful malice signal on its own.
+                    // size just isn't a meaningful malice signal on its own. zSusp
+                    // dropped out for the same reason (0 unique catches, 5 false
+                    // positives in node test/bench.js): the weighted threatScore
+                    // already covers "many suspicious tokens".
+                    //
+                    // Entropy only matters on the high side; a near-empty stub
+                    // isn't an outlier worth reviewing.
                     const isAnomaly = (threatScore >= 8.0) ||
-                        (Math.abs(zSusp) > threshold) ||
-                        (Math.abs(zEntropy) > threshold) ||
+                        (zEntropy > threshold) ||
                         (Math.abs(zMtime) > threshold) ||
+                        (Math.abs(zCtime) > threshold) ||
+                        rareOwner ||
                         (residual > 5) ||
                         d.is_blacklisted ||
                         d.mhr_hit === true;
 
                     return {
                         ...d,
-                        entropy: entropy,
-                        zScores: { size: zSize, mtime: zMtime, tokens: zTokens, susp: zSusp, entropy: zEntropy },
+                        zScores: { size: zSize, mtime: zMtime, tokens: zTokens, susp: zSusp, entropy: zEntropy, ctime: zCtime },
                         residual: residual,
+                        rareOwner: rareOwner,
                         isAnomaly: isAnomaly,
                         threatScore: threatScore,
                         date: d.mtime ? formatDate(d.mtime) : 'N/A',
@@ -1594,6 +1821,8 @@ if (isset($_POST['ajax_action'])) {
                     };
                 });
             }
+
+            // --- End client-side threat scoring ---
 
             function shortenUnlinkError(msg) {
                 if (!msg) return msg;
@@ -1647,7 +1876,7 @@ if (isset($_POST['ajax_action'])) {
             function shouldShowFile(d) {
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && d.threatScore < 10.0 && !d.is_blacklisted) return false;
-                if (currentFilterMode === 'obfuscated' && (d.entropy < 5.8 || d.is_unreadable)) return false;
+                if (currentFilterMode === 'obfuscated' && (d.entropy <= HIGH_ENTROPY || d.is_unreadable)) return false;
 
                 if (_timelineFilter) {
                     if (!d.mtime || d.mtime < _timelineFilter.minTime || d.mtime > _timelineFilter.maxTime) return false;
@@ -1829,7 +2058,7 @@ if (isset($_POST['ajax_action'])) {
 
                         if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
                             let tokens = d.matched_tokens.map(t => {
-                                const essential = ['eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function', 'base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
+                                const essential = ['eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function', '`', '@input_call', '@preg_e', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
                                 if (essential.includes(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
                                 return escapeHtml(t);
                             });
@@ -1841,7 +2070,7 @@ if (isset($_POST['ajax_action'])) {
                         } else {
                             const sizeKB = (d.size / 1024).toFixed(1);
                             const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
-                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)}`;
+                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
                         }
 
                         const fileLink = `<span class="file-link" onclick="copyText('${escapeHtml(d.path)}')">${escapeHtml(d.path)}</span>`;
@@ -2603,7 +2832,7 @@ if (isset($_POST['ajax_action'])) {
                         let col;
                         if (d.threatScore >= 15) col = '#ff4444';
                         else if (d.threatScore >= 8)  col = '#ffaa00';
-                        else if ((d.entropy || 0) > 5.8) col = '#9b59b6';
+                        else if ((d.entropy || 0) > HIGH_ENTROPY) col = '#9b59b6';
                         else col = '#4a8bc2';
                         ctx.fillStyle = col;
                         ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
@@ -2611,7 +2840,7 @@ if (isset($_POST['ajax_action'])) {
                     });
 
                     // Legend
-                    const leg = [['#ff4444','Critical (≥15)'],['#ffaa00','High Risk (≥8)'],['#9b59b6','High Entropy (>5.8)'],['#4a8bc2','Normal']];
+                    const leg = [['#ff4444','Critical (≥15)'],['#ffaa00','High Risk (≥8)'],['#9b59b6','High Entropy (>' + HIGH_ENTROPY + ')'],['#4a8bc2','Normal']];
                     let lx = left + 4;
                     leg.forEach(function([c, lbl]) {
                         ctx.fillStyle = c; ctx.beginPath(); ctx.arc(lx + 5, top + 12, 4, 0, Math.PI * 2); ctx.fill();
