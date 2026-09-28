@@ -2,7 +2,7 @@
 
 We welcome contributions to SussyFinder! This document outlines how you can get involved and contribute your valuable skills and expertise.
 ## Getting Started
-
+[RULES](RULES.md)
 -    Fork the repository: [Create your own fork of the Sussyfinder repository on GitHub](https://github.com/Cvar1984/sussyfinder/fork). This will allow you to make changes and submit pull requests without affecting the main branch.
 -    Clone your fork: Clone your forked repository to your local machine.
 -    Create a branch: Create a new branch for your specific changes. This helps keep your work organized and separate from the main branch.
