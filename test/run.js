@@ -55,6 +55,21 @@ const cases = [
 ];
 fs.writeFileSync(path.join(work, 'cases.txt'), cases.map(c => c[0]).join('\0'));
 
+// --- Listing fixture: which names getSortedByPattern must return (rawurlencoded) ---
+// Also holds what must NOT be listed or must not hang the scan: a FIFO named
+// .php, a "root -> /" symlink (not followed, but warned about), non-PHP names.
+const fixture = path.join(work, 'fixture');
+fs.mkdirSync(path.join(fixture, 'sub'), { recursive: true });
+fs.mkdirSync(path.join(work, 'outside'));
+const shellBody = '<?php $f = "ba"."se64_decode"; `id`;';
+['a.php', 'x.php.jpg', 'shell.php.', '.user.ini', 'notes.txt', 'jquery.shape.js', 'it\'s "odd".php', 'sub/deep.php', '../outside/target.php']
+    .forEach(n => fs.writeFileSync(path.join(fixture, n), shellBody));
+fs.writeFileSync(Buffer.from(path.join(fixture, 'caf') + '\xe9.php', 'latin1'), shellBody); // not valid UTF-8
+execFileSync('mkfifo', [path.join(fixture, 'fifo.php')]);
+fs.symlinkSync('/', path.join(fixture, 'out'));
+fs.symlinkSync('../outside/target.php', path.join(fixture, 'linked.php'));
+const listingWant = ['.user.ini', 'a.php', 'caf%E9.php', 'deep.php', 'it%27s%20%22odd%22.php', 'linked.php', 'shell.php.', 'x.php.jpg'].sort();
+
 // Extraction script run by each PHP. Must stay PHP 4.3-safe (no -r in PHP 4 CGI,
 // so it's a file; json_encode comes from main.php's fallback on old PHP).
 // PHP itself can crash on a file (4.3.0's tokenizer segfaults on some modern
@@ -98,7 +113,19 @@ foreach (array('test/webshells', 'test/WordPress', 'test/laravel') as $corpus) {
         fflush($done);
     }
 }
-echo json_encode(array('php' => PHP_VERSION, 'weights' => $tokenNeedles, 'cases' => $cases));
+$GLOBALS['phpWarnings'] = array();
+$listing = getSortedByPattern(${phpString(dir + '/fixture')}, $pattern);
+$names = array();
+foreach ($listing['file_readable'] as $file) {
+    $names[] = rawurlencode(basename($file));
+}
+$outsideWarned = false;
+foreach ($GLOBALS['phpWarnings'] as $warning) {
+    if (strpos($warning, 'outside the scanned directory') !== false) {
+        $outsideWarned = true;
+    }
+}
+echo json_encode(array('php' => PHP_VERSION, 'weights' => $tokenNeedles, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned));
 `;
 
 // --- Targets: local php, or PHTest containers ---
@@ -111,7 +138,8 @@ if (!phpOpt) {
     fs.writeFileSync(path.join(work, 'extract.php'), extractScript(root, work, state));
     targets = [{
         name: 'local', supported: true, repo: root,
-        runPhp: () => execFileSync('php', [path.join(work, 'extract.php')], { maxBuffer: 1 << 28 }),
+        // error_log into the temp dir: a php.ini with error_log=./error_log would litter the repo
+        runPhp: () => execFileSync('php', ['-d', 'error_log=' + path.join(work, 'php-errors.log'), path.join(work, 'extract.php')], { maxBuffer: 1 << 28 }),
         read: file => { try { return fs.readFileSync(path.join(state, file), 'utf8'); } catch (e) { return ''; } },
     }];
 } else {
@@ -119,9 +147,6 @@ if (!phpOpt) {
         .filter(l => l.trim() && !l.startsWith('#')).map(l => { const [v, type] = l.split('|'); return { v, type }; });
     const want = phpOpt === 'all' ? known : phpOpt.split(',').map(v => known.find(k => k.v === v) || { v, type: null });
     fs.writeFileSync(path.join(work, 'extract.php'), extractScript('/var/www/html', '/work', '/tmp'));
-    // A file whose name needs escaping (exercises magic_quotes_gpc on PHP < 5.4)
-    fs.mkdirSync(path.join(work, 'qdir'));
-    fs.writeFileSync(path.join(work, 'qdir', 'it\'s "odd".php'), '<?php $f = "ba"."se64_decode"; `id`;');
     targets = want.map(({ v, type }, i) => {
         const legacy = type === 'legacy';
         const name = 'sf-test-' + v;
@@ -134,24 +159,41 @@ if (!phpOpt) {
     });
 }
 
-// --- Web smoke test (containers only): page renders, inline JS parses, scan + process work ---
+// --- Web smoke test (containers only): page, inline JS, scan + process over HTTP ---
 function webCheck(t) {
     const url = `http://127.0.0.1:${t.port}/main.php`;
-    const curl = extra => { try { return execFileSync('curl', ['-s', '-m', '120'].concat(extra, [url]), { maxBuffer: 1 << 26 }).toString(); } catch (e) { return ''; } };
+    const curl = (extra, csrfHeader = true) => {
+        const args = ['-s', '-m', '120'].concat(csrfHeader ? ['-H', 'X-Sussy-Request: 1'] : [], extra, [url]);
+        try { return execFileSync('curl', args, { maxBuffer: 1 << 26 }).toString(); } catch (e) { return ''; }
+    };
     const json = s => { try { return JSON.parse(s); } catch (e) { return null; } };
-    const page = curl([]);
+    const page = curl([], false);
     const js = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n;\n');
     let jsOk = page.includes('</html>');
     try { new vm.Script(js); } catch (e) { jsOk = false; }
     const scan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/var/www/html/test/webshells/php']));
+    // Must return (the FIFO can't hang it) and list the fixture's 8 names
+    const fixtureScan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture']));
+    // Without the CSRF header every action is refused
+    const noHeader = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture'], false));
+    // Paths are rawurlencoded on the wire, then form-encoded; the Latin-1 name must round-trip
     const micro = '/var/www/html/test/webshells/php/micro.php';
     const microMd5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(root, 'test/webshells/php/micro.php'))).digest('hex');
-    const paths = [micro, '/work/qdir/it\'s "odd".php'].map(encodeURIComponent).join('%00');
-    const proc = json(curl(['--data', 'ajax_action=process', '--data', 'paths=' + paths, '--data', 'seen_hashes=' + encodeURIComponent(microMd5 + ':/earlier/micro.php')]));
+    const latin1 = '%2Fwork%2Ffixture%2Fcaf%E9.php';
+    const wire = p => encodeURIComponent(encodeURIComponent(p));
+    const paths = [wire(micro), wire('/work/fixture/it\'s "odd".php'), encodeURIComponent(latin1)].join('%00');
+    const proc = json(curl(['--data', 'ajax_action=process', '--data', 'paths=' + paths,
+        '--data', 'seen_hashes=' + encodeURIComponent(microMd5 + ':' + encodeURIComponent('/earlier/micro.php'))]));
     const feats = proc && proc.features || [];
-    const procOk = feats.length === 2 && feats[0].duplicate_of === '/earlier/micro.php' && feats[1].matched_tokens.includes('@concat_name');
-    const ok = jsOk && !!scan && scan.total > 0 && procOk;
-    return { ok, text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'}, process ${procOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : '') };
+    const procOk = feats.length === 3 && decodeURIComponent(feats[0].duplicate_of) === '/earlier/micro.php' &&
+        feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1;
+    const fixtureOk = !!fixtureScan && fixtureScan.total === listingWant.length;
+    const csrfOk = !!noHeader && noHeader.error === 'forbidden';
+    const ok = jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk;
+    return {
+        ok, text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'}, fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
+            `process ${procOk ? 'OK' : 'FAIL'}, CSRF check ${csrfOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : ''),
+    };
 }
 
 // --- Run ---
@@ -218,6 +260,12 @@ targets.forEach(t => {
     if (casesFailed && t.supported) failed++;
     r.casesFailed = casesFailed;
 
+    // Listing checks on the fixture
+    const listed = (out.listing || []).slice().sort();
+    r.listingOk = JSON.stringify(listed) === JSON.stringify(listingWant) && out.outside_warned === true;
+    console.log('listing checks     ' + (r.listingOk ? 'OK' : `FAIL: got [${listed.join(', ')}]` + (out.outside_warned ? '' : ', no warning for the outside symlink')));
+    if (!r.listingOk && t.supported) failed++;
+
     // Benchmark: main.php's client-side scoring block, run as-is
     const start = web.indexOf('// --- Client-side threat scoring');
     const end = web.indexOf('// --- End client-side threat scoring ---');
@@ -254,12 +302,13 @@ if (withRows.length > 1) {
     const sig = d => d.matched_tokens.slice().sort().join(',');
     const refMap = new Map(ref.rows.map(d => [d.rel, sig(d)]));
     console.log(`\n== Summary (matches compared with ${ref.t.name})`);
-    console.log('PHP        self-checks  anomaly detected / FP      web  files matching differently');
+    console.log('PHP        self-checks  listing  anomaly detected / FP      web  files matching differently');
     results.forEach(r => {
         const diff = r.rows ? r.rows.filter(d => refMap.get(d.rel) !== sig(d)) : [];
         r.diff = diff;
         console.log((r.t.v || r.t.name).padEnd(10) + ' ' +
             (r.rows ? `${cases.length - r.casesFailed}/${cases.length}` : '-').padEnd(12) + ' ' +
+            (r.rows ? (r.listingOk ? 'OK' : 'FAIL') : '-').padEnd(8) + ' ' +
             (r.anomaly ? `${r.anomaly[0]} / ${r.anomaly[1]}` : (r.t.supported ? 'FAIL' : 'n/a (below 4.3)')).padEnd(26) + ' ' +
             (r.web ? (r.web.ok ? 'OK' : 'FAIL') : '-').padEnd(4) + ' ' +
             (r.rows ? diff.length : '-') + (r.crashed.length ? `  (PHP crashed on ${r.crashed.length} file(s), skipped)` : ''));

@@ -132,8 +132,9 @@ if (isWorking('curl_exec')) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    // Verified TLS: the downloaded blacklist deletes files, so it must really come from GitHub
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
     curl_setopt_array($ch, array(
         CURLOPT_HTTPHEADER => array(
             'Cache-Control: no-cache, no-store, must-revalidate',
@@ -144,70 +145,61 @@ if (isWorking('curl_exec')) {
 }
 
 /**
- * Recursive listing files
+ * Collect the files under $directory whose name matches $pattern into
+ * $entries. Each directory is read fully and closed before recursing, so depth
+ * isn't capped by open file handles. Symlinked directories are followed only
+ * when they resolve inside $root (a "root -> /" link would otherwise walk the
+ * whole filesystem); symlinked files are listed like regular files. FIFOs,
+ * sockets and devices are skipped: opening a FIFO blocks forever. Anything
+ * that can't be scanned is reported as a warning rather than skipped silently.
  *
  * @param string $directory
- * @param array $entries
- * @param array $visited
- * @return array of files
+ * @param string $pattern regex matched against each file's name
+ * @param string $root realpath of the scanned directory, "/"-separated
+ * @param array $entries 'file_readable' / 'file_not_readable' lists, filled in place
+ * @param array $visited realpath => true, filled in place
+ * @return void
  */
-function recursiveScan($directory, &$entries, &$visited)
+function recursiveScan($directory, $pattern, $root, &$entries, &$visited)
 {
-    // Resolve the real path to handle symlink loops
     $realPath = realpath($directory);
     if (!$realPath || isset($visited[$realPath])) {
-        return $entries; // Prevent infinite loops
+        return; // symlink loop or already scanned
     }
-
-    // Mark this directory as visited
     $visited[$realPath] = true;
 
-    // Check if the directory exists and is readable
-    if (!is_dir($realPath) || !is_readable($realPath)) {
-        return $entries;
-    }
-
-    // Open the directory
-    $handle = opendir($realPath);
+    $handle = @opendir($realPath);
     if (!$handle) {
-        return $entries;
+        trigger_error('Cannot list directory ' . $realPath . ' (files inside it are not scanned)', E_USER_WARNING);
+        return;
     }
-
-    // Iterate over the directory contents
-    while (($entry = readdir($handle)) !== false) {
-        // Skip the current directory and parent directory
-        if ($entry === '.' || $entry === '..') {
-            continue;
+    $names = array();
+    while (($name = readdir($handle)) !== false) {
+        if ($name !== '.' && $name !== '..') {
+            $names[] = $name;
         }
+    }
+    closedir($handle);
 
-        // Get Nix-style full path
-        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $entry);
-        if (is_link($entryPath)) {
-            $entries['symlink'][] = $entryPath;
-
-            // Get the actual symlink target
-            $symlinkTarget = readlink($entryPath);
-            $resolvedTarget = realpath($symlinkTarget);
-
-            // Follow the symlink only if it's a directory and hasn't been visited
-            if ($resolvedTarget && is_dir($resolvedTarget) && !isset($visited[$resolvedTarget])) {
-                recursiveScan($resolvedTarget, $entries, $visited);
+    foreach ($names as $name) {
+        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $name);
+        if (is_dir($entryPath)) {
+            if (is_link($entryPath)) {
+                $target = str_replace(DIRECTORY_SEPARATOR, '/', realpath($entryPath));
+                if (strpos($target . '/', rtrim($root, '/') . '/') !== 0) {
+                    trigger_error('Not following symlink ' . $entryPath . ' -> ' . $target . ' (outside the scanned directory)', E_USER_WARNING);
+                    continue;
+                }
             }
+            recursiveScan($entryPath, $pattern, $root, $entries, $visited);
+        } elseif (!preg_match($pattern, $name) || !is_file($entryPath)) {
             continue;
-        }
-
-        // Store whether it's a directory to avoid redundant calls
-        $isDir = is_dir($entryPath);
-        if ($isDir) {
-            recursiveScan($entryPath, $entries, $visited);
         } elseif (is_readable($entryPath)) {
             $entries['file_readable'][] = $entryPath;
         } else {
             $entries['file_not_readable'][] = $entryPath;
         }
     }
-    closedir($handle);
-    return $entries;
 }
 
 /**
@@ -225,79 +217,29 @@ function sortByLastModified($files)
 }
 
 /**
+ * List the files under $path whose name matches $pattern, readable ones
+ * newest first.
  *
- * Recurisively list a file by descending modified time
- *
- * @param string $path
- * @return array
- *
+ * @param string $path directory to scan
+ * @param string $pattern complete regex, matched against each file's name
+ * @return array 'file_readable' and 'file_not_readable' path lists
  */
-function getSortedByTime($path)
+function getSortedByPattern($path, $pattern)
 {
-    $entries = array();
+    $entries = array('file_readable' => array(), 'file_not_readable' => array());
+    $root = realpath($path);
+    if ($root === false || !is_dir($root)) {
+        trigger_error('Not a directory: ' . $path, E_USER_WARNING);
+        return $entries;
+    }
+    if (@preg_match($pattern, '') === false) {
+        trigger_error('Invalid file name pattern: ' . $pattern, E_USER_WARNING);
+        return $entries;
+    }
     $visited = array();
-    $result = recursiveScan($path, $entries, $visited);
-    $readable = $result['file_readable'];
-    //$notReadable = isset($result['file_not_readable']) ? $result['file_not_readable'] : array();
-    if (isset($result['file_not_readable'])) {
-        $notReadable = $result['file_not_readable'];
-    } else {
-        $notReadable = array();
-    }
-
-    $readable = sortByLastModified($readable);
-    return array(
-        'file_readable' => $readable,
-        'file_not_readable' => $notReadable,
-    );
-}
-
-/**
- * Recursively list a file by descending modified time and pattern matching.
- *
- * @param string $path The directory path to scan.
- * @param array $patterns An array of glob-like patterns to filter (e.g., '*.php[0-9][0-9]').
- * @return array An associative array containing two keys: 'file_readable' and 'file_not_readable'.
- */
-function getSortedByPattern($path, $patterns)
-{
-    $result = getSortedByTime($path);
-    $fileReadable = $result['file_readable'];
-    $fileNotReadable = $result['file_not_readable'];
-
-    $sortedReadableFiles = array();
-    $sortedNotReadableFiles = array();
-
-    foreach ($fileReadable as $entry) {
-        $extension = pathinfo($entry, PATHINFO_EXTENSION);
-
-        foreach ($patterns as $pattern) {
-            $regex = "/^$pattern$/i";
-            if (preg_match($regex, $extension)) {
-                $sortedReadableFiles[] = $entry;
-                break;
-            }
-        }
-    }
-
-    if ($fileNotReadable) {
-        foreach ($fileNotReadable as $entry) {
-            $extension = pathinfo($entry, PATHINFO_EXTENSION);
-
-            foreach ($patterns as $pattern) {
-                $regex = "/^$pattern$/i";
-                if (preg_match($regex, $extension)) {
-                    $sortedNotReadableFiles[] = $entry;
-                    break;
-                }
-            }
-        }
-    }
-
-    return array(
-        'file_readable' => $sortedReadableFiles,
-        'file_not_readable' => $sortedNotReadableFiles,
-    );
+    recursiveScan($root, $pattern, str_replace(DIRECTORY_SEPARATOR, '/', $root), $entries, $visited);
+    $entries['file_readable'] = sortByLastModified($entries['file_readable']);
+    return $entries;
 }
 
 /**
@@ -616,8 +558,8 @@ function urlFileArray($url)
                 )),
             ),
             'ssl' => array(
-                'verify_peer' => false,
-                'verify_peer_name' => false,
+                'verify_peer' => true,
+                'verify_peer_name' => true,
             ),
         ));
 
@@ -718,8 +660,8 @@ function mhrSubmitHashes($hashes, $username, $password)
                 'timeout'       => 30,
             ),
             'ssl' => array(
-                'verify_peer'      => false,
-                'verify_peer_name' => false,
+                'verify_peer'      => true,
+                'verify_peer_name' => true,
             ),
         ));
         $content = @file_get_contents($url, false, $context);
@@ -761,21 +703,38 @@ function unlinkWithReason($filePath)
 }
 
 /**
- * Read a POST field holding a NUL-separated list. NUL is the one byte a file
- * path can't contain, and one field (unlike paths[]=...) stays clear of
- * max_input_vars no matter how many entries it holds.
+ * Read a request value, undoing magic_quotes_gpc (PHP < 5.4 escapes quotes,
+ * backslashes and NUL) so it arrives exactly as sent.
+ *
+ * @param array $source $_POST
+ * @param string $key
+ * @return string|null null when missing
+ */
+function inputValue($source, $key)
+{
+    if (!isset($source[$key]) || !is_string($source[$key])) {
+        return null;
+    }
+    $value = $source[$key];
+    if (function_exists('get_magic_quotes_gpc') && @get_magic_quotes_gpc()) {
+        $value = stripslashes($value);
+    }
+    return $value;
+}
+
+/**
+ * Read a POST field holding a NUL-separated list. One field (unlike
+ * paths[]=...) stays clear of max_input_vars no matter how many entries it
+ * holds. Paths travel rawurlencode()d, so NUL can't occur inside an entry.
  *
  * @param string $key
  * @return array
  */
 function postList($key)
 {
-    if (!isset($_POST[$key]) || $_POST[$key] === '') {
+    $value = inputValue($_POST, $key);
+    if ($value === null || $value === '') {
         return array();
-    }
-    $value = $_POST[$key];
-    if (function_exists('get_magic_quotes_gpc') && @get_magic_quotes_gpc()) {
-        $value = stripslashes($value); // PHP < 5.4 may have escaped quotes, backslashes and NUL
     }
     return explode("\0", $value);
 }
@@ -900,28 +859,10 @@ function scanUnreadablePaths($paths)
     return $features;
 }
 
-// $ext = array(
-//     'php',
-//     'phps',
-//     'pht',
-//     'phpt',
-//     'phtm',
-//     'phtml',
-//     'phar',
-//     'php3',
-//     'php4',
-//     'php5',
-//     'php7',
-//     'shtml',
-//     'inc',
-// );
-
-$pattern = array(
-    'ph.+',
-    'sh.+',
-    'inc',
-    'htaccess'
-);
+// Which files to scan, matched against the file name: a PHP-ish or SSI last
+// extension, "php" as an inner extension ("x.php.jpg" and "x.php." run as PHP
+// under Apache's AddHandler), .htaccess, and the per-directory PHP config files
+$pattern = '/\.(ph[^.]+|sh[^.]+|inc|htaccess)$|\.(php[0-9]*|phtml|pht|phar)\.|^(\.user|php[0-9]*)\.ini$/i';
 
 /**
  * Master Token Needles and Threat Weights Map
@@ -1094,54 +1035,87 @@ function ajaxRespond($data)
         $warnings[] = 'Unexpected output suppressed: ' . substr(trim($stray), 0, 500);
     }
     $data['warnings'] = array_values($warnings);
-    echo json_encode($data);
+    $json = json_encode($data);
+    if ($json === false) {
+        $json = json_encode(utf8Safe($data)); // a message quoting a non-UTF-8 file name
+    }
+    echo $json;
     exit;
+}
+
+/**
+ * Make every string in $value valid UTF-8 for json_encode() (PHP 5.2+ returns
+ * false on invalid bytes, which would empty the whole response). Invalid
+ * strings are read as Latin-1. Only for text shown to the user: paths travel
+ * rawurlencode()d so they survive byte for byte.
+ *
+ * @param mixed $value
+ * @return mixed
+ */
+function utf8Safe($value)
+{
+    if (is_array($value)) {
+        foreach ($value as $key => $item) {
+            $value[$key] = utf8Safe($item);
+        }
+        return $value;
+    }
+    if (!is_string($value) || preg_match('//u', $value)) {
+        return $value;
+    }
+    $out = '';
+    $len = strlen($value);
+    for ($i = 0; $i < $len; $i++) {
+        $byte = ord($value[$i]);
+        $out .= $byte < 0x80 ? $value[$i] : chr(0xC0 | ($byte >> 6)) . chr(0x80 | ($byte & 0x3F));
+    }
+    return $out;
 }
 
 // ── AJAX request handler ────────────────────────────────────────────────
 if (isset($_POST['ajax_action'])) {
     ob_start();
     header('Content-Type: application/json');
+    // CSRF check: a browser sends a custom header cross-site only after a CORS
+    // preflight this script never approves, so it proves the page sent the request
+    if (!isset($_SERVER['HTTP_X_SUSSY_REQUEST'])) {
+        ajaxRespond(array('error' => 'forbidden', 'msg' => 'Missing X-Sussy-Request header'));
+    }
     $ajaxAction = $_POST['ajax_action'];
+    // Paths travel rawurlencode()d both ways, so names that aren't valid UTF-8
+    // survive JSON and come back byte for byte
+    $mhrUser = inputValue($_POST, 'mhr_user');
+    $mhrUser = ($mhrUser !== null && $mhrUser !== '') ? trim($mhrUser) : $mhrUsername;
+    $mhrPass = inputValue($_POST, 'mhr_pass');
+    $mhrPass = ($mhrPass !== null && $mhrPass !== '') ? $mhrPass : $mhrPassword;
 
     if ($ajaxAction == 'scan') {
-        if (isset($_POST['dir'])) {
-            $path = $_POST['dir'];
-        } else {
+        $path = inputValue($_POST, 'dir');
+        if ($path === null) {
             $path = getcwd();
         }
 
         $result = getSortedByPattern($path, $pattern);
 
-        if (isset($result['file_readable'])) {
-            $readable = $result['file_readable'];
-        } else {
+        $readable = $result['file_readable'];
+        if (!empty($whitelistMD5Sums)) {
             $readable = array();
-        }
-
-        if (isset($result['file_not_readable'])) {
-            $notReadable = $result['file_not_readable'];
-        } else {
-            $notReadable = array();
-        }
-
-        $filtered = array();
-        foreach ($readable as $fp) {
-            $sum = md5_file($fp);
-            if (!isset($whitelistMD5Sums[$sum])) {
-                $filtered[] = $fp;
+            foreach ($result['file_readable'] as $fp) {
+                if (!isset($whitelistMD5Sums[md5_file($fp)])) {
+                    $readable[] = $fp;
+                }
             }
         }
 
         ajaxRespond(array(
-            'readable'     => array_values($filtered),
-            'not_readable' => array_values($notReadable),
-            'total'        => count($filtered) + count($notReadable),
+            'readable'     => array_map('rawurlencode', $readable),
+            'not_readable' => array_map('rawurlencode', $result['file_not_readable']),
+            'total'        => count($readable) + count($result['file_not_readable']),
         ));
     }
 
     if ($ajaxAction == 'process') {
-        $paths = postList('paths');
+        $paths = array_map('rawurldecode', postList('paths'));
 
         if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
             $isUnreadable = true;
@@ -1149,7 +1123,7 @@ if (isset($_POST['ajax_action'])) {
             $isUnreadable = false;
         }
 
-        $seenHashes = postList('seen_hashes');
+        $seenHashes = postList('seen_hashes'); // "md5:encoded path" entries
 
         $newHashes = array();
 
@@ -1160,11 +1134,22 @@ if (isset($_POST['ajax_action'])) {
             foreach ($seenHashes as $entry) {
                 $parts = explode(':', $entry, 2);
                 if (count($parts) == 2) {
-                    $localSeen[$parts[0]] = $parts[1];
+                    $localSeen[$parts[0]] = rawurldecode($parts[1]);
                 }
             }
 
             $features = scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenNeedles, $localSeen, $newHashes);
+        }
+
+        foreach ($features as $i => $row) {
+            $features[$i]['path'] = rawurlencode($row['path']);
+            if ($row['duplicate_of'] !== false) {
+                $features[$i]['duplicate_of'] = rawurlencode($row['duplicate_of']);
+            }
+        }
+        foreach ($newHashes as $i => $entry) {
+            $parts = explode(':', $entry, 2);
+            $newHashes[$i] = $parts[0] . ':' . rawurlencode($parts[1]);
         }
 
         ajaxRespond(array('features' => $features, 'new_hashes' => $newHashes));
@@ -1181,26 +1166,41 @@ if (isset($_POST['ajax_action'])) {
             ajaxRespond(array('error' => 'not configured', 'msg' => 'MHR integration is disabled (_MHR_ is false in main.php)'));
         }
 
-        $mhrUser = (isset($_POST['mhr_user']) && $_POST['mhr_user'] !== '') ? trim($_POST['mhr_user']) : $mhrUsername;
-        $mhrPass = (isset($_POST['mhr_pass']) && $_POST['mhr_pass'] !== '') ? $_POST['mhr_pass'] : $mhrPassword;
-
         ajaxRespond(mhrSubmitHashes($hashes, $mhrUser, $mhrPass));
     }
 
     if ($ajaxAction == 'mhr_unlink') {
-        if (isset($_POST['paths']) && is_array($_POST['paths'])) {
-            $paths = $_POST['paths'];
-        } else {
-            $paths = array();
+        // The paths come from the browser, so delete only files whose current
+        // hash MHR itself confirms; trusting the list would make this an
+        // arbitrary-file-delete endpoint
+        if (!_MHR_) {
+            ajaxRespond(array('error' => 'not configured', 'msg' => 'MHR integration is disabled (_MHR_ is false in main.php)'));
+        }
+        $sums = array();
+        foreach (array_map('rawurldecode', postList('paths')) as $filePath) {
+            $sums[$filePath] = is_file($filePath) ? md5_file($filePath) : false;
+        }
+        $lookup = mhrSubmitHashes(array_values(array_unique(array_filter($sums))), $mhrUser, $mhrPass);
+        if (isset($lookup['error'])) {
+            ajaxRespond($lookup);
+        }
+        $hits = array();
+        foreach (isset($lookup['results']) ? $lookup['results'] : array() as $r) {
+            if (isset($r['md5']) && isset($r['antivirus_detection_rate'])) {
+                $hits[strtolower($r['md5'])] = true;
+            }
         }
 
         $results = array();
-        foreach ($paths as $filePath) {
-            if (!file_exists($filePath)) {
-                $results[] = array('path' => $filePath, 'error' => null); // already gone
-                continue;
+        foreach ($sums as $filePath => $sum) {
+            if ($sum === false) {
+                $error = file_exists($filePath) ? 'Not a regular file; not deleted' : null; // null: already gone
+            } elseif (!isset($hits[$sum])) {
+                $error = 'MHR does not flag its current contents; not deleted';
+            } else {
+                $error = unlinkWithReason($filePath);
             }
-            $results[] = array('path' => $filePath, 'error' => unlinkWithReason($filePath));
+            $results[] = array('path' => rawurlencode($filePath), 'error' => $error);
         }
 
         ajaxRespond(array('results' => $results));
@@ -1596,7 +1596,7 @@ if (isset($_POST['ajax_action'])) {
         <nav class="navbar">
             <span class="navbar-brand">Sussy Finder</span>
             <div class="navbar-group">
-                <input type="text" name="dir" class="dir-input" value="<?php echo getcwd(); ?>" title="Directory to scan" onkeydown="if (event.key === 'Enter') { startChunkedScan(); }">
+                <input type="text" name="dir" class="dir-input" value="<?php echo htmlspecialchars(getcwd()); ?>" title="Directory to scan" onkeydown="if (event.key === 'Enter') { startChunkedScan(); }">
                 <input type="number" id="chunkSizeInput" class="chunk-input" value="500" step="50" title="Files processed per AJAX request">
                 <button type="button" class="btn-primary" onclick="startChunkedScan()" title="Chunked scan — safe for large directories">Scan</button>
             </div>
@@ -1931,6 +1931,29 @@ if (isset($_POST['ajax_action'])) {
                 return msg.replace(/^unlink\([^)]*\):\s*/, '');
             }
 
+            // Every AJAX call goes through here: the custom header is the server's
+            // CSRF check (another site can't send it)
+            function postAction(body) {
+                return fetch('', { method: 'POST', body: body, headers: { 'X-Sussy-Request': '1' } });
+            }
+
+            // Paths arrive percent-encoded (byte-exact even when not valid UTF-8);
+            // decode for display, falling back to Latin-1 for non-UTF-8 names
+            function decodePath(encoded) {
+                try { return decodeURIComponent(encoded); } catch (e) { return unescape(encoded); }
+            }
+
+            // Row actions use data- attributes and this one listener, not inline
+            // onclick="f('...')": the browser undoes HTML escaping before running
+            // inline JS, so a file name could break out of the string literal
+            document.addEventListener('click', function (e) {
+                var el = e.target.closest ? e.target.closest('[data-copy], [data-vt], [data-filter-path]') : null;
+                if (!el) return;
+                if (el.hasAttribute('data-copy')) copyText(el.getAttribute('data-copy'));
+                else if (el.hasAttribute('data-vt')) checkVT(el.getAttribute('data-vt'));
+                else filterByPath(el.getAttribute('data-filter-path'));
+            });
+
             function escapeHtml(value) {
                 if (value === undefined || value === null) return '';
                 return String(value)
@@ -2134,11 +2157,11 @@ if (isset($_POST['ajax_action'])) {
                         } else if (d.is_blacklisted) {
                             color = '#f72f2f';
                             badge = '<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">BLACKLIST</span> ';
-                            if (d.error) status = shortenUnlinkError(d.error);
+                            if (d.error) status = escapeHtml(shortenUnlinkError(d.error));
                         } else if (d.mhr_hit) {
                             color = '#f72f2f';
                             badge = `<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">MHR HIT (${d.mhr_detection_rate}%)</span> `;
-                            status = d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown'));
+                            status = escapeHtml(d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown')));
                         } else if (d.threatScore >= 15.0) {
                             color = '#dddbdb';
                             badge = `<span style="background:#990000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">CRITICAL (${d.threatScore.toFixed(1)})</span> `;
@@ -2150,7 +2173,7 @@ if (isset($_POST['ajax_action'])) {
                             badge = '<span style="background:#005580;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HTACCESS</span> ';
                         } else if (d.duplicate_of !== false) {
                             badge = '<span style="background:#444;color:#aaa;padding:2px 6px;border-radius:3px;font-size:11px;">DUPLICATE</span> ';
-                            status = d.duplicate_of;
+                            status = escapeHtml(d.duplicate_of);
                         }
 
                         if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
@@ -2170,12 +2193,12 @@ if (isset($_POST['ajax_action'])) {
                             verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
                         }
 
-                        const fileLink = `<span class="file-link" onclick="copyText('${escapeHtml(d.path)}')">${escapeHtml(d.path)}</span>`;
+                        const fileLink = `<span class="file-link" data-copy="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>`;
                         let md5Btn = '';
                         let vtBadge = '';
                         if (!d.is_unreadable && d.md5 && d.md5 !== 'N/A') {
-                            md5Btn = `<span class="copy-hash-btn" onclick="copyText('${escapeHtml(d.md5)}')" title="Copy MD5 hash">📋</span>`;
-                            vtBadge = `<span class="vt-badge" onclick="checkVT('${escapeHtml(d.md5)}')" title="check on VirusTotal">VT</span>`;
+                            md5Btn = `<span class="copy-hash-btn" data-copy="${escapeHtml(d.md5)}" title="Copy MD5 hash">📋</span>`;
+                            vtBadge = `<span class="vt-badge" data-vt="${escapeHtml(d.md5)}" title="check on VirusTotal">VT</span>`;
                         }
                         let mainLine = badge + fileLink + md5Btn + vtBadge;
                         if (status) mainLine += ' (' + status + ')';
@@ -2348,7 +2371,7 @@ if (isset($_POST['ajax_action'])) {
                     suspHtml += '<tr><th>File</th><th>Threat Score</th><th>Tokens</th></tr>';
                     topSusp.forEach(d => {
                         const name = String(d.path || '').split('/').pop() || d.path;
-                        suspHtml += `<tr class="clickable-row" onclick="filterByPath('${escapeHtml(d.path)}')">
+                        suspHtml += `<tr class="clickable-row" data-filter-path="${escapeHtml(d.path)}">
                             <td>${escapeHtml(name)}</td>
                             <td><strong style="color:${d.threatScore >= 10 ? '#ff4444' : '#ffaa00'}">${d.threatScore.toFixed(1)}</strong></td>
                             <td>${d.suspCount || 0} matched</td>
@@ -2367,7 +2390,7 @@ if (isset($_POST['ajax_action'])) {
                     recentHtml += '<table><tr><th>File</th><th>Modified</th><th>Size</th></tr>';
                     topRecent.forEach(d => {
                         const name = String(d.path || '').split('/').pop() || d.path;
-                        recentHtml += `<tr class="clickable-row" onclick="filterByPath('${escapeHtml(d.path)}')">
+                        recentHtml += `<tr class="clickable-row" data-filter-path="${escapeHtml(d.path)}">
                             <td>${escapeHtml(name)}</td>
                             <td>${escapeHtml(d.date || 'N/A')}</td>
                             <td>${((Number(d.size) || 0) / 1024).toFixed(1)} KB</td>
@@ -3020,7 +3043,7 @@ if (isset($_POST['ajax_action'])) {
                 body.set('ajax_action', 'scan');
                 body.set('dir', dir);
 
-                fetch('', { method: 'POST', body: body })
+                postAction(body)
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (_scanCancelled) { return; }
@@ -3068,13 +3091,18 @@ if (isset($_POST['ajax_action'])) {
                 body.set('is_not_readable', isNotReadable ? '1' : '0');
                 body.set('paths', paths.join('\0'));
                 body.set('seen_hashes', _seenHashes.join('\0'));
-                return fetch('', { method: 'POST', body: body }).then(function(r) { return r.json(); });
+                return postAction(body).then(function(r) { return r.json(); });
             }
 
             function applyProcessResult(data, allFeatures) {
                 reportServerWarnings(data);
                 var feats = data.features || [];
-                feats.forEach(function(f) { allFeatures.push(f); });
+                feats.forEach(function(f) {
+                    f.pathRaw = f.path; // encoded form, sent back as-is
+                    f.path = decodePath(f.path);
+                    if (f.duplicate_of !== false) f.duplicate_of = decodePath(f.duplicate_of);
+                    allFeatures.push(f);
+                });
                 if (data.new_hashes) {
                     data.new_hashes.forEach(function(h) { _seenHashes.push(h); });
                 }
@@ -3229,7 +3257,7 @@ if (isset($_POST['ajax_action'])) {
                     body.set('mhr_pass', mhrPass);
                     batches[idx].forEach(function (h) { body.append('hashes[]', h); });
 
-                    return fetch('', { method: 'POST', body: body })
+                    return postAction(body)
                         .then(function (r) { return r.json(); })
                         .then(function (data) {
                             reportServerWarnings(data);
@@ -3289,9 +3317,11 @@ if (isset($_POST['ajax_action'])) {
 
                     var body = new URLSearchParams();
                     body.set('ajax_action', 'mhr_unlink');
-                    hitFiles.forEach(function (f) { body.append('paths[]', f.path); });
+                    body.set('mhr_user', mhrUser); // the server re-checks each file's hash with MHR before deleting
+                    body.set('mhr_pass', mhrPass);
+                    body.set('paths', hitFiles.map(function (f) { return f.pathRaw; }).join('\0'));
 
-                    return fetch('', { method: 'POST', body: body })
+                    return postAction(body)
                         .then(function (r) { return r.json(); })
                         .then(function (data) {
                             reportServerWarnings(data);
@@ -3300,8 +3330,8 @@ if (isset($_POST['ajax_action'])) {
                                 if (r.error) { errorsByPath[r.path] = r.error; }
                             });
                             hitFiles.forEach(function (f) {
-                                if (errorsByPath[f.path]) {
-                                    f.error = errorsByPath[f.path];
+                                if (errorsByPath[f.pathRaw]) {
+                                    f.error = errorsByPath[f.pathRaw];
                                 }
                             });
 

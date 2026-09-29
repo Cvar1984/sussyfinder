@@ -11,7 +11,7 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 
 ## Features
 
-* **Recursive directory scanning** with symlink loop protection
+* **Recursive directory scanning** with symlink loop protection; symlinked directories leading outside the scanned directory are reported, not followed, and directories that can't be listed are reported instead of skipped silently
 * **Token-based detection** – scans PHP tokens for known obfuscation, shell execution, file I/O, and credential-related functions (method names like `$pdo->exec()` and text inside strings/comments are ignored)
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
@@ -354,15 +354,16 @@ This means the statistical analysis is used alongside deterministic security ind
 
 ## Usage
 
-1. Place `index.php` (or whatever you name it) in a web-accessible directory.
+1. Place `main.php` (or whatever you name it) in a web-accessible directory.
 2. Access the file through your browser.
 3. Enter the absolute or relative path of the directory you wish to scan.
-4. Click **SEARCH** – the tool will recursively scan and analyse all files matching the configured patterns (`.php`, `.inc`, `.htaccess`, etc.).
+4. Click **SEARCH** – the tool will recursively scan and analyse every file whose name matches `$pattern`: PHP-like and SSI extensions (`.php`, `.phtml`, `.inc`, `.shtml`, …), names with `php` as an inner extension (`x.php.jpg`, `shell.php.`, which Apache's `AddHandler` runs as PHP), `.htaccess`, `.user.ini` and `php.ini`.
 5. Review the results table – files with anomalies are marked with ⚠️.
 6. Use the control bar to sort, filter, or copy the results.
 
    * Blacklisted files are **automatically deleted** – ensure you trust the blacklist source.
-7. Click on any file path to copy its MD5 hash.
+7. Click on any file path to copy it; the 📋 icon copies its MD5 hash.
+8. **MHR SCAN** looks the hashes up in Team Cymru's Malware Hash Registry and deletes files it flags. The server re-checks each file's current hash with MHR before deleting, so only confirmed matches are removed.
 
 ## Whitelist & Blacklist
 
@@ -374,7 +375,7 @@ By default, both lists are fetched from:
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt`
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt`
 
-You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_` to `false` in the code.
+You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_` to `false` in the code. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
 
 > **Note:** The provided whitelist is harvested from common frameworks and libraries. It is up to you to trust or modify it. For blacklist contributions, please provide source files when creating a pull request.
 
@@ -389,6 +390,8 @@ You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_`
 ## Security & Disclaimer
 
 This tool is intended for system administrators and security researchers. It performs **aggressive** file operations (deletion) and may produce false positives. Always audit flagged files before any automatic action. The author is not responsible for any data loss or damage caused by the use of this software.
+
+Protections built in: a CSRF check on every request (a custom header another site can't send), server-side MHR confirmation before any MHR deletion, verified TLS for list downloads, and file names treated as untrusted data in the page (an attacker who planted a file chooses its name).
 
 ## Contributing
 

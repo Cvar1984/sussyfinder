@@ -72,13 +72,33 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `HIGH_ENTROPY` there is the single entropy threshold used everywhere.
 - **`define('SUSSY_LIB', true); include 'main.php';`** stops right after
   `$tokenNeedles` (before list downloads, AJAX and HTML). The tests rely on it.
+- **Access:** there is deliberately no login or access key (the maintainer
+  doesn't want one). Every AJAX request must carry the
+  `X-Sussy-Request` header (the CSRF check); the page sends all of them
+  through `postAction()`. Read request values with `inputValue()` /
+  `postList()`, which undo magic quotes; never `$_POST` directly.
 - **AJAX:** POST `ajax_action` = `scan` | `process` | `mhr_check` | `mhr_unlink`.
-  `process` takes `paths` and `seen_hashes` as **NUL-separated strings**
-  (`postList()`), not arrays or JSON. One field stays under `max_input_vars`,
-  NUL can't occur in a path, and no `json_decode` is needed on old PHP.
-  Responses go through `ajaxRespond()`, which folds in captured PHP warnings.
-- **Downloads** (`urlFileArray`, `mhrSubmitHashes`) try cURL, then
-  `file_get_contents`, then `file()`. Treat anything but a non-empty
+  Paths travel **`rawurlencode()`d in both directions** (`path`,
+  `duplicate_of`, `new_hashes`, scan lists, `mhr_unlink` results), so names
+  that aren't valid UTF-8 survive JSON. The page decodes them for display
+  (`decodePath()`) and sends back `pathRaw`. Lists go as **NUL-separated
+  strings** (`postList()`), not arrays or JSON: one field stays under
+  `max_input_vars`, and no `json_decode` is needed on old PHP. Responses go
+  through `ajaxRespond()`, which folds in captured PHP warnings and falls back
+  to `utf8Safe()` so the body is never empty.
+- **`mhr_unlink`** deletes only files whose *current* md5 MHR confirms in that
+  same request. Never make it trust the browser's path list.
+- **Listing** (`getSortedByPattern` → `recursiveScan`): `$pattern` is one
+  complete regex matched against the file name (validated before use).
+  Regular files only (a FIFO would hang `md5_file`). Symlinked files are
+  listed; symlinked dirs are followed only inside the scan root. Anything
+  unscannable is reported with `trigger_error()`, not skipped silently.
+- **Page output:** file names are attacker-controlled. Escape with
+  `escapeHtml()` for HTML, and never put data inside inline `onclick="f('…')"`:
+  use a `data-` attribute (the document click listener handles `data-copy`,
+  `data-vt`, `data-filter-path`).
+- **Downloads** (`urlFileArray`, `mhrSubmitHashes`) use verified TLS (the
+  blacklist deletes files) and try cURL, then `file_get_contents`, then `file()`. Treat anything but a non-empty
   string/array as failure: PHP 4.3's `file_get_contents` returns NULL, not false.
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it
   returns a clear error. A `json_decode` fallback was deliberately not added:
@@ -97,8 +117,11 @@ node test/run.js --php 4.3.11,8.5.6   # just those versions
 ```
 
 Baseline (threshold 3.5, local PHP and every container alike): **anomaly
-167/202 detected, 18/1927 false positives; score ≥ 8: 161/202, 10 FP;
-score ≥ 15: 151/202, 1 FP.**
+171/211 detected, 18/1927 false positives; score ≥ 8: 161/211, 10 FP;
+score ≥ 15: 151/211, 1 FP.** (211 since `$pattern` also matches `*.php.txt`.)
+Each run also checks the listing fixture (FIFO, symlink to `/`, symlinked
+file, double extensions, `.user.ini`, a Latin-1 and a quoted name) and, per
+container, that a request without the CSRF header is refused.
 Expected `--php all` result: 4.1.2/4.2.3 fail (below the floor, reported as
 n/a, not a failure). 4.3.0 through 8.5.6 pass all self-checks and the web
 check. Known, accepted differences:
