@@ -360,7 +360,7 @@ Like the whitelist and blacklist, the model isn't built into `main.php`. When th
 * **Failure:** if the download fails, the file is malformed or the versions differ, the page shows a warning and ML is off for that scan. The server also skips ML feature extraction for that scan.
 * **Self-hosting:** to pin a model or work offline, set `_ML_MODEL_URL_` to another URL or to a local file path.
 
-To turn the model off, set `define('_ML_', false);` near the top of `main.php`. The server then skips `mlFeatures()`, which saves about 40% of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
+To turn the model off, set `_ML_` to `false` (see [Configuration](#configuration)). The server then skips `mlFeatures()`, which saves about 40% of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
 
 #### Training data
 
@@ -466,6 +466,33 @@ All four scripts reject unknown options, so a misspelt flag is an error rather t
 7. Click on any file path to copy it; the 📋 icon copies its MD5 hash.
 8. **MHR SCAN** looks the hashes up in Team Cymru's Malware Hash Registry and deletes files it flags. The server re-checks each file's current hash with MHR before deleting, so only confirmed matches are removed.
 
+## Configuration
+
+Every setting is a constant at the top of `main.php`, defined with `settingDefault()`. Change it there, or leave `main.php` untouched and define the constant first, e.g. from a file named in php.ini's `auto_prepend_file`:
+
+```php
+<?php
+define('_BLACKLIST_', false);                    // never delete anything
+define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `_WHITELIST_`, `_BLACKLIST_` | `true` | use the known-good / known-bad MD5 lists |
+| `_MHR_` | `true` | Malware Hash Registry lookups |
+| `_MHR_USER_`, `_MHR_PASS_` | empty | MHR account, used when the page sends none |
+| `_ML_` | `true` | ML second opinion |
+| `_WHITELIST_URL_`, `_BLACKLIST_URL_`, `_ML_MODEL_URL_` | this repository | where the lists and the model come from (the model may be a local file) |
+| `_MHR_URL_` | `https://hash.cymru.com/v2/submitHashes` | MHR endpoint |
+| `TIME_LIMIT` | `3600` | seconds a request may run |
+| `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |
+| `MHR_BATCH` | `1000` | hashes per MHR request |
+| `LONG_LINE_BYTES`, `HALT_PAYLOAD_BYTES` | `5000`, `1024` | thresholds of the `@long_line` and `@halt_payload` signals |
+
+Which files are scanned (`$pattern`), the needles and their weights (`$tokenTiers`), and how they combine in the threat score (`$tokenRoles`) follow the settings. The page's scoring reads the weights and roles from the server, so they are defined in one place.
+
+`main.php` copes with the host by itself: a function in `disable_functions` (`set_time_limit`, `ini_set`, cURL, `json_encode`) is skipped or replaced, downloads use cURL or else PHP's URL streams, and PHP 8's new tokens (namespaced names, attributes, `&`) and the host's `short_open_tag` are normalised, so PHP 7.4 and 8.x extract identical features.
+
 ## Whitelist & Blacklist
 
 * **Whitelist** – MD5 sums of known-safe files (e.g., from popular frameworks). These files are skipped entirely to speed up scanning.
@@ -476,7 +503,7 @@ By default, both lists are fetched from:
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt`
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt`
 
-You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_` to `false` in the code. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
+You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). The lists are fetched only by the requests that use them, once per request. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
 
 > **Note:** The provided whitelist is harvested from common frameworks and libraries. It is up to you to trust or modify it. For blacklist contributions, please provide source files when creating a pull request.
 

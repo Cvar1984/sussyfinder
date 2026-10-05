@@ -23,6 +23,7 @@ const CASES = [
     ["<?php \\system('id');", ['system'], []],
     ['<?php echo `id`;', ['`'], []],
     ["<?php preg_replace('/x/e', $_POST['c'], 'x');", ['@preg_e'], []],
+    ["<?php \\preg_replace('/x/e', $_POST['c'], 'x');", ['@preg_e'], []], // one token on PHP 8, three before
     ["<?php preg_replace('#x#i', 'y', 'x'); function_exists('exec');", [], ['@preg_e', 'exec', '@concat_name']],
     ['<?php $q = "SELECT `{$t}`"; $s = "$a eval";', [], ['`', 'eval']],
     ["<?php $this->exec('x'); A::system(); new $cls(); $o->$m();", [], ['exec', 'system', '@dyn_call']],

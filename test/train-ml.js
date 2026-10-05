@@ -120,7 +120,7 @@ async function checkDir(dir, model, ctx) {
     if (corpora.length < listed.length) log(`${listed.length - corpora.length} sample submodules not checked out (git submodule update --init test/corpora/), skipping them`);
     await extractAll(corpora);
 
-    const ctx = lib.loadScoring({ weights: lib.tokenWeights() });
+    const ctx = lib.loadScoring();
     const { samples, files, dropped } = ml.buildSamples(corpora, ctx);
     const mal = samples.filter(d => d.label), ben = samples.filter(d => !d.label);
     log(`${files} files -> ${mal.length} unique shells, ${ben.length} unique benign (dropped: ${dropped.htaccess} .htaccess, ` +

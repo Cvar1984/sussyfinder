@@ -13,7 +13,7 @@ const ROOT = path.join(__dirname, '..');
 const MAIN = path.join(ROOT, 'main.php');
 const SCORING_START = '// --- Client-side threat scoring';
 const SCORING_END = '// --- End client-side threat scoring ---';
-const LIB_END = '// test/run.js includes this file'; // end of the PHP main.php shares with the tests
+const LIB_END = '// The test scripts include this file'; // end of the PHP main.php shares with the tests
 const MAX_BUFFER = 1 << 28;
 
 // --- Command line ---
@@ -83,9 +83,14 @@ function parseRows(jsonl) {
     return [...byPath.values()];
 }
 
-/** main.php's $tokenNeedles (needle => weight), from the local php */
-function tokenWeights() {
-    return JSON.parse(execFileSync('php', ['-r', `define('SUSSY_LIB', true); include ${phpString(MAIN)}; echo json_encode($tokenNeedles);`]).toString());
+/** main.php's detection policy from the local php: { weights: $tokenNeedles, roles: $tokenRoles } */
+let policy = null;
+function tokenPolicy() {
+    if (!policy) {
+        const php = `define('SUSSY_LIB', true); include ${phpString(MAIN)}; echo jsonEncode(array('weights' => $tokenNeedles, 'roles' => $tokenRoles));`;
+        policy = JSON.parse(execFileSync('php', ['-r', php]).toString());
+    }
+    return policy;
 }
 
 // --- main.php's client-side scoring ---
@@ -101,10 +106,11 @@ function between(src, start, end) {
 
 /**
  * main.php's scoring block (calculateThreatScore, analyzeData, mlScore, ...),
- * run as-is in a vm context. `model` null scores rules only.
+ * run as-is in a vm context with the page's globals. `weights` and `roles`
+ * default to the local php's policy; `model` null scores rules only.
  */
-function loadScoring({ weights, model = null }) {
-    const ctx = vm.createContext({ tokenWeights: weights, ML_MODEL: model });
+function loadScoring({ weights, roles, model = null } = {}) {
+    const ctx = vm.createContext({ tokenWeights: weights || tokenPolicy().weights, tokenRoles: roles || tokenPolicy().roles, ML_MODEL: model });
     vm.runInContext(between(mainSource(), SCORING_START, SCORING_END), ctx);
     return ctx;
 }
@@ -180,7 +186,7 @@ const groupBy = (list, key) => {
 };
 
 module.exports = {
-    ROOT, MAIN, MAX_BUFFER, cli, phpString, phpJob, runResumable, execAsync, parseRows, tokenWeights,
+    ROOT, MAIN, MAX_BUFFER, cli, phpString, phpJob, runResumable, execAsync, parseRows, tokenPolicy,
     loadScoring, constant, readModel, extractorSource, loadCorpora, isCheckedOut, corpus,
     isRunnable, contentOnly, pct, rates, sha1, groupBy,
 };

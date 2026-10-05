@@ -9,8 +9,7 @@ include $SUSSY_MAIN;
 
 $cases = array();
 foreach (explode("\0", file_get_contents($SUSSY_CASES)) as $src) {
-    $t = getFileTokens($src);
-    $cases[] = array_values(array_unique(array_merge(compareTokens($tokenNeedles, tokenTextSet($t)), findStructuralSignals($t, $src, $tokenNeedles))));
+    $cases[] = matchTokens(getFileTokens($src), $src, $tokenNeedles);
 }
 
 $GLOBALS['phpWarnings'] = array();
@@ -32,4 +31,4 @@ foreach ($SUSSY_MODELS as $file) {
     $models[] = mlModelJson($file) !== 'null';
 }
 
-echo json_encode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models));
+echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models));

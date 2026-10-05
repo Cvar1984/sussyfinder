@@ -8,7 +8,7 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
@@ -18,135 +18,461 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-$minute = 60;
-$limit = (60 * $minute); // 60 minutes
-set_time_limit($limit);
-ini_set('memory_limit', '-1');
-ini_set('max_execution_time', $limit);
-ini_set('display_errors', 0);
-error_reporting(E_ALL);
+/*
+ * SussyFinder is this one file and runs on PHP 4.3 to 8.5. Its parts, in order:
+ *
+ *   1. Configuration     every setting and the detection policy (file pattern, needles)
+ *   2. Compatibility     what differs between PHP versions and hosts, normalised once
+ *   3. Utilities         small helpers used throughout
+ *   4. Detection engine  file listing, tokens, signals, ML features, feature rows
+ *   5. Network           one HTTP client; hash lists, ML model, Malware Hash Registry
+ *   6. Actions           the AJAX endpoints
+ *   7. Bootstrap         runs only when the file is served, not when included as a library
+ *   8. Page              HTML, CSS and the JS app
+ *
+ * The test scripts (test/) include it with define('SUSSY_LIB', true) to use
+ * parts 1-6 without serving anything.
+ */
 
-define('_WHITELIST_', true);
-define('_BLACKLIST_', true);
-define('_MHR_', true);
-define('_ML_', true); // ML second opinion; false skips its feature extraction (~40% less analysis time)
-// Where the ML weights come from (an http(s) URL or a local file path)
-define('_ML_MODEL_URL_', 'https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/ml-model.json');
-
-$mhrUsername = '';
-$mhrPassword = '';
-$GLOBALS['phpWarnings'] = array();
-$GLOBALS['mlWanted'] = true; // false when the page has no usable model (see 'process')
+// =============================================================================
+// 1. Configuration
+// =============================================================================
 
 /**
- * Summary of errorHandler
- * @param mixed $errno
- * @param mixed $errstr
- * @param mixed $errfile
- * @param mixed $errline
+ * Define a setting unless it is already defined. Every setting below can be
+ * overridden without editing this file: define it before this file runs, from
+ * a script that includes it or from php.ini's auto_prepend_file.
+ *
+ * @param string $name
+ * @param mixed $value
+ * @return void
+ */
+function settingDefault($name, $value)
+{
+    if (!defined($name)) {
+        define($name, $value);
+    }
+}
+
+settingDefault('_WHITELIST_', true);    // skip files whose MD5 is on the known-good list
+settingDefault('_BLACKLIST_', true);    // delete files whose MD5 is on the known-bad list
+settingDefault('_MHR_', true);          // Team Cymru Malware Hash Registry lookups
+settingDefault('_ML_', true);           // ML second opinion; false skips its feature extraction (~40% less analysis time)
+settingDefault('_MHR_USER_', '');       // MHR account; the page can also send one
+settingDefault('_MHR_PASS_', '');
+
+// Where the lists and the ML weights come from (http(s) URLs; the model may also be a local file)
+settingDefault('_REPO_RAW_', 'https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/');
+settingDefault('_WHITELIST_URL_', _REPO_RAW_ . 'whitelist.txt');
+settingDefault('_BLACKLIST_URL_', _REPO_RAW_ . 'blacklist.txt');
+settingDefault('_ML_MODEL_URL_', _REPO_RAW_ . 'ml-model.json');
+settingDefault('_MHR_URL_', 'https://hash.cymru.com/v2/submitHashes');
+
+settingDefault('TIME_LIMIT', 3600);          // seconds a request may run
+settingDefault('HTTP_CONNECT_TIMEOUT', 10);  // seconds
+settingDefault('HTTP_TIMEOUT', 30);          // seconds
+settingDefault('MHR_BATCH', 1000);           // hashes per MHR request (the API's limit)
+settingDefault('LONG_LINE_BYTES', 5000);     // a longer line is @long_line
+settingDefault('HALT_PAYLOAD_BYTES', 1024);  // more data after __halt_compiler() is @halt_payload
+
+// Hashed feature space for the ML model (a power of two; the model's weight count must match)
+define('ML_BUCKETS', 2048);
+// Bump whenever mlFeatures() changes what it emits: a model trained on other
+// features is refused (ml-model.json carries the version it was trained on)
+define('ML_FEATURE_VERSION', 2);
+
+// Which files to scan, matched against the file name: a PHP-ish or SSI last
+// extension, "php" as an inner extension ("x.php.jpg" and "x.php." run as PHP
+// under Apache's AddHandler), .htaccess, and the per-directory PHP config files
+$pattern = '/\.(ph[^.]+|sh[^.]+|inc|htaccess)$|\.(php[0-9]*|phtml|pht|phar)\.|^(\.user|php[0-9]*)\.ini$/i';
+
+// Needles: code tokens (and "@" structural signals, see findStructuralSignals())
+// by threat weight. The page's scoring adds these up; $tokenRoles says how
+// they combine.
+$tokenTiers = array(
+    // Critical RCE
+    '10.0' => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function', 'pcntl_fork',
+        'posix_kill', 'posix_setuid',
+        '`',             // backtick operator = shell_exec
+        '@input_call',   // $_GET['a']($_GET['b'])
+        '@preg_e',       // preg_replace('/.../e') evaluates the replacement
+        '@foreign_code', // ASP/JSP/CGI code in a PHP-named file
+    ),
+    // High obfuscation and de-encoding
+    '5.0' => array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'rawurldecode', 'urldecode',
+        'hex2bin', 'bin2hex', 'exif_read_data', 'readgzfile', '$SISTEMIT_COM_ENC',
+        '@concat_name',  // function name hidden in a string: 'ba'.'se64_decode', "\x73ystem"
+        '@halt_payload', // data appended after __halt_compiler()
+    ),
+    // Obfuscation helpers and I/O manipulation
+    '2.0' => array('assert', 'htmlspecialchars_decode', 'hexdec', 'chr', 'strrev', 'goto', 'extract', 'parse_str', 'popen',
+        'fsockopen', 'posix_setsid', 'posix_setpgid', 'proc_nice', 'proc_close', 'proc_terminate', 'apache_child_terminate',
+        'move_uploaded_file', '$_files', '$auth_pass', '$password', '$pass', 'proc_get_status', 'posix_mkfifo', 'php_uname',
+        '@dyn_call',     // call through a variable/expression: $f(), $a['x'](), (...)()
+        '@long_line',    // a line over LONG_LINE_BYTES
+    ),
+    // User input: everywhere in legit code, only matters in combination
+    '0.5' => array('$_get', '$_post', '$_request', '$_cookie', 'getallheaders'),
+    // Low / routine
+    '0.1' => array('preg_replace', // the dangerous /e form is scored as @preg_e
+        'call_user_func', 'call_user_func_array', 'register_shutdown_function', 'register_tick_function', 'implode', 'strtr',
+        'substr', 'mb_substr', 'str_replace', 'substr_replace', 'basename', 'getcwd', 'pathinfo', 'getenv', 'get_current_user',
+        'fileowner', 'filegroup', 'disk_free_space', 'disk_total_space', 'sys_get_temp_dir', 'fopen', 'file_put_contents',
+        'file_get_contents', 'url_get_contents', 'stream_get_meta_data', 'copy', 'include', 'require', 'include_once',
+        'require_once', '__file__', 'mail', 'putenv', 'curl_init', 'tmpfile', 'allow_url_fopen', 'ini_set', 'set_time_limit',
+        'session_start', 'symlink', '__halt_compiler', '__compiler_halt_offset__', 'error_reporting', 'get_magic_quotes_gpc',
+        'phpinfo', 'posix_getuid', 'posix_geteuid', 'posix_getegid', 'posix_getpwuid', 'posix_getgrgid', 'posix_getlogin',
+        'posix_ttyname', 'get_cfg_var', 'diskfreespace', 'getlastmod', 'getmyinode', 'getmypid', 'getmyuid', 'getmygid',
+        'mysql_connect', 'mysqli_connect', 'mysql_query', 'mysqli_query'),
+);
+
+// needle => weight, the form the engine and the page use
+$tokenNeedles = array();
+foreach ($tokenTiers as $weight => $needles) {
+    foreach ($needles as $needle) {
+        $tokenNeedles[$needle] = (float) $weight;
+    }
+}
+
+// How needles combine in the page's threat score (calculateThreatScore()):
+// critical + obfuscation, upload or input multiplies the score; obfuscation
+// and upload alone are dampened; two or more recon calls add a bonus.
+// "highlight" is only display: the needles shown in red in the results.
+$tokenRoles = array(
+    'critical'    => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function', '`',
+        '@input_call', '@preg_e', '@foreign_code'),
+    'obfuscation' => $tokenTiers['5.0'],
+    'upload'      => array('move_uploaded_file', '$_files', 'file_put_contents'),
+    'input'       => $tokenTiers['0.5'],
+    // Server reconnaissance: a webshell's header shows the box it landed on
+    'recon'       => array('php_uname', 'phpinfo', 'get_cfg_var', 'get_current_user', 'getmyuid', 'getmygid', 'getmypid',
+        'getmyinode', 'posix_getuid', 'posix_geteuid', 'posix_getegid', 'posix_getlogin', 'disk_total_space',
+        'disk_free_space', 'diskfreespace', 'getlastmod'),
+    'highlight'   => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function',
+        '`', '@input_call', '@preg_e', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex',
+        'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'),
+);
+
+// =============================================================================
+// 2. Compatibility
+// =============================================================================
+// Everything that differs between PHP 4.3 and 8.5, or between hosts, is
+// settled here once, so the code below can assume one environment.
+
+$GLOBALS['phpWarnings'] = array();
+
+/**
+ * Collect warnings instead of printing them: they reach the page or the AJAX
+ * response as a list, and unlinkWithReason() reads a failure's own message
+ * from it (PHP 4 has no error_get_last()).
+ *
  * @return bool
  */
-function errorHandler($errno, $errstr, $errfile, $errline) {
+function errorHandler($errno, $errstr, $errfile, $errline)
+{
     if (!(error_reporting() & $errno)) {
-        return false; // respect @ suppression — don't record intentionally-silenced failures
+        return false; // respect @ suppression
     }
     error_log($errstr . ' in ' . $errfile . ' on line ' . $errline);
     $GLOBALS['phpWarnings'][] = $errstr;
     return true;
 }
-
 set_error_handler('errorHandler');
+error_reporting(E_ALL);
 
-if (!function_exists('json_encode')) {
-    /**
-     * json_encode() for PHP < 5.2: null, bools, numbers, strings and
-     * (nested) arrays. Lists become [...], other arrays {...}. "/" is escaped
-     * like the native one so "</script>" can't end an inline <script> early.
-     *
-     * @param mixed $value
-     * @return string
-     */
-    function json_encode($value)
-    {
-        static $escape = null;
-        if ($escape === null) {
-            $escape = array('"' => '\\"', '\\' => '\\\\', '/' => '\\/');
-            for ($i = 0; $i < 0x20; $i++) {
-                $escape[chr($i)] = sprintf('\\u%04x', $i);
+/**
+ * Whether a function can be called: it exists and the host hasn't listed it
+ * in disable_functions (on PHP < 8 a disabled function still "exists").
+ *
+ * @param string $name
+ * @return bool
+ */
+function functionAvailable($name)
+{
+    static $disabled = null;
+    if ($disabled === null) {
+        $disabled = array();
+        foreach (explode(',', (string) ini_get('disable_functions')) as $function) {
+            $function = strtolower(trim($function));
+            if ($function !== '') {
+                $disabled[$function] = true;
             }
         }
-
-        if (is_null($value)) {
-            return 'null';
-        }
-        if (is_bool($value)) {
-            return $value ? 'true' : 'false';
-        }
-        if (is_int($value) || is_float($value)) {
-            return str_replace(',', '.', (string) $value); // locales with a decimal comma
-        }
-        if (!is_array($value)) {
-            return '"' . strtr((string) $value, $escape) . '"';
-        }
-
-        $isList = true;
-        $expected = 0;
-        foreach ($value as $key => $item) {
-            if ($key !== $expected++) {
-                $isList = false;
-                break;
-            }
-        }
-        $parts = array();
-        foreach ($value as $key => $item) {
-            if ($isList) {
-                $parts[] = json_encode($item);
-            } else {
-                $parts[] = json_encode((string) $key) . ':' . json_encode($item);
-            }
-        }
-        if ($isList) {
-            return '[' . implode(',', $parts) . ']';
-        }
-        return '{' . implode(',', $parts) . '}';
     }
+    return function_exists($name) && !isset($disabled[strtolower($name)]);
 }
 
 /**
- * Check if function is available
+ * Call a function only when the host allows it (set_time_limit, ini_set and
+ * the like are often disabled). Extra arguments are passed on.
  *
- * @param callable $callback
- * @return boolean
+ * @param string $name
+ * @return mixed false when the function isn't available
  */
-function isWorking($callback)
+function callIfAvailable($name)
 {
-    $securityDisabled = ini_get('disable_functions');
-    $securityDisabled = explode(',', $securityDisabled);
-
-    if (in_array($callback, $securityDisabled)) {
+    if (!functionAvailable($name)) {
         return false;
     }
-    if (!function_exists($callback)) {
-        return false;
-    }
-    return true;
+    $args = func_get_args();
+    return call_user_func_array($name, array_slice($args, 1));
 }
 
-if (isWorking('curl_exec')) {
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    // Verified TLS: the downloaded blacklist deletes files, so it must really come from GitHub
-    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-    curl_setopt_array($ch, array(
-        CURLOPT_HTTPHEADER => array(
-            'Cache-Control: no-cache, no-store, must-revalidate',
-            'Pragma: no-cache',
-            'Expires: 0'
-        )
-    ));
+callIfAvailable('ini_set', 'display_errors', '0');
+// PHP < 5.4 can add slashes to every file read (magic_quotes_runtime)
+if (function_exists('get_magic_quotes_runtime') && @get_magic_quotes_runtime()) {
+    @set_magic_quotes_runtime(0);
 }
+
+// Token ids this PHP doesn't have become distinct negative numbers, which
+// token_get_all() never returns, so the token code needs no version checks.
+// (0 means a single-character token in this file.)
+$compatTokenId = -1;
+foreach (array('T_DOC_COMMENT', 'T_ML_COMMENT', 'T_NULLSAFE_OBJECT_OPERATOR', 'T_NS_SEPARATOR', 'T_NAMESPACE',
+    'T_NAME_QUALIFIED', 'T_NAME_FULLY_QUALIFIED', 'T_NAME_RELATIVE', 'T_ATTRIBUTE', 'T_MATCH', 'T_ENUM', 'T_READONLY',
+    'T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG', 'T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG') as $compatToken) {
+    if (!defined($compatToken)) {
+        define($compatToken, $compatTokenId--);
+    }
+}
+unset($compatTokenId, $compatToken);
+
+/**
+ * JSON for PHP < 5.2, or a host that disabled json_encode: null, bools,
+ * numbers, strings and (nested) arrays. Lists become [...], other arrays
+ * {...}. "/" is escaped like the native one so "</script>" can't end an
+ * inline <script> early. Never named json_encode: PHP 5/7 can't redefine a
+ * disabled built-in.
+ *
+ * @param mixed $value
+ * @return string
+ */
+function jsonEncodeFallback($value)
+{
+    static $escape = null;
+    if ($escape === null) {
+        $escape = array('"' => '\\"', '\\' => '\\\\', '/' => '\\/');
+        for ($i = 0; $i < 0x20; $i++) {
+            $escape[chr($i)] = sprintf('\\u%04x', $i);
+        }
+    }
+    if (is_null($value)) {
+        return 'null';
+    }
+    if (is_bool($value)) {
+        return $value ? 'true' : 'false';
+    }
+    if (is_int($value) || is_float($value)) {
+        return str_replace(',', '.', (string) $value); // locales with a decimal comma
+    }
+    if (!is_array($value)) {
+        return '"' . strtr((string) $value, $escape) . '"';
+    }
+    $isList = true;
+    $expected = 0;
+    foreach ($value as $key => $item) {
+        if ($key !== $expected++) {
+            $isList = false;
+            break;
+        }
+    }
+    $parts = array();
+    foreach ($value as $key => $item) {
+        $parts[] = $isList ? jsonEncodeFallback($item) : jsonEncodeFallback((string) $key) . ':' . jsonEncodeFallback($item);
+    }
+    return $isList ? '[' . implode(',', $parts) . ']' : '{' . implode(',', $parts) . '}';
+}
+
+/**
+ * The one way this file writes JSON (AJAX responses, page data). Strings are
+ * made valid UTF-8 first, since json_encode() fails on invalid bytes (false
+ * on 5.5+, a warning and null before).
+ *
+ * @param mixed $value
+ * @return string
+ */
+function jsonEncode($value)
+{
+    $value = utf8Safe($value);
+    if (functionAvailable('json_encode')) {
+        $json = json_encode($value);
+        if (is_string($json)) {
+            return $json;
+        }
+    }
+    return jsonEncodeFallback($value);
+}
+
+/**
+ * Undo magic_quotes_gpc (PHP < 5.4 escapes quotes, backslashes and NUL in
+ * request values) so every value arrives exactly as sent.
+ *
+ * @param mixed $value
+ * @return mixed
+ */
+function stripRequestSlashes($value)
+{
+    if (is_array($value)) {
+        foreach ($value as $key => $item) {
+            $value[$key] = stripRequestSlashes($item);
+        }
+        return $value;
+    }
+    return is_string($value) ? stripslashes($value) : $value;
+}
+
+// =============================================================================
+// 3. Utilities
+// =============================================================================
+
+/**
+ * Make every string in $value valid UTF-8 for JSON. Invalid strings are read
+ * as Latin-1. Only for text shown to the user: paths travel rawurlencode()d,
+ * so they survive byte for byte.
+ *
+ * @param mixed $value
+ * @return mixed
+ */
+function utf8Safe($value)
+{
+    if (is_array($value)) {
+        foreach ($value as $key => $item) {
+            $value[$key] = utf8Safe($item);
+        }
+        return $value;
+    }
+    if (!is_string($value) || preg_match('//u', $value)) {
+        return $value;
+    }
+    $out = '';
+    $len = strlen($value);
+    for ($i = 0; $i < $len; $i++) {
+        $byte = ord($value[$i]);
+        $out .= $byte < 0x80 ? $value[$i] : chr(0xC0 | ($byte >> 6)) . chr(0x80 | ($byte & 0x3F));
+    }
+    return $out;
+}
+
+/**
+ * Length of the longest line, without splitting the content into an array.
+ *
+ * @param string $content
+ * @return int
+ */
+function maxLineLength($content)
+{
+    $max = 0;
+    $start = 0;
+    $length = strlen($content);
+    while ($start <= $length) {
+        $end = strpos($content, "\n", $start);
+        if ($end === false) {
+            $end = $length;
+        }
+        if ($end - $start > $max) {
+            $max = $end - $start;
+        }
+        $start = $end + 1;
+    }
+    return $max;
+}
+
+/**
+ * Shannon entropy in bits per byte (0 = one repeated byte, 8 = random)
+ *
+ * @param string $data
+ * @return float
+ */
+function shannonEntropy($data)
+{
+    $len = strlen($data);
+    $entropy = 0.0;
+    if ($len == 0) {
+        return $entropy;
+    }
+    foreach (count_chars($data, 1) as $count) {
+        $p = $count / $len;
+        $entropy -= $p * log($p) / log(2);
+    }
+    return $entropy;
+}
+
+/**
+ * Delete a file and return the specific failure reason (e.g. "unlink(...):
+ * Permission denied") instead of a generic one. The captured warning is
+ * consumed, so it surfaces once, attached to the file, rather than also in
+ * the general warnings list.
+ *
+ * @param string $filePath
+ * @return string|null null on success, the reason on failure
+ */
+function unlinkWithReason($filePath)
+{
+    $before = count($GLOBALS['phpWarnings']);
+    if (unlink($filePath)) {
+        return null;
+    }
+    if (count($GLOBALS['phpWarnings']) > $before) {
+        $captured = array_splice($GLOBALS['phpWarnings'], $before);
+        return end($captured);
+    }
+    return 'Failed to unlink';
+}
+
+/**
+ * An error response for the page: a short code and a message to show.
+ *
+ * @param string $code
+ * @param string $msg
+ * @return array
+ */
+function ajaxError($code, $msg)
+{
+    return array('error' => $code, 'msg' => $msg);
+}
+
+/**
+ * A request value as a string, or $default when it's missing.
+ *
+ * @param string $key
+ * @param mixed $default
+ * @return mixed
+ */
+function inputValue($key, $default = null)
+{
+    return (isset($_POST[$key]) && is_string($_POST[$key])) ? $_POST[$key] : $default;
+}
+
+/**
+ * A request value holding a comma-separated list. One field (unlike
+ * x[]=...) stays clear of max_input_vars however many entries it holds.
+ * Entries that may contain commas (paths) travel rawurlencode()d. (NUL was
+ * used before, but hardened hosts drop request values containing NUL, e.g.
+ * Suhosin's default disallow_nul.)
+ *
+ * @param string $key
+ * @return array
+ */
+function postList($key)
+{
+    $value = inputValue($key, '');
+    return $value === '' ? array() : explode(',', $value);
+}
+
+/**
+ * A list of paths sent rawurlencode()d, decoded.
+ *
+ * @param string $key
+ * @return array
+ */
+function postPathList($key)
+{
+    return array_map('rawurldecode', postList($key));
+}
+
+// =============================================================================
+// 4. Detection engine
+// =============================================================================
 
 /**
  * Collect the files under $directory whose name matches $pattern into
@@ -207,20 +533,6 @@ function recursiveScan($directory, $pattern, $root, &$entries, &$visited)
 }
 
 /**
- *
- * Sort array of list file by lastest modified time
- *
- * @param array  $files Array of files
- * @return array
- *
- */
-function sortByLastModified($files)
-{
-    @array_multisort(array_map('filemtime', $files), SORT_DESC, $files);
-    return $files;
-}
-
-/**
  * List the files under $path whose name matches $pattern, readable ones
  * newest first.
  *
@@ -242,7 +554,7 @@ function getSortedByPattern($path, $pattern)
     }
     $visited = array();
     recursiveScan($root, $pattern, str_replace(DIRECTORY_SEPARATOR, '/', $root), $entries, $visited);
-    $entries['file_readable'] = sortByLastModified($entries['file_readable']);
+    @array_multisort(array_map('filemtime', $entries['file_readable']), SORT_DESC, $entries['file_readable']);
     return $entries;
 }
 
@@ -251,6 +563,10 @@ function getSortedByPattern($path, $pattern)
  * `...` and heredocs only variables and {$...} expressions are kept: the rest
  * is literal text, which PHP 4/5.0 (and array keys in "$a[key]" on any
  * version) hand out as T_STRING tokens that would otherwise read as code.
+ * PHP 8's new tokens are turned back into PHP 7's, so 7.x and 8.x see the
+ * same tokens: namespaced names are split (T_NS_SEPARATOR, T_STRING, ...),
+ * "&" is one character again, match/enum/readonly are T_STRING, and
+ * #[attributes] are left out (comments to PHP 7, metadata to PHP 8).
  *
  * @param string $fileContent
  * @return array token_get_all() output minus literal string text
@@ -258,17 +574,34 @@ function getSortedByPattern($path, $pattern)
 function getFileTokens($fileContent)
 {
     $fileContent = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $fileContent);
-    // Short open tags ("<?if(...)", "<? echo") become "<?php " so detection doesn't
-    // depend on this host's short_open_tag; "<?=", "<?php" and "<?xml" stay as they are
-    $fileContent = preg_replace('/<\?(?!php|=|xml)/i', '<?php ', $fileContent);
-    $tokens = @token_get_all($fileContent); // https://www.php.net/manual/en/function.token-get-all.php
+    // Short open tags ("<?if(...)", "<? echo") become "<?php " and "<?xml" stops
+    // being one, so detection doesn't depend on this host's short_open_tag
+    $fileContent = preg_replace(array('/<\?(?!php|=|xml)/i', '/<\?(xml)/i'), array('<?php ', '< ?$1'), $fileContent);
+    $tokens = @token_get_all($fileContent);
 
     $output = array();
-    $quote = null;  // closing '"' or '`', or T_END_HEREDOC, while inside a string
-    $depth = 0;     // brace depth inside a {$...} expression
+    $quote = null;      // closing '"' or '`', or T_END_HEREDOC, while inside a string
+    $depth = 0;         // brace depth inside a {$...} expression
+    $attribute = 0;     // bracket depth inside a #[...] attribute
+    $ampersand = array(T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG => true, T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG => true);
+    $keyword = array(T_MATCH => true, T_ENUM => true, T_READONLY => true);
     foreach ($tokens as $token) {
         $id = is_array($token) ? $token[0] : 0;
         $text = is_array($token) ? $token[1] : $token;
+        if ($attribute > 0 || $id == T_ATTRIBUTE) {
+            if ($text == '[' || $id == T_ATTRIBUTE) {
+                $attribute++;
+            } elseif ($text == ']') {
+                $attribute--;
+            }
+            continue;
+        }
+        if (isset($ampersand[$id])) {
+            $id = 0;
+            $token = $text;
+        } elseif (isset($keyword[$id])) {
+            $token = array(T_STRING, $text);
+        }
         if ($depth > 0) {
             if ($text == '{') {
                 $depth++;
@@ -288,42 +621,97 @@ function getFileTokens($fileContent)
         } elseif ($id == 0 && ($text == '"' || $text == '`')) {
             $quote = $text;
         }
+        if ($id == T_NAME_QUALIFIED || $id == T_NAME_FULLY_QUALIFIED || $id == T_NAME_RELATIVE) {
+            foreach (splitName($text) as $part) {
+                $output[] = $part;
+            }
+            continue;
+        }
         $output[] = $token;
     }
     return $output;
 }
 
 /**
+ * PHP 8's single token for a namespaced name ("\foo\bar", "foo\bar",
+ * "namespace\foo") as the tokens PHP 7 gives for it.
+ *
+ * @param string $name
+ * @return array
+ */
+function splitName($name)
+{
+    $tokens = array();
+    $parts = explode('\\', $name);
+    foreach ($parts as $i => $part) {
+        if ($i > 0) {
+            $tokens[] = array(T_NS_SEPARATOR, '\\');
+        }
+        if ($part !== '') {
+            $tokens[] = array(($i == 0 && strtolower($part) == 'namespace') ? T_NAMESPACE : T_STRING, $part);
+        }
+    }
+    return $tokens;
+}
+
+/**
+ * Token ids that carry no code: whitespace and comments.
+ *
+ * @return array id => true
+ */
+function insignificantTokenIds()
+{
+    return array(T_WHITESPACE => true, T_COMMENT => true, T_DOC_COMMENT => true, T_ML_COMMENT => true);
+}
+
+/**
+ * Tokens that make a following T_STRING a member or declaration name
+ * (->exec(), ::system(), function eval()), not a call to a global function.
+ *
+ * @return array id => true
+ */
+function memberTokenIds()
+{
+    return array(T_OBJECT_OPERATOR => true, T_NULLSAFE_OBJECT_OPERATOR => true, T_PAAMAYIM_NEKUDOTAYIM => true, T_FUNCTION => true);
+}
+
+/**
+ * The tokens that carry code, as array(id, text) pairs; a single-character
+ * token gets id 0.
+ *
+ * @param array $tokens getFileTokens() output
+ * @return array
+ */
+function significantTokens($tokens)
+{
+    $skip = insignificantTokenIds();
+    $sig = array();
+    foreach ($tokens as $token) {
+        if (!is_array($token)) {
+            $sig[] = array(0, $token);
+        } elseif (!isset($skip[$token[0]])) {
+            $sig[] = $token;
+        }
+    }
+    return $sig;
+}
+
+/**
  * Lowercased, trimmed, de-duplicated code token texts as a lookup set.
  * String/HTML/comment content is left out ("...`{$t}`..." would otherwise
- * yield a lone "`"), as are method/function names (->exec(), ::system(),
- * function eval()) since those aren't the global functions. A leading "\"
- * is dropped so PHP 8's fully-qualified "\system" still matches "system".
+ * yield a lone "`"), as are member and declaration names (->exec(),
+ * ::system(), function eval()), since those aren't the global functions.
  *
- * @param array $tokens token_get_all() output
+ * @param array $tokens getFileTokens() output
  * @return array text => true
  */
 function tokenTextSet($tokens)
 {
-    $ignore = array(T_WHITESPACE => 1, T_COMMENT => 1);
-    $content = array(T_ENCAPSED_AND_WHITESPACE => 1, T_INLINE_HTML => 1);
-    $member = array(T_OBJECT_OPERATOR => 1, T_PAAMAYIM_NEKUDOTAYIM => 1, T_FUNCTION => 1);
-    if (defined('T_DOC_COMMENT')) {
-        $ignore[constant('T_DOC_COMMENT')] = 1;
-    }
-    if (defined('T_NULLSAFE_OBJECT_OPERATOR')) {
-        $member[constant('T_NULLSAFE_OBJECT_OPERATOR')] = 1;
-    }
-
+    $content = array(T_ENCAPSED_AND_WHITESPACE => true, T_INLINE_HTML => true);
+    $member = memberTokenIds();
     $set = array();
     $prev = 0;
-    foreach ($tokens as $token) {
-        if (!is_array($token)) {
-            $token = array(0, $token);
-        }
-        if (isset($ignore[$token[0]])) {
-            continue;
-        }
+    foreach (significantTokens($tokens) as $token) {
         if (!isset($content[$token[0]]) && !($token[0] == T_STRING && isset($member[$prev]))) {
             $set[ltrim(strtolower(trim($token[1])), '\\')] = true;
         }
@@ -334,7 +722,7 @@ function tokenTextSet($tokens)
 }
 
 /**
- * Return the needles (keys of the weight map) present in a token set
+ * The needles (keys of the weight map) present in a token set
  *
  * @param array $tokenNeedles needle => weight
  * @param array $tokenSet from tokenTextSet()
@@ -349,6 +737,22 @@ function compareTokens($tokenNeedles, $tokenSet)
         }
     }
     return $output;
+}
+
+/**
+ * Everything a file matches: needles found as tokens plus structural signals.
+ *
+ * @param array $tokens getFileTokens() output
+ * @param string $content
+ * @param array $tokenNeedles
+ * @return array
+ */
+function matchTokens($tokens, $content, $tokenNeedles)
+{
+    return array_values(array_unique(array_merge(
+        compareTokens($tokenNeedles, tokenTextSet($tokens)),
+        findStructuralSignals($tokens, $content, $tokenNeedles)
+    )));
 }
 
 /**
@@ -367,12 +771,61 @@ function stringTokenValue($text)
 }
 
 /**
+ * Whether a file holds any PHP: any "<?" except "<?xml" ("<?$d=..." is PHP).
+ *
+ * @param string $content
+ * @return bool
+ */
+function hasPhpCode($content)
+{
+    return (bool) preg_match('/<\?(?!xml)/i', $content);
+}
+
+/**
+ * Whether a file holds server code in another language: an ASP/JSP directive
+ * or ASP/JSP code using its server objects, or a Perl CGI script.
+ *
+ * @param string $content
+ * @return bool
+ */
+function hasForeignServerCode($content)
+{
+    return (bool) (preg_match('/<%@\s*(page|language)\b|<%.*?(Response\.Write|CreateObject|Server\.MapPath|Request\.(Form|QueryString)|WScript\.Shell|FileSystemObject|Runtime\.getRuntime|java\.io\.)/is', $content) ||
+        preg_match('/^#!.*\bperl\b|^\s*use CGI\b/m', $content));
+}
+
+/**
+ * Index of the variable an indexed call reads from: for "$a['x'][0](" with
+ * $close at the last "]", walk back over each [...] to the token before it.
+ *
+ * @param array $sig significantTokens() output
+ * @param int $close index of the last "]"
+ * @return int index of the token before the first "[" (-1 if none)
+ */
+function indexedBase($sig, $close)
+{
+    $j = $close;
+    while ($j >= 0 && $sig[$j][1] == ']') {
+        $depth = 0;
+        for (; $j >= 0; $j--) {
+            if ($sig[$j][1] == ']') {
+                $depth++;
+            } elseif ($sig[$j][1] == '[' && --$depth == 0) {
+                break;
+            }
+        }
+        $j--;
+    }
+    return $j;
+}
+
+/**
  * Detect code shapes that plain token matching can't see. Returns
  * "@"-prefixed pseudo-needles (no PHP token is "@" + letters, so they never
  * collide with real ones) plus any needle function name that was hidden in
  * a string: 'ba'.'se64_decode', "\x73ystem", 'system'('id').
  *
- * @param array  $tokens       token_get_all() output
+ * @param array  $tokens       getFileTokens() output
  * @param string $content      raw file content
  * @param array  $tokenNeedles needle => weight
  * @return array
@@ -381,29 +834,23 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
 {
     $needleSet = array_change_key_case($tokenNeedles, CASE_LOWER);
     $inputVars = array('$_get' => 1, '$_post' => 1, '$_request' => 1, '$_cookie' => 1, '$_server' => 1, '$_files' => 1);
-    $skip = array(T_WHITESPACE => 1, T_COMMENT => 1);
-    if (defined('T_DOC_COMMENT')) {
-        $skip[constant('T_DOC_COMMENT')] = 1;
-    }
 
-    // Significant tokens only, as (id, text); single-char tokens get id 0
+    // Code up to __halt_compiler(); what follows it is data
     $sig = array();
     $haltBytes = -1;
+    $skip = insignificantTokenIds();
     foreach ($tokens as $token) {
         if (!is_array($token)) {
             $token = array(0, $token);
         }
         if ($haltBytes >= 0) {
             $haltBytes += strlen($token[1]);
-            continue;
+        } elseif (!isset($skip[$token[0]])) {
+            if (strtolower($token[1]) == '__halt_compiler') {
+                $haltBytes = 0;
+            }
+            $sig[] = $token;
         }
-        if (isset($skip[$token[0]])) {
-            continue;
-        }
-        if (strtolower($token[1]) == '__halt_compiler') {
-            $haltBytes = 0;
-        }
-        $sig[] = $token;
     }
 
     $found = array();
@@ -435,7 +882,7 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
         }
 
         // preg_replace('/.../e', ...) evaluates the replacement as PHP
-        if ($id == T_STRING && ltrim(strtolower($text), '\\') == 'preg_replace' && $i + 2 < $n && $sig[$i + 1][1] == '(' && $sig[$i + 2][0] == T_CONSTANT_ENCAPSED_STRING) {
+        if ($id == T_STRING && strtolower($text) == 'preg_replace' && $i + 2 < $n && $sig[$i + 1][1] == '(' && $sig[$i + 2][0] == T_CONSTANT_ENCAPSED_STRING) {
             $regex = stringTokenValue($sig[$i + 2][1]);
             $delim = substr($regex, 0, 1);
             $pairs = array('(' => ')', '[' => ']', '{' => '}', '<' => '>');
@@ -460,22 +907,7 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
             } elseif ($prev[1] == ')') {
                 $found['@dyn_call'] = true;
             } elseif ($prev[1] == ']') {
-                // Walk back over [..][..] to the variable being indexed
-                $j = $i - 1;
-                while ($j >= 0 && $sig[$j][1] == ']') {
-                    $depth = 0;
-                    for (; $j >= 0; $j--) {
-                        if ($sig[$j][1] == ']') {
-                            $depth++;
-                        } elseif ($sig[$j][1] == '[') {
-                            $depth--;
-                            if ($depth == 0) {
-                                break;
-                            }
-                        }
-                    }
-                    $j--;
-                }
+                $j = indexedBase($sig, $i - 1);
                 if ($j >= 0 && $sig[$j][0] == T_VARIABLE) {
                     $found['@dyn_call'] = true;
                     if (isset($inputVars[strtolower($sig[$j][1])])) {
@@ -486,77 +918,21 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
         }
     }
 
-    // Packed payloads tend to sit on one huge line
-    $maxLine = 0;
-    foreach (explode("\n", $content) as $line) {
-        if (strlen($line) > $maxLine) {
-            $maxLine = strlen($line);
-        }
-    }
     // ASP/JSP/CGI shell code in a file named like PHP (no PHP in it at all):
     // nothing for the PHP checks above to see
     if (!hasPhpCode($content) && hasForeignServerCode($content)) {
         $found['@foreign_code'] = true;
     }
-    if ($maxLine > 5000) {
+    // Packed payloads tend to sit on one huge line
+    if (maxLineLength($content) > LONG_LINE_BYTES) {
         $found['@long_line'] = true;
     }
-    if ($haltBytes > 1024) {
+    if ($haltBytes > HALT_PAYLOAD_BYTES) {
         $found['@halt_payload'] = true;
     }
 
     return array_keys($found);
 }
-/**
- * Whether a file holds any PHP: any "<?" except "<?xml" ("<?$d=..." is PHP).
- *
- * @param string $content
- * @return bool
- */
-function hasPhpCode($content)
-{
-    return (bool) preg_match('/<\?(?!xml)/i', $content);
-}
-
-/**
- * Whether a file holds server code in another language: an ASP/JSP directive
- * or ASP/JSP code using its server objects, or a Perl CGI script.
- *
- * @param string $content
- * @return bool
- */
-function hasForeignServerCode($content)
-{
-    return (bool) (preg_match('/<%@\s*(page|language)\b|<%.*?(Response\.Write|CreateObject|Server\.MapPath|Request\.(Form|QueryString)|WScript\.Shell|FileSystemObject|Runtime\.getRuntime|java\.io\.)/is', $content) ||
-        preg_match('/^#!.*\bperl\b|^\s*use CGI\b/m', $content));
-}
-
-/**
- * Shannon entropy in bits per byte (0 = one repeated byte, 8 = random)
- *
- * @param string $data
- * @return float
- */
-function shannonEntropy($data)
-{
-    $len = strlen($data);
-    $entropy = 0.0;
-    if ($len == 0) {
-        return $entropy;
-    }
-    foreach (count_chars($data, 1) as $count) {
-        $p = $count / $len;
-        $entropy -= $p * log($p) / log(2);
-    }
-    return $entropy;
-}
-
-// Hashed feature space for the ML model (a power of two; the model's weight
-// count must match, see test/train-ml.js)
-define('ML_BUCKETS', 2048);
-// Bump whenever mlFeatures() changes what it emits: a model trained on other
-// features is refused (ml-model.json carries the version it was trained on)
-define('ML_FEATURE_VERSION', 1);
 
 /**
  * Binary feature vector for the client-side ML model, as a hex bitmap of
@@ -572,26 +948,11 @@ define('ML_FEATURE_VERSION', 1);
  */
 function mlFeatures($tokens, $content, $entropy)
 {
-    $skip = array(T_WHITESPACE => 1, T_COMMENT => 1);
-    if (defined('T_DOC_COMMENT')) {
-        $skip[constant('T_DOC_COMMENT')] = 1;
-    }
-    $member = array(T_OBJECT_OPERATOR => 1, T_PAAMAYIM_NEKUDOTAYIM => 1, T_FUNCTION => 1, T_NEW => 1);
-    if (defined('T_NULLSAFE_OBJECT_OPERATOR')) {
-        $member[constant('T_NULLSAFE_OBJECT_OPERATOR')] = 1;
-    }
+    $member = memberTokenIds();
+    $member[T_NEW] = true;
+    $sig = significantTokens($tokens);
 
     $names = array();
-    $sig = array();
-    foreach ($tokens as $token) {
-        if (!is_array($token)) {
-            $token = array(0, $token);
-        }
-        if (!isset($skip[$token[0]])) {
-            $sig[] = $token;
-        }
-    }
-
     $set = array();
     $prev = 'START';
     $n = count($sig);
@@ -629,14 +990,8 @@ function mlFeatures($tokens, $content, $entropy)
         }
     }
 
-    $maxLine = 0;
-    foreach (explode("\n", $content) as $line) {
-        if (strlen($line) > $maxLine) {
-            $maxLine = strlen($line);
-        }
-    }
     // Bit lengths, i.e. log2 buckets, in integer math so no PHP build rounds differently
-    $set['f:line' . strlen(decbin($maxLine))] = 1;
+    $set['f:line' . strlen(decbin(maxLineLength($content)))] = 1;
     $set['f:tok' . strlen(decbin($n))] = 1;
     $set['f:ent' . (int) ($entropy * 4)] = 1;
 
@@ -654,19 +1009,278 @@ function mlFeatures($tokens, $content, $entropy)
 }
 
 /**
+ * A feature row as the page expects it; $fields override the defaults, which
+ * describe a file that couldn't be read.
+ *
+ * @param string $path
+ * @param array $fields
+ * @return array
+ */
+function featureRow($path, $fields)
+{
+    $row = array(
+        'path'           => $path,
+        'size'           => null,
+        'mtime'          => 0,
+        'ctime'          => 0,
+        'owner'          => null,
+        'entropy'        => null,
+        'total_tokens'   => null,
+        'ml_features'    => null,
+        'matched_tokens' => array('NOT_READABLE'),
+        'md5'            => 'N/A',
+        'is_blacklisted' => false,
+        'is_htaccess'    => false,
+        'has_php'        => null,
+        'duplicate_of'   => false,
+        'error'          => null,
+        'is_unreadable'  => true,
+    );
+    foreach ($fields as $key => $value) {
+        $row[$key] = $value;
+    }
+    return $row;
+}
+
+/**
+ * Analyse readable files into feature rows: token matching, structural
+ * signals, entropy, ML features, list membership and duplicate-of. Files
+ * whose MD5 is whitelisted are left out. Deleting blacklisted files is the
+ * caller's business (actionProcess()).
+ *
+ * @param array $paths
+ * @param array $whitelistMD5Sums md5 => anything
+ * @param array $blacklistMD5Sums md5 => anything
+ * @param array $tokenNeedles
+ * @param array $localSeen md5 => first path seen with it; read and updated in place
+ * @param bool $withMl compute ml_features (default: when _ML_ is on)
+ * @return array feature rows
+ */
+function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenNeedles, &$localSeen, $withMl = null)
+{
+    if ($withMl === null) {
+        $withMl = _ML_;
+    }
+    $rows = array();
+    foreach ($paths as $filePath) {
+        if (!file_exists($filePath) || !is_readable($filePath)) {
+            trigger_error('Skipped ' . $filePath . ': it no longer exists or is not readable', E_USER_WARNING);
+            continue;
+        }
+        $content = file_get_contents($filePath);
+        if ($content === false) {
+            $rows[] = scanUnreadablePath($filePath);
+            continue;
+        }
+        $md5 = md5($content);
+        if (isset($whitelistMD5Sums[$md5])) {
+            continue;
+        }
+
+        $duplicateOf = false;
+        if (isset($localSeen[$md5])) {
+            $duplicateOf = $localSeen[$md5];
+        } else {
+            $localSeen[$md5] = $filePath;
+        }
+        $tokens = getFileTokens($content);
+        $entropy = shannonEntropy($content);
+        $rows[] = featureRow($filePath, array(
+            'size'           => strlen($content),
+            'mtime'          => filemtime($filePath),
+            'ctime'          => filectime($filePath),
+            'owner'          => fileowner($filePath),
+            'entropy'        => $entropy,
+            'total_tokens'   => count(tokenTextSet($tokens)),
+            'ml_features'    => $withMl ? mlFeatures($tokens, $content, $entropy) : null,
+            'matched_tokens' => matchTokens($tokens, $content, $tokenNeedles),
+            'md5'            => $md5,
+            'is_blacklisted' => isset($blacklistMD5Sums[$md5]),
+            'is_htaccess'    => substr($filePath, -9) == '.htaccess', // PATHINFO_EXTENSION is PHP 5.2+
+            'has_php'        => hasPhpCode($content),
+            'duplicate_of'   => $duplicateOf,
+            'is_unreadable'  => false,
+        ));
+    }
+    return $rows;
+}
+
+/**
+ * Feature row for a path that could not be read.
+ *
+ * @param string $filePath
+ * @return array
+ */
+function scanUnreadablePath($filePath)
+{
+    $mtime = @filemtime($filePath);
+    return featureRow($filePath, array('mtime' => $mtime ? $mtime : 0));
+}
+
+// =============================================================================
+// 5. Network
+// =============================================================================
+
+/**
+ * One HTTP(S) request, over cURL or else PHP's URL streams, whichever the host
+ * allows. TLS is always verified: the downloaded blacklist deletes files, so
+ * it must really come from GitHub. Each call gets a fresh cURL handle, so one
+ * request's method, body or credentials can't leak into the next. HTTP/1.1:
+ * hash.cymru.com's HTTP/2 endpoint drops streams mid-response.
+ *
+ * @param string $url
+ * @param string|null $body POST body; null for a GET
+ * @param array $headers extra request headers
+ * @return array|false array('status' => int, 'body' => string), false when unreachable
+ */
+function httpRequest($url, $body = null, $headers = array())
+{
+    $headers = array_merge(array('Cache-Control: no-cache, no-store, must-revalidate', 'Pragma: no-cache'), $headers);
+    $tried = false;
+    if (functionAvailable('curl_init') && functionAvailable('curl_exec') && functionAvailable('curl_setopt')) {
+        $tried = true;
+        $ch = curl_init($url);
+        $options = array(
+            CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true, CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_CONNECTTIMEOUT => HTTP_CONNECT_TIMEOUT, CURLOPT_TIMEOUT => HTTP_TIMEOUT,
+        );
+        if (defined('CURL_HTTP_VERSION_1_1')) {
+            $options[CURLOPT_HTTP_VERSION] = constant('CURL_HTTP_VERSION_1_1');
+        }
+        if ($body !== null) {
+            $options[CURLOPT_POST] = true;
+            $options[CURLOPT_POSTFIELDS] = $body;
+        }
+        foreach ($options as $option => $value) { // curl_setopt_array() is PHP 5.1.3+
+            curl_setopt($ch, $option, $value);
+        }
+        $response = curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($ch);
+        if (version_compare(PHP_VERSION, '8.0', '<')) { // a no-op since 8.0, deprecated in 8.5
+            curl_close($ch);
+        }
+        if (is_string($response)) {
+            return array('status' => $status, 'body' => $response);
+        }
+        trigger_error('cURL could not fetch ' . $url . ': ' . $error, E_USER_WARNING);
+    }
+    if (ini_get('allow_url_fopen')) {
+        $tried = true;
+        $http = array('header' => implode("\r\n", $headers), 'ignore_errors' => true, 'timeout' => HTTP_TIMEOUT);
+        if ($body !== null) {
+            $http['method'] = 'POST';
+            $http['content'] = $body;
+        }
+        $context = stream_context_create(array('http' => $http, 'ssl' => array('verify_peer' => true, 'verify_peer_name' => true)));
+        $fp = @fopen($url, 'rb', false, $context);
+        if (!$fp && $body === null && version_compare(PHP_VERSION, '5', '<')) {
+            $fp = @fopen($url, 'rb'); // PHP 4's fopen() takes no context
+        }
+        if ($fp) {
+            // The response headers, read here rather than from $http_response_header,
+            // which PHP 8.5 deprecates
+            $meta = stream_get_meta_data($fp);
+            $response = '';
+            while (!feof($fp)) {
+                $chunk = fread($fp, 65536);
+                if ($chunk === false || $chunk === '') {
+                    break;
+                }
+                $response .= $chunk;
+            }
+            fclose($fp);
+            $status = 0;
+            $lines = isset($meta['wrapper_data']) ? $meta['wrapper_data'] : array();
+            if (isset($lines['headers'])) {
+                $lines = $lines['headers']; // the cURL stream wrapper's layout
+            }
+            foreach ((array) $lines as $line) { // the last status line counts, after redirects
+                if (is_string($line) && preg_match('#^HTTP/\S+\s+(\d+)#', $line, $m)) {
+                    $status = (int) $m[1];
+                }
+            }
+            return array('status' => $status, 'body' => $response);
+        }
+        trigger_error('Could not fetch ' . $url . ' through PHP streams', E_USER_WARNING);
+    }
+    if (!$tried) {
+        trigger_error('No way to fetch ' . $url . ' (cURL and allow_url_fopen are both unavailable)', E_USER_WARNING);
+    }
+    return false;
+}
+
+/**
+ * The body of a successful (2xx) GET, or false.
+ *
+ * @param string $url
+ * @return string|false
+ */
+function httpGet($url)
+{
+    $response = httpRequest($url);
+    if ($response === false) {
+        return false;
+    }
+    if ($response['status'] < 200 || $response['status'] > 299) {
+        trigger_error('Could not fetch ' . $url . ' (HTTP ' . $response['status'] . ')', E_USER_WARNING);
+        return false;
+    }
+    return $response['body'];
+}
+
+/**
+ * A list of MD5 sums, one per line, as md5 => true; empty when the list is
+ * switched off or can't be fetched (with a warning). Fetched once per request.
+ *
+ * @param string $url
+ * @return array
+ */
+function hashList($url)
+{
+    static $lists = array();
+    if (!isset($lists[$url])) {
+        $lists[$url] = array();
+        $body = httpGet($url);
+        if ($body !== false) {
+            foreach (explode("\n", $body) as $line) {
+                $line = strtolower(trim($line));
+                if ($line !== '') {
+                    $lists[$url][$line] = true;
+                }
+            }
+        }
+    }
+    return $lists[$url];
+}
+
+/** @return array the known-good list, md5 => true (empty when _WHITELIST_ is off) */
+function whitelist()
+{
+    return _WHITELIST_ ? hashList(_WHITELIST_URL_) : array();
+}
+
+/** @return array the known-bad list, md5 => true (empty when _BLACKLIST_ is off) */
+function blacklist()
+{
+    return _BLACKLIST_ ? hashList(_BLACKLIST_URL_) : array();
+}
+
+/**
  * Download the ML model (ml-model.json) and check it fits this main.php.
  * Returns the JSON text to embed in the page, or 'null' with a warning when
  * it's unavailable, malformed, or trained for different features. The text
  * is matched against a strict pattern (digits, hex and fixed keys only), so
  * nothing from the download can break out of the <script> it goes into.
  *
- * @param string $url
+ * @param string $url an http(s) URL or a local file
  * @return string
  */
 function mlModelJson($url)
 {
     if (preg_match('#^https?://#i', $url)) {
-        $json = trim(implode("\n", urlFileArray($url)));
+        $json = trim((string) httpGet($url));
     } else {
         $json = is_readable($url) ? trim(file_get_contents($url)) : ''; // a local copy, e.g. offline
     }
@@ -682,708 +1296,208 @@ function mlModelJson($url)
 }
 
 /**
- * Try every remote download method and return array of strings from a URL.
- *
- * @param string $url
- * @return array
- */
-function urlFileArray($url)
-{
-    $content = false;
-
-    // 1. Try cURL if a global handle exists
-    if (isset($GLOBALS['ch'])) {
-        curl_setopt($GLOBALS['ch'], CURLOPT_URL, $url);
-        curl_setopt($GLOBALS['ch'], CURLOPT_RETURNTRANSFER, true);
-
-        $content = curl_exec($GLOBALS['ch']);
-
-        // Anything but a non-empty string is a failure: a real list is never
-        // empty, and PHP 4.3's file_get_contents() returns NULL, not false,
-        // when it can't take the stream context
-        if (!is_string($content) || $content === '') {
-            $error_msg = curl_error($GLOBALS['ch']);
-            trigger_error("cURL error fetching URL: $error_msg", E_USER_WARNING);
-        } else {
-            return explode("\n", $content);
-        }
-    }
-
-    // 2. Try file_get_contents
-    if (isWorking('file_get_contents')) {
-        $context = stream_context_create(array(
-            'http' => array(
-                'ignore_errors' => true, // Handle potential errors gracefully
-                'header' => implode("\r\n", array(
-                    'Cache-Control: no-cache, no-store, must-revalidate',
-                    'Pragma: no-cache',
-                    'Expires: 0'
-                )),
-            ),
-            'ssl' => array(
-                'verify_peer' => true,
-                'verify_peer_name' => true,
-            ),
-        ));
-
-        $content = @file_get_contents($url, false, $context);
-
-        if (is_string($content) && $content !== '') {
-            return explode("\n", $content);
-        } else {
-            trigger_error("Failed to fetch URL using file_get_contents", E_USER_WARNING);
-        }
-    }
-
-    // 3. Try file()
-    if (isWorking('file')) {
-        $content = @file($url, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-
-        if (is_array($content) && !empty($content)) {
-            return $content;
-        } else {
-            trigger_error("Failed to fetch URL using file()", E_USER_WARNING);
-        }
-    }
-
-    // 4. No suitable method found
-    trigger_error("No suitable methods found to fetch URL content", E_USER_WARNING);
-    return array();
-}
-
-/**
- * Submit up to 1000 MD5/SHA1/SHA256 hashes to Team Cymru's Malware Hash
- * Registry bulk lookup API in one request.
- * https://hash.cymru.com/docs_rest
+ * Look up MD5/SHA1/SHA256 hashes in Team Cymru's Malware Hash Registry
+ * (https://hash.cymru.com/docs_rest), at most MHR_BATCH per call.
  *
  * @param array $hashes
  * @param string $username
  * @param string $password
- * @return array Decoded response — {results, queries_remaining} on success,
- *               {error, msg} on failure — mirroring the API's own shape.
+ * @return array the API's response ({results, queries_remaining}), or {error, msg}
  */
 function mhrSubmitHashes($hashes, $username, $password)
 {
-    if (empty($username) || empty($password)) {
-        return array('error' => 'not configured', 'msg' => 'MHR username/password not set (_MHR_ requires an account — see https://hash.cymru.com/signup)');
+    if ($username === '' || $password === '') {
+        return ajaxError('not configured', 'MHR username/password not set (_MHR_ requires an account — see https://hash.cymru.com/signup)');
     }
     if (empty($hashes)) {
         return array('results' => array(), 'queries_remaining' => null);
     }
-    if (!function_exists('json_decode')) {
-        return array('error' => 'unsupported', 'msg' => 'MHR lookups need PHP 5.2+ (json_decode)');
+    if (!functionAvailable('json_decode')) {
+        return ajaxError('unsupported', 'MHR lookups need PHP 5.2+ (json_decode)');
     }
-    if (count($hashes) > 1000) {
-        $hashes = array_slice($hashes, 0, 1000); // API hard limit — see docs_rest
+    $response = httpRequest(_MHR_URL_, implode("\n", array_slice($hashes, 0, MHR_BATCH)), array(
+        'Content-Type: text/plain; charset=utf-8',
+        'Authorization: Basic ' . base64_encode($username . ':' . $password),
+    ));
+    $decoded = $response === false ? null : json_decode($response['body'], true);
+    if (is_array($decoded)) {
+        return $decoded; // including the API's own error replies (bad credentials, quota)
     }
-
-    $url  = 'https://hash.cymru.com/v2/submitHashes';
-    $body = implode("\n", $hashes);
-
-    // 1. Try cURL if a global handle exists
-    if (isset($GLOBALS['ch'])) {
-        $ch = $GLOBALS['ch'];
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
-        curl_setopt($ch, CURLOPT_USERPWD, $username . ':' . $password);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: text/plain; charset=utf-8'));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        // hash.cymru.com's HTTP/2 endpoint intermittently drops the stream
-        // mid-response ("HTTP/2 stream 0 was not closed cleanly"); HTTP/1.1
-        // doesn't hit that failure mode. Bounded timeouts so a broken
-        // connection fails fast into the file_get_contents fallback below
-        // instead of hanging.
-        curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-
-        $content = curl_exec($ch);
-        if ($content !== false) {
-            $decoded = json_decode($content, true);
-            if (is_array($decoded)) {
-                return $decoded;
-            }
-        } else {
-            trigger_error('cURL error submitting hashes to MHR: ' . curl_error($ch), E_USER_WARNING);
-        }
-    }
-
-    // 2. Fallback: file_get_contents with a POST stream context
-    if (isWorking('file_get_contents')) {
-        $context = stream_context_create(array(
-            'http' => array(
-                'method'        => 'POST',
-                'header'        => implode("\r\n", array(
-                    'Content-Type: text/plain; charset=utf-8',
-                    'Authorization: Basic ' . base64_encode($username . ':' . $password),
-                )),
-                'content'       => $body,
-                'ignore_errors' => true,
-                'timeout'       => 30,
-            ),
-            'ssl' => array(
-                'verify_peer'      => true,
-                'verify_peer_name' => true,
-            ),
-        ));
-        $content = @file_get_contents($url, false, $context);
-        if ($content !== false) {
-            $decoded = json_decode($content, true);
-            if (is_array($decoded)) {
-                return $decoded;
-            }
-        }
-    }
-
     trigger_error('Unable to reach Malware Hash Registry', E_USER_WARNING);
-    return array('error' => 'request failed', 'msg' => 'Unable to reach Malware Hash Registry');
+    return ajaxError('request failed', 'Unable to reach Malware Hash Registry');
 }
 
-/**
- * Delete a file and return the specific failure reason (e.g. "unlink(...):
- * Permission denied") instead of a generic "Failed to unlink", so the reason
- * ends up attached to the file instead of being thrown away by
- * @-suppression. The captured warning is consumed (removed from
- * $phpWarnings) rather than just read, so it surfaces exactly once — via
- * this file's own `error` field — instead of also duplicating into the
- * generic warnings list every AJAX response carries.
- *
- * @param string $filePath
- * @return string|null null on success, the reason string on failure
- */
-function unlinkWithReason($filePath)
+// =============================================================================
+// 6. Actions
+// =============================================================================
+// Each action reads its request fields and returns the response array.
+
+/** @return array MHR username and password: the page's, else the configured ones */
+function mhrCredentials()
 {
-    $before = count($GLOBALS['phpWarnings']);
-    if (unlink($filePath)) {
-        return null;
-    }
-    if (count($GLOBALS['phpWarnings']) > $before) {
-        $captured = array_splice($GLOBALS['phpWarnings'], $before);
-        return end($captured);
-    }
-    return 'Failed to unlink';
+    $user = trim(inputValue('mhr_user', ''));
+    $pass = inputValue('mhr_pass', '');
+    return array($user !== '' ? $user : _MHR_USER_, $pass !== '' ? $pass : _MHR_PASS_);
 }
 
 /**
- * Read a request value, undoing magic_quotes_gpc (PHP < 5.4 escapes quotes,
- * backslashes and NUL) so it arrives exactly as sent.
+ * List the files to analyse (phase 1 of a scan).
  *
- * @param array $source $_POST
- * @param string $key
- * @return string|null null when missing
- */
-function inputValue($source, $key)
-{
-    if (!isset($source[$key]) || !is_string($source[$key])) {
-        return null;
-    }
-    $value = $source[$key];
-    if (function_exists('get_magic_quotes_gpc') && @get_magic_quotes_gpc()) {
-        $value = stripslashes($value);
-    }
-    return $value;
-}
-
-/**
- * Read a POST field holding a comma-separated list. One field (unlike
- * paths[]=...) stays clear of max_input_vars no matter how many entries it
- * holds. Paths travel rawurlencode()d, so a raw comma can't occur inside an
- * entry. (NUL was used before, but hardened hosts strip or drop request values
- * containing NUL, e.g. Suhosin's default disallow_nul, which emptied every scan.)
- *
- * @param string $key
  * @return array
  */
-function postList($key)
+function actionScan()
 {
-    $value = inputValue($_POST, $key);
-    if ($value === null || $value === '') {
-        return array();
-    }
-    return explode(',', $value);
+    $result = getSortedByPattern(inputValue('dir', getcwd()), $GLOBALS['pattern']);
+    return array(
+        'readable'     => array_map('rawurlencode', $result['file_readable']),
+        'not_readable' => array_map('rawurlencode', $result['file_not_readable']),
+        'total'        => count($result['file_readable']) + count($result['file_not_readable']),
+    );
 }
 
 /**
- * Scan a list of readable file paths and build their feature rows, applying
- * the whitelist/blacklist checks, token matching, and duplicate-of
- * detection used throughout this file's scanning.
+ * Analyse one batch of files (phase 2), deleting blacklisted ones. The page
+ * works out duplicate_of across batches itself, from each row's md5.
  *
- * @param array $paths
- * @param array $whitelistMD5Sums md5 => anything (array_flip'd list)
- * @param array $blacklistMD5Sums md5 => anything (array_flip'd list)
- * @param array $tokenNeedles
- * @param array $localSeen hash => first-seen path; read and updated in place
- * @param array $newlySeen appended with "hash:path" for each entry newly
- *                         added to $localSeen during this call; pass a
- *                         throwaway array if the caller doesn't need it
- * @return array list of feature rows (see the 'path'/'size'/... shape used throughout)
+ * @return array
  */
-function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenNeedles, &$localSeen, &$newlySeen)
+function actionProcess()
 {
-    $features = array();
-
-    foreach ($paths as $filePath) {
-        if (!file_exists($filePath) || !is_readable($filePath)) {
-            trigger_error('Skipped ' . $filePath . ': it no longer exists or is not readable', E_USER_WARNING);
-            continue;
+    $paths = postPathList('paths');
+    if (inputValue('is_not_readable') === '1') {
+        $rows = array_map('scanUnreadablePath', $paths);
+    } else {
+        $seen = array();
+        $withMl = _ML_ && inputValue('ml') !== '0'; // '0': the page has no model to score with
+        $rows = scanReadablePaths($paths, whitelist(), blacklist(), $GLOBALS['tokenNeedles'], $seen, $withMl);
+    }
+    foreach ($rows as $i => $row) {
+        if ($row['is_blacklisted']) {
+            $rows[$i]['error'] = unlinkWithReason($row['path']);
         }
+        $rows[$i]['path'] = rawurlencode($row['path']);
+        $rows[$i]['duplicate_of'] = false;
+    }
+    return array('features' => $rows);
+}
 
-        $content = file_get_contents($filePath);
-        if ($content === false) {
-            $features = array_merge($features, scanUnreadablePaths(array($filePath)));
-            continue;
+/**
+ * Look a batch of hashes up in the Malware Hash Registry.
+ *
+ * @return array
+ */
+function actionMhrCheck()
+{
+    $credentials = mhrCredentials();
+    return mhrSubmitHashes(array_values(array_unique(array_filter(postList('hashes')))), $credentials[0], $credentials[1]);
+}
+
+/**
+ * Delete files MHR flags. The paths come from the browser, so only files
+ * whose current hash MHR itself confirms are deleted; trusting the list would
+ * make this an arbitrary-file-delete endpoint.
+ *
+ * @return array
+ */
+function actionMhrUnlink()
+{
+    $sums = array();
+    foreach (postPathList('paths') as $filePath) {
+        $sums[$filePath] = is_file($filePath) ? md5_file($filePath) : false;
+    }
+    $credentials = mhrCredentials();
+    $lookup = mhrSubmitHashes(array_values(array_unique(array_filter($sums))), $credentials[0], $credentials[1]);
+    if (isset($lookup['error'])) {
+        return $lookup;
+    }
+    $hits = array();
+    foreach (isset($lookup['results']) ? $lookup['results'] : array() as $r) {
+        if (isset($r['md5']) && isset($r['antivirus_detection_rate'])) {
+            $hits[strtolower($r['md5'])] = true;
         }
-
-        $fileSum = md5($content);
-        if (isset($whitelistMD5Sums[$fileSum])) {
-            continue;
-        }
-
-        $tokens        = getFileTokens($content);
-        $tokenSet      = tokenTextSet($tokens);
-        $matchedTokens = array_values(array_unique(array_merge(
-            compareTokens($tokenNeedles, $tokenSet),
-            findStructuralSignals($tokens, $content, $tokenNeedles)
-        )));
-        $totalTokens   = count($tokenSet);
-        $size          = strlen($content);
-        $mtime         = filemtime($filePath);
-        $ctime         = filectime($filePath); // stat before a blacklist unlink below
-        $owner         = fileowner($filePath);
-        $isBlacklisted = isset($blacklistMD5Sums[$fileSum]);
-        $isHtaccess    = (pathinfo($filePath, PATHINFO_EXTENSION) == 'htaccess');
-        $duplicateOf   = false;
-
-        if (isset($localSeen[$fileSum])) {
-            $duplicateOf = $localSeen[$fileSum];
+    }
+    $results = array();
+    foreach ($sums as $filePath => $sum) {
+        if ($sum === false) {
+            $error = file_exists($filePath) ? 'Not a regular file; not deleted' : null; // null: already gone
+        } elseif (!isset($hits[$sum])) {
+            $error = 'MHR does not flag its current contents; not deleted';
         } else {
-            $localSeen[$fileSum] = $filePath;
-            $newlySeen[] = $fileSum . ':' . $filePath;
-        }
-
-        $entropy       = shannonEntropy($content);
-        $error = null;
-        if ($isBlacklisted) {
             $error = unlinkWithReason($filePath);
         }
-
-        $features[] = array(
-            'path'           => $filePath,
-            'size'           => $size,
-            'mtime'          => $mtime,
-            'ctime'          => $ctime,
-            'owner'          => $owner,
-            'entropy'        => $entropy,
-            'total_tokens'   => $totalTokens,
-            'ml_features'    => (_ML_ && $GLOBALS['mlWanted']) ? mlFeatures($tokens, $content, $entropy) : null,
-            'matched_tokens' => $matchedTokens,
-            'md5'            => $fileSum,
-            'is_blacklisted' => $isBlacklisted,
-            'is_htaccess'    => $isHtaccess,
-            'has_php'        => hasPhpCode($content),
-            'duplicate_of'   => $duplicateOf,
-            'error'          => $error,
-            'is_unreadable'  => false,
-        );
+        $results[] = array('path' => rawurlencode($filePath), 'error' => $error);
     }
-
-    return $features;
+    return array('results' => $results);
 }
 
 /**
- * Build feature rows for paths that could not be read.
- *
- * @param array $paths
- * @return array
- */
-function scanUnreadablePaths($paths)
-{
-    $features = array();
-
-    foreach ($paths as $filePath) {
-        $mtime = @filemtime($filePath);
-        if (!$mtime) {
-            $mtime = 0;
-        }
-
-        $features[] = array(
-            'path'           => $filePath,
-            'size'           => null,
-            'mtime'          => $mtime,
-            'ctime'          => 0,
-            'owner'          => null,
-            'entropy'        => null,
-            'total_tokens'   => null,
-            'ml_features'    => null,
-            'matched_tokens' => array('NOT_READABLE'),
-            'md5'            => 'N/A',
-            'is_blacklisted' => false,
-            'is_htaccess'    => false,
-            'has_php'        => null,
-            'duplicate_of'   => false,
-            'error'          => null,
-            'is_unreadable'  => true,
-        );
-    }
-
-    return $features;
-}
-
-// Which files to scan, matched against the file name: a PHP-ish or SSI last
-// extension, "php" as an inner extension ("x.php.jpg" and "x.php." run as PHP
-// under Apache's AddHandler), .htaccess, and the per-directory PHP config files
-$pattern = '/\.(ph[^.]+|sh[^.]+|inc|htaccess)$|\.(php[0-9]*|phtml|pht|phar)\.|^(\.user|php[0-9]*)\.ini$/i';
-
-/**
- * Master Token Needles and Threat Weights Map
- * Maps token strings directly to their threat score weights.
- */
-$tokenNeedles = array(
-    // Critical RCE (Weight: 10.0)
-    'eval' => 10.0,
-    'exec' => 10.0,
-    'shell_exec' => 10.0,
-    'system' => 10.0,
-    'passthru' => 10.0,
-    'proc_open' => 10.0,
-    'create_function' => 10.0,
-    'pcntl_fork' => 10.0,
-    'posix_kill' => 10.0,
-    'posix_setuid' => 10.0,
-    '`' => 10.0, // backtick operator = shell_exec
-    '@input_call' => 10.0, // $_GET['a']($_GET['b'])
-    '@preg_e' => 10.0, // preg_replace('/.../e') evaluates the replacement
-    '@foreign_code' => 10.0, // ASP/JSP/CGI code in a PHP-named file
-
-    // High Obfuscation & De-encoding (Weight: 5.0)
-    'base64_decode' => 5.0,
-    'gzinflate' => 5.0,
-    'str_rot13' => 5.0,
-    'gzuncompress' => 5.0,
-    'convert_uu' => 5.0,
-    'rawurldecode' => 5.0,
-    'urldecode' => 5.0,
-    'hex2bin' => 5.0,
-    'bin2hex' => 5.0,
-    'exif_read_data' => 5.0,
-    'readgzfile' => 5.0,
-    '$SISTEMIT_COM_ENC' => 5.0,
-    '@concat_name' => 5.0, // function name hidden in a string: 'ba'.'se64_decode', "\x73ystem"
-    '@halt_payload' => 5.0, // data appended after __halt_compiler()
-
-    // Obfuscation Helpers & I/O Manipulation (Weight: 2.0)
-    'assert' => 2.0,
-    'htmlspecialchars_decode' => 2.0,
-    'hexdec' => 2.0,
-    'chr' => 2.0,
-    'strrev' => 2.0,
-    'goto' => 2.0,
-    'extract' => 2.0,
-    'parse_str' => 2.0,
-    'popen' => 2.0,
-    'fsockopen' => 2.0,
-    'posix_setsid' => 2.0,
-    'posix_setpgid' => 2.0,
-    'proc_nice' => 2.0,
-    'proc_close' => 2.0,
-    'proc_terminate' => 2.0,
-    'apache_child_terminate' => 2.0,
-    'move_uploaded_file' => 2.0,
-    '$_files' => 2.0,
-    '$auth_pass' => 2.0,
-    '$password' => 2.0,
-    '$pass' => 2.0,
-    'proc_get_status' => 2.0,
-    'posix_mkfifo' => 2.0,
-    'php_uname' => 2.0,
-    '@dyn_call' => 2.0, // call through a variable/expression: $f(), $a['x'](), (...)()
-    '@long_line' => 2.0, // a line over 5000 chars
-
-    // User input (Weight: 0.5) — everywhere in legit code, only matters in combination
-    '$_get' => 0.5,
-    '$_post' => 0.5,
-    '$_request' => 0.5,
-    '$_cookie' => 0.5,
-    'getallheaders' => 0.5,
-
-    // Low / Routine Tokens (Weight: 0.1)
-    'preg_replace' => 0.1, // the dangerous /e form is scored as @preg_e
-    'call_user_func' => 0.1,
-    'call_user_func_array' => 0.1,
-    'register_shutdown_function' => 0.1,
-    'register_tick_function' => 0.1,
-    'implode' => 0.1,
-    'strtr' => 0.1,
-    'substr' => 0.1,
-    'mb_substr' => 0.1,
-    'str_replace' => 0.1,
-    'substr_replace' => 0.1,
-    'basename' => 0.1,
-    'getcwd' => 0.1,
-    'pathinfo' => 0.1,
-    'getenv' => 0.1,
-    'get_current_user' => 0.1,
-    'fileowner' => 0.1,
-    'filegroup' => 0.1,
-    'disk_free_space' => 0.1,
-    'disk_total_space' => 0.1,
-    'sys_get_temp_dir' => 0.1,
-    'fopen' => 0.1,
-    'file_put_contents' => 0.1,
-    'file_get_contents' => 0.1,
-    'url_get_contents' => 0.1,
-    'stream_get_meta_data' => 0.1,
-    'copy' => 0.1,
-    'include' => 0.1,
-    'require' => 0.1,
-    'include_once' => 0.1,
-    'require_once' => 0.1,
-    '__file__' => 0.1,
-    'mail' => 0.1,
-    'putenv' => 0.1,
-    'curl_init' => 0.1,
-    'tmpfile' => 0.1,
-    'allow_url_fopen' => 0.1,
-    'ini_set' => 0.1,
-    'set_time_limit' => 0.1,
-    'session_start' => 0.1,
-    'symlink' => 0.1,
-    '__halt_compiler' => 0.1,
-    '__compiler_halt_offset__' => 0.1,
-    'error_reporting' => 0.1,
-    'get_magic_quotes_gpc' => 0.1,
-    'phpinfo' => 0.1,
-    'posix_getuid' => 0.1,
-    'posix_geteuid' => 0.1,
-    'posix_getegid' => 0.1,
-    'posix_getpwuid' => 0.1,
-    'posix_getgrgid' => 0.1,
-    'posix_getlogin' => 0.1,
-    'posix_ttyname' => 0.1,
-    'get_cfg_var' => 0.1,
-    'diskfreespace' => 0.1,
-    'getlastmod' => 0.1,
-    'getmyinode' => 0.1,
-    'getmypid' => 0.1,
-    'getmyuid' => 0.1,
-    'getmygid' => 0.1,
-    'mysql_connect' => 0.1,
-    'mysqli_connect' => 0.1,
-    'mysql_query' => 0.1,
-    'mysqli_query' => 0.1
-);
-
-// test/run.js includes this file for its functions and needle map only
-if (defined('SUSSY_LIB')) {
-    return;
-}
-
-$whitelistMD5Sums = array();
-$blacklistMD5Sums = array();
-if (_WHITELIST_) {
-    $whitelistMD5Sums = array_flip(array_map('trim', urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt')));
-}
-if (_BLACKLIST_) {
-    $blacklistMD5Sums = array_flip(array_map('trim', urlFileArray('https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt')));
-}
-/**
- * Emit a clean JSON response for an AJAX action. Folds in any PHP warnings
- * captured during this request and, as a last-resort safety net, discards
- * (and reports, rather than silently drops) any stray buffered output that
- * isn't part of the intended payload — so a single unexpected warning or
- * accidental echo can never corrupt the JSON body the client is about to
- * parse.
+ * Answer an AJAX request with JSON and stop. Captured PHP warnings go along
+ * in "warnings"; any stray output (which would corrupt the JSON) is dropped
+ * and reported there instead.
  *
  * @param array $data
  * @return void
  */
 function ajaxRespond($data)
 {
-    $stray = ob_get_clean();
+    $stray = trim((string) ob_get_clean());
     $warnings = (isset($data['warnings']) && is_array($data['warnings'])) ? $data['warnings'] : array();
     $warnings = array_merge($warnings, $GLOBALS['phpWarnings']);
-    if (trim($stray) !== '') {
-        $warnings[] = 'Unexpected output suppressed: ' . substr(trim($stray), 0, 500);
+    if ($stray !== '') {
+        $warnings[] = 'Unexpected output suppressed: ' . substr($stray, 0, 500);
     }
     $data['warnings'] = array_values($warnings);
-    $json = json_encode($data);
-    if ($json === false) {
-        $json = json_encode(utf8Safe($data)); // a message quoting a non-UTF-8 file name
-    }
-    echo $json;
+    echo jsonEncode($data);
     exit;
 }
 
 /**
- * Make every string in $value valid UTF-8 for json_encode() (PHP 5.2+ returns
- * false on invalid bytes, which would empty the whole response). Invalid
- * strings are read as Latin-1. Only for text shown to the user: paths travel
- * rawurlencode()d so they survive byte for byte.
+ * Run the requested action. A browser sends the custom X-Sussy-Request
+ * header cross-site only after a CORS preflight this script never approves,
+ * so its presence proves the page itself sent the request (CSRF check).
  *
- * @param mixed $value
- * @return mixed
+ * @return void
  */
-function utf8Safe($value)
+function dispatchAjax()
 {
-    if (is_array($value)) {
-        foreach ($value as $key => $item) {
-            $value[$key] = utf8Safe($item);
-        }
-        return $value;
-    }
-    if (!is_string($value) || preg_match('//u', $value)) {
-        return $value;
-    }
-    $out = '';
-    $len = strlen($value);
-    for ($i = 0; $i < $len; $i++) {
-        $byte = ord($value[$i]);
-        $out .= $byte < 0x80 ? $value[$i] : chr(0xC0 | ($byte >> 6)) . chr(0x80 | ($byte & 0x3F));
-    }
-    return $out;
-}
-
-// ── AJAX request handler ────────────────────────────────────────────────
-if (isset($_POST['ajax_action'])) {
     ob_start();
     header('Content-Type: application/json');
-    // CSRF check: a browser sends a custom header cross-site only after a CORS
-    // preflight this script never approves, so it proves the page sent the request
     if (!isset($_SERVER['HTTP_X_SUSSY_REQUEST'])) {
-        ajaxRespond(array('error' => 'forbidden', 'msg' => 'Missing X-Sussy-Request header'));
+        ajaxRespond(ajaxError('forbidden', 'Missing X-Sussy-Request header'));
     }
-    $ajaxAction = $_POST['ajax_action'];
-    // Paths travel rawurlencode()d both ways, so names that aren't valid UTF-8
-    // survive JSON and come back byte for byte
-    $mhrUser = inputValue($_POST, 'mhr_user');
-    $mhrUser = ($mhrUser !== null && $mhrUser !== '') ? trim($mhrUser) : $mhrUsername;
-    $mhrPass = inputValue($_POST, 'mhr_pass');
-    $mhrPass = ($mhrPass !== null && $mhrPass !== '') ? $mhrPass : $mhrPassword;
-
-    if ($ajaxAction == 'scan') {
-        $path = inputValue($_POST, 'dir');
-        if ($path === null) {
-            $path = getcwd();
-        }
-
-        $result = getSortedByPattern($path, $pattern);
-
-        $readable = $result['file_readable'];
-        if (!empty($whitelistMD5Sums)) {
-            $readable = array();
-            foreach ($result['file_readable'] as $fp) {
-                if (!isset($whitelistMD5Sums[md5_file($fp)])) {
-                    $readable[] = $fp;
-                }
-            }
-        }
-
-        ajaxRespond(array(
-            'readable'     => array_map('rawurlencode', $readable),
-            'not_readable' => array_map('rawurlencode', $result['file_not_readable']),
-            'total'        => count($readable) + count($result['file_not_readable']),
-        ));
+    $actions = array('scan' => 'actionScan', 'process' => 'actionProcess', 'mhr_check' => 'actionMhrCheck', 'mhr_unlink' => 'actionMhrUnlink');
+    $mhrActions = array('mhr_check' => true, 'mhr_unlink' => true);
+    $action = inputValue('ajax_action', '');
+    if (!isset($actions[$action])) {
+        ajaxRespond(ajaxError('unknown action', 'Unknown action: ' . $action));
     }
-
-    if ($ajaxAction == 'process') {
-        $paths = array_map('rawurldecode', postList('paths'));
-        if (inputValue($_POST, 'ml') === '0') {
-            $GLOBALS['mlWanted'] = false; // the page has no model to score with
-        }
-
-        if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
-            $isUnreadable = true;
-        } else {
-            $isUnreadable = false;
-        }
-
-        $seenHashes = postList('seen_hashes'); // "md5:encoded path" entries
-
-        $newHashes = array();
-
-        if ($isUnreadable) {
-            $features = scanUnreadablePaths($paths);
-        } else {
-            $localSeen = array();
-            foreach ($seenHashes as $entry) {
-                $parts = explode(':', $entry, 2);
-                if (count($parts) == 2) {
-                    $localSeen[$parts[0]] = rawurldecode($parts[1]);
-                }
-            }
-
-            $features = scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenNeedles, $localSeen, $newHashes);
-        }
-
-        foreach ($features as $i => $row) {
-            $features[$i]['path'] = rawurlencode($row['path']);
-            if ($row['duplicate_of'] !== false) {
-                $features[$i]['duplicate_of'] = rawurlencode($row['duplicate_of']);
-            }
-        }
-        foreach ($newHashes as $i => $entry) {
-            $parts = explode(':', $entry, 2);
-            $newHashes[$i] = $parts[0] . ':' . rawurlencode($parts[1]);
-        }
-
-        ajaxRespond(array('features' => $features, 'new_hashes' => $newHashes));
+    if (isset($mhrActions[$action]) && !_MHR_) {
+        ajaxRespond(ajaxError('not configured', 'MHR integration is disabled (_MHR_ is false)'));
     }
-
-    if ($ajaxAction == 'mhr_check') {
-        if (isset($_POST['hashes']) && is_array($_POST['hashes'])) {
-            $hashes = array_values(array_unique(array_filter(array_map('strval', $_POST['hashes']))));
-        } else {
-            $hashes = array();
-        }
-
-        if (!_MHR_) {
-            ajaxRespond(array('error' => 'not configured', 'msg' => 'MHR integration is disabled (_MHR_ is false in main.php)'));
-        }
-
-        ajaxRespond(mhrSubmitHashes($hashes, $mhrUser, $mhrPass));
-    }
-
-    if ($ajaxAction == 'mhr_unlink') {
-        // The paths come from the browser, so delete only files whose current
-        // hash MHR itself confirms; trusting the list would make this an
-        // arbitrary-file-delete endpoint
-        if (!_MHR_) {
-            ajaxRespond(array('error' => 'not configured', 'msg' => 'MHR integration is disabled (_MHR_ is false in main.php)'));
-        }
-        $sums = array();
-        foreach (array_map('rawurldecode', postList('paths')) as $filePath) {
-            $sums[$filePath] = is_file($filePath) ? md5_file($filePath) : false;
-        }
-        $lookup = mhrSubmitHashes(array_values(array_unique(array_filter($sums))), $mhrUser, $mhrPass);
-        if (isset($lookup['error'])) {
-            ajaxRespond($lookup);
-        }
-        $hits = array();
-        foreach (isset($lookup['results']) ? $lookup['results'] : array() as $r) {
-            if (isset($r['md5']) && isset($r['antivirus_detection_rate'])) {
-                $hits[strtolower($r['md5'])] = true;
-            }
-        }
-
-        $results = array();
-        foreach ($sums as $filePath => $sum) {
-            if ($sum === false) {
-                $error = file_exists($filePath) ? 'Not a regular file; not deleted' : null; // null: already gone
-            } elseif (!isset($hits[$sum])) {
-                $error = 'MHR does not flag its current contents; not deleted';
-            } else {
-                $error = unlinkWithReason($filePath);
-            }
-            $results[] = array('path' => rawurlencode($filePath), 'error' => $error);
-        }
-
-        ajaxRespond(array('results' => $results));
-    }
-
-    ajaxRespond(array('error' => 'Unknown action'));
+    ajaxRespond(call_user_func($actions[$action]));
 }
-// ────────────────────────────────────────────────────────────────────────
+
+// =============================================================================
+// 7. Bootstrap
+// =============================================================================
+
+// The test scripts include this file for parts 1-6 only (define('SUSSY_LIB', true) first)
+if (defined('SUSSY_LIB')) {
+    return;
+}
+
+callIfAvailable('set_time_limit', TIME_LIMIT);
+callIfAvailable('ini_set', 'memory_limit', '-1');
+if (function_exists('get_magic_quotes_gpc') && @get_magic_quotes_gpc()) {
+    $_POST = stripRequestSlashes($_POST);
+}
+if (isset($_POST['ajax_action'])) {
+    dispatchAjax();
+}
+
+// =============================================================================
+// 8. Page
+// =============================================================================
 ?>
 <!DOCTYPE html>
 <html lang="en-us">
@@ -1565,6 +1679,20 @@ if (isset($_POST['ajax_action'])) {
 
             .token-highlight {
                 color: #ff8a03ff;
+            }
+
+            .badge {
+                color: #fff;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+
+            .badge-muted {
+                background: #444;
+                color: #aaa;
+                font-weight: normal;
             }
 
             .dashboard-panel {
@@ -1827,16 +1955,20 @@ if (isset($_POST['ajax_action'])) {
             &nbsp;
             <label>MHR Password: <input type="password" id="mhrPassword" autocomplete="current-password" style="width:140px;"></label>
             &nbsp;
-            <button type="button" onclick="runMhrCheckClick()" title="Submit non-blacklisted/non-whitelisted MD5s to hash.cymru.com in batches of 1000">MHR SCAN</button>
+            <button type="button" onclick="runMhrCheckClick()" title="Submit non-blacklisted/non-whitelisted MD5s to hash.cymru.com in batches of <?php echo MHR_BATCH; ?>">MHR SCAN</button>
             <span id="mhrStatus" style="margin-left:10px;color:#888;"></span>
         </div>
 
         <?php
-        // Emit token weight map so JS can replicate PHP scoring exactly
-        echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
-        echo '<script>const mhrEnabled = ' . json_encode((bool)_MHR_) . ';</script>';
-        echo '<script>const ML_MODEL = ' . (_ML_ ? mlModelJson(_ML_MODEL_URL_) : 'null') . ';</script>';
-        echo '<script>const serverWarnings = ' . json_encode(array_values($GLOBALS['phpWarnings'])) . ';</script>';
+        // The page's data: the scoring policy (so the page scores exactly like the
+        // tests), the ML model, settings, and the warnings so far (last, so it
+        // includes the model download's)
+        echo '<script>const tokenWeights = ' . jsonEncode($tokenNeedles) . ";\n" .
+            'const tokenRoles = ' . jsonEncode($tokenRoles) . ";\n" .
+            'const ML_MODEL = ' . (_ML_ ? mlModelJson(_ML_MODEL_URL_) : 'null') . ";\n" .
+            'const mhrEnabled = ' . jsonEncode((bool) _MHR_) . ";\n" .
+            'const MHR_BATCH = ' . jsonEncode(MHR_BATCH) . ";\n" .
+            'const serverWarnings = ' . jsonEncode(array_values($GLOBALS['phpWarnings'])) . ";</script>\n";
         ?>
         <!-- Warning banner for critical errors & failed deletions -->
         <div id="warningBanner" class="error-banner" style="display:none;"></div>
@@ -1865,7 +1997,7 @@ if (isset($_POST['ajax_action'])) {
 
             <label>Z‑threshold: <input type="number" id="zThreshold" class="z-input" value="3.5" step="0.1" onchange="applyThreshold()"></label>
 
-            <label>🔍 <input type="text" id="searchInput" class="search-input" placeholder="e.g. eval or .php" oninput="applySearch()"></label>
+            <label>🔍 <input type="text" id="searchInput" class="search-input" placeholder="e.g. eval or .php" oninput="applySearchSoon()"></label>
 
             <label><input type="checkbox" id="searchTokensOnly" onchange="applySearch()"> Tokens only</label>
 
@@ -1927,29 +2059,25 @@ if (isset($_POST['ajax_action'])) {
             // benign files (node test/run.js).
             const HIGH_ENTROPY = 5.5;
 
+            // Needles by role ($tokenRoles in PHP: critical, obfuscation, upload,
+            // input, recon, highlight), lowercased like the matched tokens
+            const ROLES = {};
+            ['critical', 'obfuscation', 'upload', 'input', 'recon', 'highlight'].forEach(function (role) {
+                const list = (typeof tokenRoles !== 'undefined' && tokenRoles[role]) || [];
+                ROLES[role] = new Set(list.map(function (t) { return t.toLowerCase(); }));
+            });
+
             /**
              * Compute composite threat score for one feature row.
              * @param {Object} d       feature row from the server
              * @param {Object} weights tokenWeights map (key -> weight)
              */
-            // Server-reconnaissance calls; see the recon bonus in calculateThreatScore()
-            const RECON_TOKENS = ['php_uname', 'phpinfo', 'get_cfg_var', 'get_current_user', 'getmyuid', 'getmygid', 'getmypid',
-                'getmyinode', 'posix_getuid', 'posix_geteuid', 'posix_getegid', 'posix_getlogin', 'disk_total_space',
-                'disk_free_space', 'diskfreespace', 'getlastmod'];
-
             function calculateThreatScore(d, weights) {
                 var score = 0.0;
                 var hasCritical = false;
                 var hasObfuscation = false;
                 var hasUploadReq = false;
                 var hasInput = false;
-
-                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','create_function','`','@input_call','@preg_e','@foreign_code'];
-                // Full "High Obfuscation & De-encoding" (5.0) and upload/IO-request tiers —
-                // kept in sync with the weight categories in $tokenNeedles.
-                var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','rawurldecode','urldecode','hex2bin','bin2hex','exif_read_data','readgzfile','$sistemit_com_enc','@concat_name','@halt_payload'];
-                var reqTokens  = ['move_uploaded_file','$_files','file_put_contents'];
-                var inputTokens = ['$_get','$_post','$_request','$_cookie','getallheaders'];
 
                 var tokens = Array.isArray(d.matched_tokens) ? d.matched_tokens.map(function (t) { return t.toLowerCase(); }) : [];
 
@@ -1960,16 +2088,16 @@ if (isset($_POST['ajax_action'])) {
                 // combo multipliers below); standing alone they get a reduced weight so a
                 // large legitimate library doesn't cross the anomaly bar on that basis alone.
                 for (var c = 0; c < tokens.length; c++) {
-                    if (critTokens.indexOf(tokens[c]) !== -1) { hasCritical = true; }
-                    if (inputTokens.indexOf(tokens[c]) !== -1) { hasInput = true; }
+                    if (ROLES.critical.has(tokens[c])) { hasCritical = true; }
+                    if (ROLES.input.has(tokens[c])) { hasInput = true; }
                 }
                 var nonCriticalDampen = hasCritical ? 1.0 : 0.3;
 
                 for (var i = 0; i < tokens.length; i++) {
                     var token = tokens[i];
                     var w = (weights && typeof weights[token] !== 'undefined') ? parseFloat(weights[token]) : 1.0;
-                    var isObf = obfTokens.indexOf(token) !== -1;
-                    var isReq = reqTokens.indexOf(token) !== -1;
+                    var isObf = ROLES.obfuscation.has(token);
+                    var isReq = ROLES.upload.has(token);
                     if (isObf) hasObfuscation = true;
                     if (isReq) hasUploadReq = true;
                     if (isObf || isReq) w *= nonCriticalDampen;
@@ -2003,7 +2131,7 @@ if (isset($_POST['ajax_action'])) {
                 // at once (2+: 79/211 test webshells, 0/1927 benign files)
                 let recon = 0;
                 for (var r = 0; r < tokens.length; r++) {
-                    if (RECON_TOKENS.indexOf(tokens[r]) !== -1) recon++;
+                    if (ROLES.recon.has(tokens[r])) recon++;
                 }
                 if (recon >= 2) score += 6.0;
 
@@ -2236,6 +2364,28 @@ if (isset($_POST['ajax_action'])) {
             // --- End client-side threat scoring ---
             currentThreshold = Z_THRESHOLD;
 
+            // Colour of a threat score: CRITICAL, HIGH RISK, or neither
+            function scoreColor(score) {
+                return score >= CRITICAL_SCORE ? '#ff4444' : (score >= ANOMALY_SCORE ? '#ffaa00' : '#4a8bc2');
+            }
+
+            function isCritical(d) {
+                return d.threatScore >= CRITICAL_SCORE || d.is_blacklisted;
+            }
+
+            // A status badge in the results; label is HTML, title plain text
+            function badgeHtml(label, background, title) {
+                return '<span class="badge" style="background:' + background + '"' +
+                    (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + label + '</span> ';
+            }
+
+            // Score features with the current Z-threshold and show them
+            function reanalyze(features) {
+                currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
+                analyzedData = analyzeData(features, currentThreshold);
+                renderTable(analyzedData);
+            }
+
             function shortenUnlinkError(msg) {
                 if (!msg) return msg;
                 // The file path is already shown right next to this message
@@ -2246,10 +2396,15 @@ if (isset($_POST['ajax_action'])) {
                 return msg.replace(/^unlink\([^)]*\):\s*/, '');
             }
 
-            // Every AJAX call goes through here: the custom header is the server's
-            // CSRF check (another site can't send it)
-            function postAction(body) {
-                return fetch('', { method: 'POST', body: body, headers: { 'X-Sussy-Request': '1' } });
+            // Every AJAX call goes through here: fields is {name: value}, the result
+            // the parsed JSON (a SyntaxError when the reply isn't JSON, e.g. a host's
+            // security rule answered with an HTML page). The custom header is the
+            // server's CSRF check (another site can't send it).
+            function postAction(fields) {
+                var body = new URLSearchParams();
+                Object.keys(fields).forEach(function (name) { body.set(name, fields[name]); });
+                return fetch('', { method: 'POST', body: body, headers: { 'X-Sussy-Request': '1' } })
+                    .then(function (r) { return r.json(); });
             }
 
             // Paths arrive percent-encoded (byte-exact even when not valid UTF-8);
@@ -2316,7 +2471,7 @@ if (isset($_POST['ajax_action'])) {
             function passesTableFilters(d) {
                 if (currentSearch === '__BLACKLIST__') return d.is_blacklisted === true;
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
-                if (currentFilterMode === 'critical' && d.threatScore < 10.0 && !d.is_blacklisted) return false;
+                if (currentFilterMode === 'critical' && !isCritical(d)) return false;
                 if (currentFilterMode === 'obfuscated' && (d.entropy <= HIGH_ENTROPY || d.is_unreadable)) return false;
 
                 if (!currentSearch.trim()) return true;
@@ -2471,39 +2626,38 @@ if (isset($_POST['ajax_action'])) {
 
                         if (d.is_unreadable) {
                             color = '#f72f2f';
-                            badge = '<span style="background:#8b0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">NOT READABLE</span> ';
+                            badge = badgeHtml('NOT READABLE', '#8b0000');
                         } else if (d.is_blacklisted) {
                             color = '#f72f2f';
-                            badge = '<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">BLACKLIST</span> ';
+                            badge = badgeHtml('BLACKLIST', '#cc0000');
                             if (d.error) status = escapeHtml(shortenUnlinkError(d.error));
                         } else if (d.mhr_hit) {
                             color = '#f72f2f';
-                            badge = `<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">MHR HIT (${d.mhr_detection_rate}%)</span> `;
+                            badge = badgeHtml('MHR HIT (' + escapeHtml(String(d.mhr_detection_rate)) + '%)', '#cc0000');
                             status = escapeHtml(d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown')));
                         } else if (d.threatScore >= CRITICAL_SCORE) {
                             color = '#dddbdb';
-                            badge = `<span style="background:#990000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">CRITICAL (${d.threatScore.toFixed(1)})</span> `;
+                            badge = badgeHtml('CRITICAL (' + d.threatScore.toFixed(1) + ')', '#990000');
                         } else if (d.threatScore >= ANOMALY_SCORE) {
                             color = '#dddbdb';
-                            badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
+                            badge = badgeHtml('HIGH RISK (' + d.threatScore.toFixed(1) + ')', '#b37700');
                         } else if (d.is_htaccess) {
                             color = '#66ccff';
-                            badge = '<span style="background:#005580;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HTACCESS</span> ';
+                            badge = badgeHtml('HTACCESS', '#005580');
                         } else if (d.duplicate_of !== false) {
-                            badge = '<span style="background:#444;color:#aaa;padding:2px 6px;border-radius:3px;font-size:11px;">DUPLICATE</span> ';
+                            badge = '<span class="badge badge-muted">DUPLICATE</span> ';
                             status = escapeHtml(d.duplicate_of);
                         }
 
                         if (d.mlPoints > 0) {
                             const why = `ML model ${Math.round(d.mlScore * 100)}%: +${d.mlPoints.toFixed(1)} of the threat score` +
                                 (d.mlOnly ? '. Flagged only because of it' : '');
-                            badge += `<span style="background:#6a3d9a;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;" title="${why}">ML +${d.mlPoints.toFixed(1)}</span> `;
+                            badge += badgeHtml('ML +' + d.mlPoints.toFixed(1), '#6a3d9a', why);
                         }
 
                         if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
                             let tokens = d.matched_tokens.map(t => {
-                                const essential = ['eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function', '`', '@input_call', '@preg_e', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex', 'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'];
-                                if (essential.includes(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
+                                if (ROLES.highlight.has(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
                                 return escapeHtml(t);
                             });
                             status = tokens.join(', ');
@@ -2594,7 +2748,15 @@ if (isset($_POST['ajax_action'])) {
                 }
             }
 
+            // While typing: search once the user pauses, not on every keystroke
+            var _searchTimer = null;
+            function applySearchSoon() {
+                clearTimeout(_searchTimer);
+                _searchTimer = setTimeout(applySearch, 150);
+            }
+
             function applySearch() {
+                clearTimeout(_searchTimer);
                 currentSearch = document.getElementById('searchInput').value;
                 searchTokensOnly = document.getElementById('searchTokensOnly').checked;
                 renderTable(analyzedData);
@@ -2637,7 +2799,7 @@ if (isset($_POST['ajax_action'])) {
                 const duplicates = data.filter(d => d.duplicate_of !== false).length;
                 const htaccess = data.filter(d => d.is_htaccess).length;
                 const anomalies = data.filter(d => d.isAnomaly).length;
-                const criticalCount = data.filter(d => d.threatScore >= 10.0 || d.is_blacklisted).length;
+                const criticalCount = data.filter(isCritical).length;
 
                 let avgSize = 0, minSize = 0, maxSize = 0;
                 let avgTokens = 0, minTokens = 0, maxTokens = 0;
@@ -2689,7 +2851,7 @@ if (isset($_POST['ajax_action'])) {
                         const name = String(d.path || '').split('/').pop() || d.path;
                         suspHtml += `<tr class="clickable-row" data-filter-path="${escapeHtml(d.path)}">
                             <td>${escapeHtml(name)}</td>
-                            <td><strong style="color:${d.threatScore >= 10 ? '#ff4444' : '#ffaa00'}">${d.threatScore.toFixed(1)}</strong></td>
+                            <td><strong style="color:${d.threatScore >= CRITICAL_SCORE ? '#ff4444' : '#ffaa00'}">${d.threatScore.toFixed(1)}</strong></td>
                             <td>${d.suspCount || 0} matched</td>
                         </tr>`;
                     });
@@ -3206,7 +3368,7 @@ if (isset($_POST['ajax_action'])) {
                                     ctx.fillStyle = '#3a3a3a';
                                     ctx.fillRect(x, b.bottom - hAll, w, hAll);
                                     const top = shown.reduce((m, d) => Math.max(m, d.threatScore || 0), 0);
-                                    ctx.fillStyle = top >= 10.0 ? '#ff4444' : (top >= 5.0 ? '#ffaa00' : '#4a8bc2');
+                                    ctx.fillStyle = scoreColor(top);
                                     ctx.fillRect(x, b.bottom - hShown, w, hShown);
                                     if (_chartHover !== null && k.files.some(d => d.path === _chartHover)) {
                                         ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
@@ -3266,7 +3428,7 @@ if (isset($_POST['ajax_action'])) {
                                 const y = b.top + i * rowH + 3, h = Math.max(8, rowH - 6);
                                 const w = (score / maxScore) * (b.right - b.left);
                                 ctx.globalAlpha = _chartSelection && !_chartSelection.has(d.path) ? 0.25 : 1;
-                                ctx.fillStyle = score >= 10.0 ? '#ff4444' : (score >= 5.0 ? '#ffaa00' : '#4a8bc2');
+                                ctx.fillStyle = scoreColor(score);
                                 ctx.fillRect(b.left, y, w, h);
                                 const name = String(d.path || '').split('/').pop() || d.path;
                                 drawLabel(ctx, name.length > 26 ? name.slice(0, 23) + '...' : name, b.left - 8, y + h / 2 + 4, 'right');
@@ -3349,7 +3511,9 @@ if (isset($_POST['ajax_action'])) {
 
             // ── Chunked AJAX scan ────────────────────────────────────────────
             var _scanCancelled = false;
-            var _seenHashes = [];
+            // md5 => path of the first file seen with it, for duplicate_of across batches
+            var _firstPathByMd5 = new Map();
+            var _lastProgressRender = 0;
 
             function getChunkSize() {
                 var el = document.getElementById('chunkSizeInput');
@@ -3368,7 +3532,8 @@ if (isset($_POST['ajax_action'])) {
 
                 var chunkSize = getChunkSize();
                 _scanCancelled = false;
-                _seenHashes = [];
+                _firstPathByMd5 = new Map();
+                _lastProgressRender = Date.now();
                 _chartSelection = null;
                 var allFeatures = [];
 
@@ -3381,12 +3546,7 @@ if (isset($_POST['ajax_action'])) {
                 document.getElementById('result').innerHTML = '';
                 analyzedData = [];
 
-                var body = new URLSearchParams();
-                body.set('ajax_action', 'scan');
-                body.set('dir', dir);
-
-                postAction(body)
-                    .then(function(r) { return r.json(); })
+                postAction({ ajax_action: 'scan', dir: dir })
                     .then(function(data) {
                         if (_scanCancelled) { return; }
                         reportServerWarnings(data);
@@ -3413,9 +3573,7 @@ if (isset($_POST['ajax_action'])) {
                         document.getElementById('ajaxProgress').style.display = 'none';
                         window.rawFileData = allFeatures;
                         window.lastScanFeatures = allFeatures;
-                        currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
-                        analyzedData = analyzeData(allFeatures, currentThreshold);
-                        renderTable(analyzedData);
+                        reanalyze(allFeatures);
                     })
                     .catch(function(err) {
                         document.getElementById('ajaxProgress').style.display = 'none';
@@ -3423,32 +3581,30 @@ if (isset($_POST['ajax_action'])) {
                     });
             }
 
-            // One 'process' request for a batch of paths \u2014 returns the parsed
-            // JSON, or rejects (with a SyntaxError specifically when the body
-            // wasn't valid JSON at all, e.g. a hosting-level security rule
-            // blocked the request and returned an HTML page instead).
+            // One 'process' request for a batch of paths (see postAction() for failures)
             function fetchProcessBatch(paths, isNotReadable) {
-                var body = new URLSearchParams();
-                body.set('ajax_action', 'process');
-                body.set('is_not_readable', isNotReadable ? '1' : '0');
-                body.set('paths', paths.join(','));
-                body.set('seen_hashes', _seenHashes.join(','));
-                body.set('ml', (typeof ML_MODEL !== 'undefined' && ML_MODEL) ? '1' : '0'); // no model: skip ML features
-                return postAction(body).then(function(r) { return r.json(); });
+                return postAction({
+                    ajax_action: 'process',
+                    is_not_readable: isNotReadable ? '1' : '0',
+                    paths: paths.join(','),
+                    ml: (typeof ML_MODEL !== 'undefined' && ML_MODEL) ? '1' : '0', // no model: skip ML features
+                });
             }
 
+            // Batches arrive in scan order, so the first file with an MD5 is the
+            // original and later ones are its duplicates
             function applyProcessResult(data, allFeatures) {
                 reportServerWarnings(data);
-                var feats = data.features || [];
-                feats.forEach(function(f) {
+                (data.features || []).forEach(function(f) {
                     f.pathRaw = f.path; // encoded form, sent back as-is
                     f.path = decodePath(f.path);
-                    if (f.duplicate_of !== false) f.duplicate_of = decodePath(f.duplicate_of);
+                    f.duplicate_of = false;
+                    if (!f.is_unreadable) {
+                        if (_firstPathByMd5.has(f.md5)) f.duplicate_of = _firstPathByMd5.get(f.md5);
+                        else _firstPathByMd5.set(f.md5, f.path);
+                    }
                     allFeatures.push(f);
                 });
-                if (data.new_hashes) {
-                    data.new_hashes.forEach(function(h) { _seenHashes.push(h); });
-                }
             }
 
             // A batch that fails to parse as JSON usually means exactly one
@@ -3516,11 +3672,11 @@ if (isset($_POST['ajax_action'])) {
                     })
                     .then(function() {
                         if (_scanCancelled) { return; }
-                        // Incremental render every 3 chunks so user sees progress
-                        if ((idx + 1) % 3 === 0 || idx + 1 === chunks.length) {
-                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
-                            analyzedData = analyzeData(allFeatures, currentThreshold);
-                            renderTable(analyzedData);
+                        // Show results so far every few seconds: rescoring and rendering
+                        // everything after each chunk would cost more than the scan
+                        if (Date.now() - _lastProgressRender > 3000) {
+                            reanalyze(allFeatures);
+                            _lastProgressRender = Date.now();
                         }
                         return processChunk(chunks, idx + 1, allFeatures, totalFiles, chunkSize);
                     });
@@ -3580,8 +3736,8 @@ if (isset($_POST['ajax_action'])) {
                 }
 
                 var batches = [];
-                for (var i = 0; i < hashes.length; i += 1000) {
-                    batches.push(hashes.slice(i, i + 1000));
+                for (var i = 0; i < hashes.length; i += MHR_BATCH) {
+                    batches.push(hashes.slice(i, i + MHR_BATCH));
                 }
 
                 var hitMap = {};
@@ -3594,14 +3750,7 @@ if (isset($_POST['ajax_action'])) {
                             (idx + 1) + '/' + batches.length + ' (' + batches[idx].length + ' hashes)';
                     }
 
-                    var body = new URLSearchParams();
-                    body.set('ajax_action', 'mhr_check');
-                    body.set('mhr_user', mhrUser);
-                    body.set('mhr_pass', mhrPass);
-                    batches[idx].forEach(function (h) { body.append('hashes[]', h); });
-
-                    return postAction(body)
-                        .then(function (r) { return r.json(); })
+                    return postAction({ ajax_action: 'mhr_check', mhr_user: mhrUser, mhr_pass: mhrPass, hashes: batches[idx].join(',') })
                         .then(function (data) {
                             reportServerWarnings(data);
                             if (data && data.error) {
@@ -3658,14 +3807,11 @@ if (isset($_POST['ajax_action'])) {
                         statusEl.textContent = 'Unlinking ' + hitFiles.length + ' matched file(s)…';
                     }
 
-                    var body = new URLSearchParams();
-                    body.set('ajax_action', 'mhr_unlink');
-                    body.set('mhr_user', mhrUser); // the server re-checks each file's hash with MHR before deleting
-                    body.set('mhr_pass', mhrPass);
-                    body.set('paths', hitFiles.map(function (f) { return f.pathRaw; }).join(','));
-
-                    return postAction(body)
-                        .then(function (r) { return r.json(); })
+                    // The server re-checks each file's hash with MHR before deleting it
+                    return postAction({
+                        ajax_action: 'mhr_unlink', mhr_user: mhrUser, mhr_pass: mhrPass,
+                        paths: hitFiles.map(function (f) { return f.pathRaw; }).join(','),
+                    })
                         .then(function (data) {
                             reportServerWarnings(data);
                             var errorsByPath = {};
@@ -3682,9 +3828,7 @@ if (isset($_POST['ajax_action'])) {
                             // per-file failed-deletion list with paths, via renderWarningPanel)
                             // *before* logWarning adds the one summary line below it — so the
                             // outcome is reported exactly once, not twice in different words.
-                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
-                            analyzedData = analyzeData(features, currentThreshold);
-                            renderTable(analyzedData);
+                            reanalyze(features);
 
                             var failCount = Object.keys(errorsByPath).length;
                             if (statusEl) { statusEl.textContent = 'Done.'; }
@@ -3697,9 +3841,7 @@ if (isset($_POST['ajax_action'])) {
                             );
                         })
                         .catch(function (err) {
-                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
-                            analyzedData = analyzeData(features, currentThreshold);
-                            renderTable(analyzedData);
+                            reanalyze(features);
                             var errMsg = 'MHR unlink request failed: ' + err.message;
                             if (statusEl) { statusEl.textContent = errMsg; }
                             logWarning(errMsg, 'error');

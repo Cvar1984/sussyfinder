@@ -45,11 +45,9 @@ function findChrome() {
 function buildSandbox() {
     fs.mkdirSync(path.join(box, 'www'));
     let page = fs.readFileSync(lib.MAIN, 'utf8');
-    for (const name of ['_WHITELIST_', '_BLACKLIST_']) {
-        const on = `define('${name}', true);`;
-        if (!page.includes(on)) throw new Error(`main.php no longer has ${on}: can't switch it off for the test`);
-        page = page.replace(on, `define('${name}', false);`);
-    }
+    // No hash lists (the sandbox may be offline), set the way main.php's settings are overridden
+    if (!page.startsWith('<?php')) throw new Error('main.php no longer starts with <?php');
+    page = "<?php define('_WHITELIST_', false); define('_BLACKLIST_', false);" + page.slice('<?php'.length);
     fs.writeFileSync(path.join(box, 'www', 'main.php'), page);
     const corpora = lib.loadCorpora();
     fs.cpSync(path.join(lib.corpus('blackarch-webshells', corpora).dir, 'php'), path.join(DATA, 'shells'), { recursive: true });

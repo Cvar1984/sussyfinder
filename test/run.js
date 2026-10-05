@@ -72,8 +72,8 @@ const PROFILES = {
         ini: 'disable_functions = exec,shell_exec,system,passthru,proc_open,popen,pcntl_exec,curl_init,curl_exec,curl_multi_exec,fsockopen,pfsockopen\nallow_url_fopen = Off\n',
     },
     minimal: {
-        about: 'json_encode and cURL missing (as on PHP < 5.2 or a stripped build); PHP 8+ only, older PHP cannot polyfill a disabled built-in',
-        ini: 'disable_functions = json_encode,curl_init,curl_exec,curl_setopt,curl_error\n', minMajor: 8,
+        about: 'json_encode and cURL missing (as on PHP < 5.2 or a stripped build)',
+        ini: 'disable_functions = json_encode,curl_init,curl_exec,curl_setopt,curl_error\n',
     },
 };
 
@@ -86,8 +86,8 @@ function containerTargets(spec, profileSpec) {
     const supported = v => { const [a, b] = v.split('.').map(Number); return a > 4 || (a === 4 && b >= 3); };
     const targets = [];
     for (const { v, type } of want) for (const profile of profiles) {
-        const legacy = type === 'legacy', major = parseInt(v, 10);
-        if (profile !== 'default' && (legacy || major < (PROFILES[profile].minMajor || 0))) continue; // see PROFILES
+        const legacy = type === 'legacy';
+        if (profile !== 'default' && legacy) continue; // profiles go into the official images' conf.d
         const container = `sf-test-${v}-${profile}`;
         const exec = (cmd, opts = {}) => lib.execAsync('docker', ['exec', container].concat(cmd), Object.assign({ stdio: ['ignore', 'pipe', 'ignore'] }, opts));
         targets.push({
@@ -149,7 +149,7 @@ async function extractBenchmark(t) {
 }
 
 function benchmark(summary, rows) {
-    const ctx = lib.loadScoring({ weights: summary.weights, model: args['no-ml'] ? null : lib.readModel() });
+    const ctx = lib.loadScoring({ weights: summary.weights, roles: summary.roles, model: args['no-ml'] ? null : lib.readModel() });
     const threshold = args.threshold ? parseFloat(args.threshold) : lib.constant(ctx, 'Z_THRESHOLD');
     const anomalyScore = lib.constant(ctx, 'ANOMALY_SCORE'), criticalScore = lib.constant(ctx, 'CRITICAL_SCORE');
     const scored = ctx.analyzeData(rows, threshold);
@@ -199,10 +199,9 @@ function webCheck(t) {
     const wire = p => encodeURIComponent(encodeURIComponent(p));
     // comma-separated (%2C); a path that doesn't exist must come back as a warning, not vanish
     const paths = [wire(micro), wire('/work/fixture/it\'s "odd".php'), encodeURIComponent(latin1), wire('/work/fixture/missing.php')].join('%2C');
-    const proc = json(curl(['--data', 'ajax_action=process', '--data', 'paths=' + paths,
-        '--data', 'seen_hashes=' + encodeURIComponent(microMd5 + ':' + encodeURIComponent('/earlier/micro.php'))]));
+    const proc = json(curl(['--data', 'ajax_action=process', '--data', 'paths=' + paths]));
     const feats = proc && proc.features || [];
-    const procOk = feats.length === 3 && decodeURIComponent(feats[0].duplicate_of) === '/earlier/micro.php' &&
+    const procOk = feats.length === 3 && feats[0].md5 === microMd5 &&
         feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1 &&
         proc.warnings.some(w => w.indexOf('Skipped /work/fixture/missing.php') === 0);
     const fixtureOk = !!fixtureScan && fixtureScan.total === unit.LISTING_WANT.length;

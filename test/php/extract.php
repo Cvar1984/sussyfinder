@@ -26,7 +26,6 @@ $done = fopen($SUSSY_STATE . '/done', 'a');
 foreach ($SUSSY_DIRS as $dir) {
     $listing = getSortedByPattern($dir, $pattern);
     $seen = array();
-    $new = array();
     foreach ($listing['file_readable'] as $file) {
         if (isset($skip[$file])) {
             continue;
@@ -34,15 +33,15 @@ foreach ($SUSSY_DIRS as $dir) {
         $fh = fopen($SUSSY_STATE . '/progress', 'w');
         fwrite($fh, $file);
         fclose($fh);
-        foreach (scanReadablePaths(array($file), array(), array(), $tokenNeedles, $seen, $new) as $row) {
+        foreach (scanReadablePaths(array($file), array(), array(), $tokenNeedles, $seen) as $row) {
             if (!empty($SUSSY_RELATIVE)) {
                 $row['path'] = substr($file, strlen(rtrim($dir, '/')) + 1);
             }
-            fwrite($rows, json_encode($row) . "\n");
+            fwrite($rows, jsonEncode($row) . "\n");
         }
         fwrite($done, $file . "\0");
         fflush($rows);
         fflush($done);
     }
 }
-echo json_encode(array('php' => PHP_VERSION, 'weights' => $tokenNeedles));
+echo jsonEncode(array('php' => PHP_VERSION, 'weights' => $tokenNeedles, 'roles' => $tokenRoles));
