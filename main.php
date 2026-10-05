@@ -29,6 +29,7 @@ error_reporting(E_ALL);
 define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
 define('_MHR_', true);
+define('_ML_', true); // ML second opinion; false skips its feature extraction (~40% less analysis time)
 
 $mhrUsername = '';
 $mhrPassword = '';
@@ -916,7 +917,7 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             'owner'          => $owner,
             'entropy'        => $entropy,
             'total_tokens'   => $totalTokens,
-            'ml_features'    => mlFeatures($tokens, $content, $entropy),
+            'ml_features'    => _ML_ ? mlFeatures($tokens, $content, $entropy) : null,
             'matched_tokens' => $matchedTokens,
             'md5'            => $fileSum,
             'is_blacklisted' => $isBlacklisted,
@@ -1753,7 +1754,9 @@ if (isset($_POST['ajax_action'])) {
                 <option value="tokens">Sort: Tokens</option>
                 <option value="zSusp">Sort: Z‑Score</option>
                 <option value="residual">Sort: Residual</option>
+<?php if (_ML_) { ?>
                 <option value="ml">Sort: ML Score</option>
+<?php } ?>
             </select>
 
             <select id="severityFilter" onchange="applySeverityFilter()" title="Filter results">

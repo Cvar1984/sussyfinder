@@ -359,6 +359,8 @@ $$
 
 $P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. A file scoring 0.9 or more that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
 
+To turn the model off, set `define('_ML_', false);` near the top of `main.php`. The server then skips `mlFeatures()`, which saves about 40% of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
+
 #### Training data
 
 `test/corpora.json` pins 97 public sources to exact commits. `node test/fetch-corpora.js` downloads them (about 5 GB) into the git-ignored `test/corpora/`:
