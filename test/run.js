@@ -185,12 +185,14 @@ function webCheck(t) {
     const microMd5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(root, 'test/webshells/php/micro.php'))).digest('hex');
     const latin1 = '%2Fwork%2Ffixture%2Fcaf%E9.php';
     const wire = p => encodeURIComponent(encodeURIComponent(p));
-    const paths = [wire(micro), wire('/work/fixture/it\'s "odd".php'), encodeURIComponent(latin1)].join('%00');
+    // comma-separated (%2C); a path that doesn't exist must come back as a warning, not vanish
+    const paths = [wire(micro), wire('/work/fixture/it\'s "odd".php'), encodeURIComponent(latin1), wire('/work/fixture/missing.php')].join('%2C');
     const proc = json(curl(['--data', 'ajax_action=process', '--data', 'paths=' + paths,
         '--data', 'seen_hashes=' + encodeURIComponent(microMd5 + ':' + encodeURIComponent('/earlier/micro.php'))]));
     const feats = proc && proc.features || [];
     const procOk = feats.length === 3 && decodeURIComponent(feats[0].duplicate_of) === '/earlier/micro.php' &&
-        feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1;
+        feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1 &&
+        proc.warnings.some(w => w.indexOf('Skipped /work/fixture/missing.php') === 0);
     const fixtureOk = !!fixtureScan && fixtureScan.total === listingWant.length;
     const csrfOk = !!noHeader && noHeader.error === 'forbidden';
     const ok = jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk;

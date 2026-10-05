@@ -140,7 +140,7 @@ function toBits(hex) {
             all.push({
                 id, corpus: c.name, family: c.family, label: c.label === 'shell' ? 1 : 0, md5: d.md5,
                 foreign: d.no_php && d.foreign, bits: toBits(d.ml_features), hex: all.length < 500 ? d.ml_features : null,
-                ruleAnomaly: res[i].isAnomaly && !res[i].mlOnly,
+                ruleAnomaly: res[i].isAnomaly && !res[i].mlOnly, ruleScore: res[i].ruleScore,
             });
         });
     }
@@ -275,6 +275,14 @@ function toBits(hex) {
     [0.5, 0.7, 0.8, 0.9, 0.95, 0.98].forEach(t => report(`ml >= ${t}${t === threshold ? ' (shipped)' : ''}`, d => d.cvScore >= t));
     report(`rules or ml >= ${threshold}`, d => d.ruleAnomaly || d.cvScore >= threshold);
     report(`  ml only (>= ${threshold})`, d => !d.ruleAnomaly && d.cvScore >= threshold);
+    // How main.php combines them: ML points added to the rule score (mlPoints())
+    const floor = vm.runInContext('ML_FLOOR', ctx);
+    const combined = (d, f) => d.ruleScore + ctx.mlPoints(d.cvScore, f);
+    console.log(`\nThreat score with ML points (ML_FLOOR sweep, shipped ${floor}):`);
+    [0.5, 0.6, 0.7, 0.8].forEach(f => {
+        report(`  anomaly, floor ${f}${f === floor ? ' *' : ''}`, d => d.ruleAnomaly || combined(d, f) >= 8);
+        report(`  score >= 15, floor ${f}`, d => combined(d, f) >= 15);
+    });
     const isPhp = d => !d.foreign;
     const phpShells = mal.filter(isPhp).length;
     console.log(`\nPHP files only (ASP/JSP/CGI in PHP-named files left out):`);

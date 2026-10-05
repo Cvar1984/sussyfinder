@@ -864,9 +864,11 @@ function inputValue($source, $key)
 }
 
 /**
- * Read a POST field holding a NUL-separated list. One field (unlike
+ * Read a POST field holding a comma-separated list. One field (unlike
  * paths[]=...) stays clear of max_input_vars no matter how many entries it
- * holds. Paths travel rawurlencode()d, so NUL can't occur inside an entry.
+ * holds. Paths travel rawurlencode()d, so a raw comma can't occur inside an
+ * entry. (NUL was used before, but hardened hosts strip or drop request values
+ * containing NUL, e.g. Suhosin's default disallow_nul, which emptied every scan.)
  *
  * @param string $key
  * @return array
@@ -877,7 +879,7 @@ function postList($key)
     if ($value === null || $value === '') {
         return array();
     }
-    return explode("\0", $value);
+    return explode(',', $value);
 }
 
 /**
@@ -901,6 +903,7 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
 
     foreach ($paths as $filePath) {
         if (!file_exists($filePath) || !is_readable($filePath)) {
+            trigger_error('Skipped ' . $filePath . ': it no longer exists or is not readable', E_USER_WARNING);
             continue;
         }
 
@@ -1667,6 +1670,38 @@ if (isset($_POST['ajax_action'])) {
                 cursor: crosshair;
             }
 
+            .chart-title {
+                text-align: center;
+                color: #ccc;
+                margin-bottom: 8px;
+                font-weight: bold;
+            }
+
+            .chart-help {
+                color: #888;
+                font-size: 12px;
+                margin: -6px 0 10px;
+            }
+
+            .selection-bar {
+                width: 90%;
+                margin: 8px auto;
+                padding: 6px 12px;
+                background: #1f3346;
+                border: 1px solid #2f5f8a;
+                border-radius: 6px;
+                font-size: 13px;
+            }
+
+            .selection-bar .hint {
+                color: #888;
+                font-size: 11px;
+            }
+
+            #result tr.row-linked td {
+                background: #3a3a3a;
+            }
+
             .dashboard-empty {
                 color: #888;
                 text-align: center;
@@ -1830,11 +1865,14 @@ if (isset($_POST['ajax_action'])) {
 
         <div id="chartsPanel" class="dashboard-panel">
             <h3>Threat Matrix & Anomaly Visualizations</h3>
+            <div class="chart-help">Drag to select files (Ctrl/⌘ adds to the selection) · click a dot or bar to select it · the table follows · Esc clears</div>
             <div id="chartsGrid" class="charts-grid"></div>
         </div>
 
         <!-- Tooltip for charts -->
         <div id="chart-tooltip"></div>
+
+        <div id="chartSelectionBar" class="selection-bar" style="display:none;"></div>
 
         <table align="center">
             <tbody id="result"></tbody>
@@ -1850,7 +1888,6 @@ if (isset($_POST['ajax_action'])) {
             let chartsVisible = false;
             let currentSearch = '';
             let searchTokensOnly = false;
-            let _timelineFilter = null; // {minTime, maxTime} or null
 
             // --- Client-side threat scoring (offloaded from PHP) ---
 
@@ -1936,6 +1973,21 @@ if (isset($_POST['ajax_action'])) {
             // Score at or above which the model alone flags a file (a ranking
             // score from training, not a calibrated probability)
             const ML_THRESHOLD = 0.9;
+            // The ML score adds threat points: none at or below ML_FLOOR, rising
+            // linearly to 8 (the anomaly / HIGH RISK bar) at ML_THRESHOLD and 10 at 1.0.
+            // 0.6 on node test/run.js: lower adds false positives, higher loses catches
+            // (node test/train-ml.js reports the same sweep on held-out scores)
+            const ML_FLOOR = 0.6;
+
+            // floor: ML_FLOOR unless given (test/train-ml.js sweeps it)
+            function mlPoints(ml, floor) {
+                if (floor === undefined) floor = ML_FLOOR;
+                if (ml === null || ml <= floor) return 0;
+                const pts = ml < ML_THRESHOLD
+                    ? 8 * (ml - floor) / (ML_THRESHOLD - floor)
+                    : 8 + 2 * (Math.min(ml, 1) - ML_THRESHOLD) / (1 - ML_THRESHOLD);
+                return Math.round(pts * 100) / 100;
+            }
             const _mlWeightCache = new Map();
             // Hex digit -> value by char code: parseInt() per digit was 36x slower
             const _mlNibble = new Uint8Array(128);
@@ -2049,14 +2101,21 @@ if (isset($_POST['ajax_action'])) {
                             rareOwner: false,
                             isAnomaly: true,
                             mlScore: null,
+                            mlPoints: 0,
                             mlOnly: false,
+                            ruleScore: 0,
                             threatScore: 0,
                             date: formatDate(d.mtime),
                             suspCount: 0
                         };
                     }
 
-                    let threatScore = calculateThreatScore(d, weights);
+                    // The ML model was trained on PHP, so .htaccess files aren't scored.
+                    // Its points are added after the rule multipliers, never multiplied.
+                    const ml = d.is_htaccess ? null : mlScore(d.ml_features);
+                    const mlPts = mlPoints(ml);
+                    const ruleScore = calculateThreatScore(d, weights);
+                    let threatScore = Math.round((ruleScore + mlPts) * 100) / 100;
 
                     if (d.is_blacklisted) {
                         threatScore = Math.max(threatScore, 100.0);
@@ -2097,20 +2156,18 @@ if (isset($_POST['ajax_action'])) {
                     //
                     // Entropy only matters on the high side; a near-empty stub
                     // isn't an outlier worth reviewing.
-                    const ruleAnomaly = (threatScore >= 8.0) ||
-                        (zEntropy > threshold) ||
+                    const otherTriggers = (zEntropy > threshold) ||
                         (Math.abs(zMtime) > threshold) ||
                         (Math.abs(zCtime) > threshold) ||
                         rareOwner ||
                         (residual > 5) ||
                         d.is_blacklisted ||
                         d.mhr_hit === true;
-                    // The ML model is a second opinion: it can flag a file the
-                    // rules miss (mlOnly), never clear one they flag. It was
-                    // trained on PHP, so .htaccess files aren't scored.
-                    const ml = d.is_htaccess ? null : mlScore(d.ml_features);
-                    const mlOnly = !ruleAnomaly && ml !== null && ml >= ML_THRESHOLD;
-                    const isAnomaly = ruleAnomaly || mlOnly;
+                    // ML points can lift a file over the bar, never pull one under it;
+                    // mlOnly marks files flagged only because of them
+                    const ruleAnomaly = ruleScore >= 8.0 || otherTriggers;
+                    const isAnomaly = threatScore >= 8.0 || otherTriggers;
+                    const mlOnly = isAnomaly && !ruleAnomaly;
 
                     return {
                         ...d,
@@ -2119,7 +2176,9 @@ if (isset($_POST['ajax_action'])) {
                         rareOwner: rareOwner,
                         isAnomaly: isAnomaly,
                         mlScore: ml,
+                        mlPoints: mlPts,
                         mlOnly: mlOnly,
+                        ruleScore: ruleScore,
                         threatScore: threatScore,
                         date: d.mtime ? formatDate(d.mtime) : 'N/A',
                         suspCount: suspCount
@@ -2201,14 +2260,16 @@ if (isset($_POST['ajax_action'])) {
                 window.open('https://www.virustotal.com/gui/file/' + encodeURIComponent(hash), '_blank', 'noopener');
             }
 
+            // What the table shows: its filters plus any selection made in the charts
             function shouldShowFile(d) {
+                return (!_chartSelection || _chartSelection.has(d.path)) && passesTableFilters(d);
+            }
+
+            function passesTableFilters(d) {
+                if (currentSearch === '__BLACKLIST__') return d.is_blacklisted === true;
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && d.threatScore < 10.0 && !d.is_blacklisted) return false;
                 if (currentFilterMode === 'obfuscated' && (d.entropy <= HIGH_ENTROPY || d.is_unreadable)) return false;
-
-                if (_timelineFilter) {
-                    if (!d.mtime || d.mtime < _timelineFilter.minTime || d.mtime > _timelineFilter.maxTime) return false;
-                }
 
                 if (!currentSearch.trim()) return true;
 
@@ -2377,14 +2438,18 @@ if (isset($_POST['ajax_action'])) {
                         } else if (d.threatScore >= 8.0) {
                             color = '#dddbdb';
                             badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
-                        } else if (d.mlOnly) {
-                            badge = `<span style="background:#6a3d9a;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;" title="flagged by the ML model only">ML (${Math.round(d.mlScore * 100)}%)</span> `;
                         } else if (d.is_htaccess) {
                             color = '#66ccff';
                             badge = '<span style="background:#005580;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HTACCESS</span> ';
                         } else if (d.duplicate_of !== false) {
                             badge = '<span style="background:#444;color:#aaa;padding:2px 6px;border-radius:3px;font-size:11px;">DUPLICATE</span> ';
                             status = escapeHtml(d.duplicate_of);
+                        }
+
+                        if (d.mlPoints > 0) {
+                            const why = `ML model ${Math.round(d.mlScore * 100)}%: +${d.mlPoints.toFixed(1)} of the threat score` +
+                                (d.mlOnly ? '. Flagged only because of it' : '');
+                            badge += `<span style="background:#6a3d9a;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;" title="${why}">ML +${d.mlPoints.toFixed(1)}</span> `;
                         }
 
                         if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
@@ -2401,7 +2466,7 @@ if (isset($_POST['ajax_action'])) {
                         } else {
                             const sizeKB = (d.size / 1024).toFixed(1);
                             const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
-                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' | ML: ' + Math.round(d.mlScore * 100) + '%' : ''} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
+                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' (rules ' + d.ruleScore.toFixed(1) + ' + ML ' + d.mlPoints.toFixed(1) + ' from ' + Math.round(d.mlScore * 100) + '%)' : ''} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
                         }
 
                         const fileLink = `<span class="file-link" data-copy="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>`;
@@ -2414,7 +2479,7 @@ if (isset($_POST['ajax_action'])) {
                         let mainLine = badge + fileLink + md5Btn + vtBadge;
                         if (status) mainLine += ' (' + status + ')';
 
-                        html += `<tr>
+                        html += `<tr data-path="${escapeHtml(d.path)}">
                             <td style="color:${color}; font-size:13px;">
                                 ${mainLine}
                                 <br><span class="verbosity">${verbosity}</span>
@@ -2423,6 +2488,10 @@ if (isset($_POST['ajax_action'])) {
                     });
                 }
                 document.getElementById('result').innerHTML = html;
+                _rowByPath = new Map();
+                _linkedRow = null;
+                document.querySelectorAll('#result tr[data-path]').forEach(tr => _rowByPath.set(tr.getAttribute('data-path'), tr));
+                syncCharts(data);
             }
 
             function copyResults() {
@@ -2433,7 +2502,7 @@ if (isset($_POST['ajax_action'])) {
                         if (d.is_unreadable) line += ' (NOT_READABLE)';
                         else if (d.is_blacklisted) line += ' (BLACKLIST)';
                         else if (d.mhr_hit) line += ' (MHR HIT ' + d.mhr_detection_rate + '%)';
-                        else if (d.mlOnly) line += ' (ML ' + Math.round(d.mlScore * 100) + '%)';
+                        else if (d.mlOnly) line += ' (flagged by ML ' + Math.round(d.mlScore * 100) + '%)';
                         else if (d.is_htaccess) line += ' (HTACCESS)';
                         else if (d.duplicate_of !== false) line += ' (' + d.duplicate_of + ')';
                         else if (d.matched_tokens && d.matched_tokens.length > 0) {
@@ -2441,7 +2510,7 @@ if (isset($_POST['ajax_action'])) {
                         }
                         if (!d.is_unreadable && d.size !== null) {
                             const sizeKB = (d.size / 1024).toFixed(1);
-                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' | ML: ' + Math.round(d.mlScore * 100) + '%' : ''} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
+                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' (rules ' + d.ruleScore.toFixed(1) + ' + ML ' + d.mlPoints.toFixed(1) + ' from ' + Math.round(d.mlScore * 100) + '%)' : ''} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
                             if (d.md5 && d.md5 !== 'N/A') line += ` | MD5: ${d.md5}`;
                         } else {
                             line += ` | ${d.date}`;
@@ -2473,7 +2542,6 @@ if (isset($_POST['ajax_action'])) {
                         analyzedData = analyzeData(rawFileData, currentThreshold);
                         renderTable(analyzedData);
                         if (insightsVisible) renderInsights(analyzedData);
-                        if (chartsVisible) renderCharts(analyzedData);
                     }
                 }
             }
@@ -2491,19 +2559,7 @@ if (isset($_POST['ajax_action'])) {
                 currentFilterMode = 'all';
                 currentSearch = '';
                 searchTokensOnly = false;
-                _timelineFilter = null;
-                renderTable(analyzedData);
-            }
-
-            function filterByTimeline(minTime, maxTime) {
-                _timelineFilter = { minTime: minTime, maxTime: maxTime };
-                currentSort = 'mtime';
-                currentSearch = '';
-                searchTokensOnly = false;
-                currentFilterMode = 'all';
-                document.getElementById('searchInput').value = '';
-                document.getElementById('searchTokensOnly').checked = false;
-                document.getElementById('severityFilter').value = 'all';
+                _chartSelection = null;
                 renderTable(analyzedData);
             }
 
@@ -2640,17 +2696,9 @@ if (isset($_POST['ajax_action'])) {
                 document.getElementById('searchTokensOnly').checked = false;
                 currentFilterMode = 'all';
                 document.getElementById('severityFilter').value = 'all';
-                _timelineFilter = null;
+                _chartSelection = null;
                 renderTable(analyzedData);
             }
-
-            const originalShouldShow = shouldShowFile;
-            shouldShowFile = function(d) {
-                if (currentSearch === '__BLACKLIST__') {
-                    return d.is_blacklisted === true;
-                }
-                return originalShouldShow(d);
-            };
 
             function toggleCharts() {
                 chartsVisible = !chartsVisible;
@@ -2675,256 +2723,391 @@ if (isset($_POST['ajax_action'])) {
                 tooltip.style.top = topPos + 'px';
             }
 
+            // ── Charts ───────────────────────────────────────────────────────
+            // Four linked views of analyzedData. They share one selection
+            // (_chartSelection, a Set of paths) that also filters the table, fade
+            // what the table's filters hide, and highlight the file hovered in any
+            // chart or table row. Charts are built once per dataset and only
+            // redrawn on filter, selection, hover and resize changes; mouse
+            // gestures go through one set of document listeners, added once.
+            //   drag: select a box (a time range on the timeline); Ctrl/Cmd adds
+            //   click: select that file or time bucket; click empty space: clear
+            //   Threat Matrix: wheel zooms, Shift+drag pans, double-click resets
+            //   Esc or "Clear selection": back to everything
+            let _chartSelection = null;
+            let _chartSelectionLabel = '';
+            let _chartHover = null;          // path hovered in a chart or a table row
+            let _charts = [];
+            let _chartsData = null;          // the dataset the charts were built from
+            let _chartDrag = null;
+            let _chartRedrawQueued = false;
+            let _rowByPath = new Map();
+            let _linkedRow = null;
+            const CHART_HEIGHT = 300;
+
+            function setChartSelection(paths, label, additive) {
+                if (additive && _chartSelection) {
+                    paths.forEach(p => _chartSelection.add(p));
+                    _chartSelectionLabel = 'several selections';
+                } else {
+                    _chartSelection = paths.length ? new Set(paths) : null;
+                    _chartSelectionLabel = label;
+                }
+                renderTable(analyzedData);
+            }
+
+            function clearChartSelection() {
+                if (!_chartSelection) return;
+                _chartSelection = null;
+                renderTable(analyzedData);
+            }
+
+            // renderTable() calls this after every change: rebuild the charts for a
+            // new dataset, otherwise just redraw them with the current filters
+            function syncCharts(data) {
+                const bar = document.getElementById('chartSelectionBar');
+                if (_chartSelection) {
+                    bar.innerHTML = '<strong>' + _chartSelection.size + '</strong> file(s) selected in the charts (' +
+                        escapeHtml(_chartSelectionLabel) + '); the table shows only these. ' +
+                        '<button type="button" onclick="clearChartSelection()">Clear selection</button> <span class="hint">or press Esc</span>';
+                    bar.style.display = 'block';
+                } else {
+                    bar.style.display = 'none';
+                }
+                if (!chartsVisible) return;
+                if (data !== _chartsData) renderCharts(data);
+                else requestChartRedraw();
+            }
+
+            function requestChartRedraw() {
+                if (_chartRedrawQueued) return;
+                _chartRedrawQueued = true;
+                requestAnimationFrame(function () {
+                    _chartRedrawQueued = false;
+                    _charts.forEach(c => c.draw());
+                });
+            }
+
+            // A dot hovered in a chart outlines its table row; a row hovered in
+            // the table rings its dot in every chart
+            function setChartHover(path) {
+                path = path || null;
+                if (path === _chartHover) return;
+                _chartHover = path;
+                if (_linkedRow) _linkedRow.classList.remove('row-linked');
+                _linkedRow = path !== null ? (_rowByPath.get(path) || null) : null;
+                if (_linkedRow) _linkedRow.classList.add('row-linked');
+                requestChartRedraw();
+            }
+
+            document.getElementById('result').addEventListener('mouseover', function (e) {
+                const tr = e.target.closest('tr[data-path]');
+                setChartHover(tr ? tr.getAttribute('data-path') : null);
+            });
+            document.getElementById('result').addEventListener('mouseleave', function () { setChartHover(null); });
+
+            function chartPoint(c, e) {
+                const r = c.canvas.getBoundingClientRect();
+                return { x: e.clientX - r.left, y: e.clientY - r.top };
+            }
+
+            // Backing store at the device pixel ratio (sharp on HiDPI), drawn in CSS pixels
+            function sizeChart(c) {
+                const dpr = window.devicePixelRatio || 1;
+                c.w = c.canvas.clientWidth || 900;
+                c.h = CHART_HEIGHT;
+                c.canvas.width = Math.round(c.w * dpr);
+                c.canvas.height = Math.round(c.h * dpr);
+                c.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            }
+
+            // spec: draw(c) fills c.marks for hit testing; hit(c, x, y) returns
+            // { paths, label, html, hoverPath } or null; optional brush ('xy' box or
+            // 'x' range) with pathsIn(c, rect); optional zoom/pan/reset
+            function makeChart(grid, title, spec) {
+                const box = document.createElement('div');
+                box.className = 'chart-box';
+                const titleEl = document.createElement('div');
+                titleEl.className = 'chart-title';
+                titleEl.textContent = title;
+                box.appendChild(titleEl);
+                const canvas = document.createElement('canvas');
+                box.appendChild(canvas);
+                grid.appendChild(box);
+
+                const c = { title: title, canvas: canvas, ctx: canvas.getContext('2d'), marks: [], brush: spec.brush || null };
+                ['hit', 'pathsIn', 'zoom', 'pan', 'reset'].forEach(k => { if (spec[k]) c[k] = spec[k].bind(null, c); });
+                c.draw = function () {
+                    c.ctx.clearRect(0, 0, c.w, c.h);
+                    c.ctx.fillStyle = '#2a2a2a';
+                    c.ctx.fillRect(0, 0, c.w, c.h);
+                    c.marks = [];
+                    spec.draw(c);
+                    drawBrush(c);
+                };
+                sizeChart(c);
+                bindChartEvents(c);
+                _charts.push(c);
+                c.draw();
+            }
+
+            function bindChartEvents(c) {
+                const canvas = c.canvas;
+                const tooltip = document.getElementById('chart-tooltip');
+                canvas.addEventListener('mousemove', function (e) {
+                    if (_chartDrag) return;
+                    const p = chartPoint(c, e);
+                    const hit = c.hit(p.x, p.y);
+                    if (hit) {
+                        tooltip.innerHTML = hit.html;
+                        tooltip.style.display = 'block';
+                        positionTooltip(e, tooltip);
+                    } else {
+                        tooltip.style.display = 'none';
+                    }
+                    canvas.style.cursor = hit ? 'pointer' : 'crosshair';
+                    setChartHover(hit ? hit.hoverPath : null);
+                });
+                canvas.addEventListener('mouseleave', function () {
+                    tooltip.style.display = 'none';
+                    if (!_chartDrag) setChartHover(null);
+                });
+                canvas.addEventListener('mousedown', function (e) {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    const p = chartPoint(c, e);
+                    tooltip.style.display = 'none';
+                    _chartDrag = { c: c, x0: p.x, y0: p.y, x: p.x, y: p.y, moved: false,
+                        pan: e.shiftKey && !!c.pan, additive: e.ctrlKey || e.metaKey };
+                });
+                if (c.zoom) {
+                    canvas.addEventListener('wheel', function (e) {
+                        e.preventDefault();
+                        const p = chartPoint(c, e);
+                        c.zoom(p.x, p.y, e.deltaY > 0 ? 1.08 : 0.925);
+                        c.draw();
+                    }, { passive: false });
+                }
+                if (c.reset) {
+                    canvas.addEventListener('dblclick', function () { c.reset(); c.draw(); });
+                }
+            }
+
+            document.addEventListener('mousemove', function (e) {
+                const g = _chartDrag;
+                if (!g) return;
+                const p = chartPoint(g.c, e);
+                if (Math.abs(p.x - g.x0) + Math.abs(p.y - g.y0) > 4) g.moved = true;
+                if (g.pan) g.c.pan(p.x - g.x, p.y - g.y);
+                g.x = p.x;
+                g.y = p.y;
+                g.c.draw();
+            });
+            document.addEventListener('mouseup', function () {
+                const g = _chartDrag;
+                if (!g) return;
+                _chartDrag = null;
+                if (!g.moved) {
+                    const hit = g.c.hit(g.x0, g.y0);
+                    if (hit) setChartSelection(hit.paths, hit.label, g.additive);
+                    else if (!g.additive) clearChartSelection();
+                } else if (!g.pan && g.c.brush) {
+                    const rect = { x0: Math.min(g.x0, g.x), x1: Math.max(g.x0, g.x), y0: Math.min(g.y0, g.y), y1: Math.max(g.y0, g.y) };
+                    setChartSelection(g.c.pathsIn(rect), (g.c.brush === 'x' ? 'range' : 'box') + ' on ' + g.c.title, g.additive);
+                }
+                g.c.draw();
+            });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape') clearChartSelection();
+            });
+            let _chartResizeTimer = null;
+            window.addEventListener('resize', function () {
+                clearTimeout(_chartResizeTimer);
+                _chartResizeTimer = setTimeout(function () {
+                    if (!chartsVisible) return;
+                    _charts.forEach(function (c) { sizeChart(c); c.draw(); });
+                }, 150);
+            });
+
+            function drawBrush(c) {
+                const g = _chartDrag;
+                if (!g || g.c !== c || !g.moved || g.pan || !c.brush) return;
+                const x = Math.min(g.x0, g.x), w = Math.abs(g.x - g.x0);
+                const y = c.brush === 'x' ? 0 : Math.min(g.y0, g.y), h = c.brush === 'x' ? c.h : Math.abs(g.y - g.y0);
+                const ctx = c.ctx;
+                ctx.save();
+                ctx.fillStyle = 'rgba(74, 139, 194, 0.15)';
+                ctx.strokeStyle = '#4a8bc2';
+                ctx.setLineDash([4, 3]);
+                ctx.fillRect(x, y, w, h);
+                ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+                ctx.restore();
+            }
+
+            function drawAxes(ctx, left, top, right, bottom) {
+                ctx.strokeStyle = '#555';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(left, top);
+                ctx.lineTo(left, bottom);
+                ctx.lineTo(right, bottom);
+                ctx.stroke();
+            }
+
+            function drawLabel(ctx, text, x, y, align, color) {
+                ctx.fillStyle = color || '#aaa';
+                ctx.font = '12px Ubuntu Mono, monospace';
+                ctx.textAlign = align || 'left';
+                ctx.fillText(text, x, y);
+            }
+
+            // Dots ({x, y, d, color}): files the table currently hides are faded and
+            // drawn first so the visible ones stay on top; the hovered file gets a ring
+            function drawDots(c, dots, radius) {
+                const ctx = c.ctx;
+                const faded = [], shown = [];
+                dots.forEach(p => (shouldShowFile(p.d) ? shown : faded).push(p));
+                const paint = p => { ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, radius, 0, Math.PI * 2); ctx.fill(); };
+                ctx.globalAlpha = 0.15;
+                faded.forEach(paint);
+                ctx.globalAlpha = 1;
+                shown.forEach(paint);
+                c.marks = faded.concat(shown);
+                const hover = _chartHover !== null ? c.marks.find(p => p.d.path === _chartHover) : null;
+                if (hover) {
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath(); ctx.arc(hover.x, hover.y, radius + 4, 0, Math.PI * 2); ctx.stroke();
+                }
+            }
+
+            function dotAt(c, x, y) {
+                for (let i = c.marks.length - 1; i >= 0; i--) { // top-most first
+                    const m = c.marks[i];
+                    if ((m.x - x) ** 2 + (m.y - y) ** 2 < 64) return m;
+                }
+                return null;
+            }
+
+            function dotsIn(c, r) {
+                return c.marks.filter(m => m.x >= r.x0 && m.x <= r.x1 && m.y >= r.y0 && m.y <= r.y1).map(m => m.d.path);
+            }
+
+            function tooltipRows(rows) {
+                return rows.map(r => '<div><span class="label">' + r[0] + ':</span> <span class="value">' + r[1] + '</span></div>').join('');
+            }
+
+            function fileHit(m, extraRows) {
+                if (!m) return null;
+                const d = m.d;
+                const rows = [['File', escapeHtml(d.path)], ['Threat Score', d.threatScore.toFixed(1)]]
+                    .concat(extraRows(d), [['Matched', escapeHtml((d.matched_tokens || []).join(', '))]]);
+                return { paths: [d.path], label: d.path.split('/').pop(), hoverPath: d.path, html: tooltipRows(rows) };
+            }
+
             function renderCharts(data) {
                 const grid = document.getElementById('chartsGrid');
                 grid.innerHTML = '';
+                _charts = [];
+                _chartsData = data;
 
-                if (!data || data.length < 2) {
-                    grid.innerHTML = '<div class="dashboard-empty">Not enough data to render charts.</div>';
-                    return;
-                }
-
-                const valid = data.filter(d => !d.is_unreadable && d.size !== null && d.mtime !== null);
-
+                const valid = (data || []).filter(d => !d.is_unreadable && d.size !== null && d.mtime !== null);
                 if (valid.length < 2) {
                     grid.innerHTML = '<div class="dashboard-empty">Not enough readable files to render charts.</div>';
                     return;
                 }
 
-                const tooltip = document.getElementById('chart-tooltip');
-
-                function makeBox(title) {
-                    const box = document.createElement('div');
-                    box.className = 'chart-box';
-
-                    const titleEl = document.createElement('div');
-                    titleEl.style.textAlign = 'center';
-                    titleEl.style.color = '#ccc';
-                    titleEl.style.marginBottom = '8px';
-                    titleEl.style.fontWeight = 'bold';
-                    titleEl.textContent = title;
-                    box.appendChild(titleEl);
-
-                    const canvas = document.createElement('canvas');
-                    canvas.width = 900;
-                    canvas.height = 300;
-                    box.appendChild(canvas);
-                    grid.appendChild(box);
-
-                    return canvas.getContext('2d');
-                }
-
-                function clear(ctx) {
-                    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-                    ctx.fillStyle = '#2a2a2a';
-                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-                }
-
-                function drawAxes(ctx, left, top, right, bottom) {
-                    ctx.strokeStyle = '#555';
-                    ctx.lineWidth = 1;
-                    ctx.beginPath();
-                    ctx.moveTo(left, top);
-                    ctx.lineTo(left, bottom);
-                    ctx.lineTo(right, bottom);
-                    ctx.stroke();
-                }
-
-                function drawLabel(ctx, text, x, y, align, color) {
-                    ctx.fillStyle = color || '#aaa';
-                    ctx.font = '12px Ubuntu Mono, monospace';
-                    ctx.textAlign = align || 'left';
-                    ctx.fillText(text, x, y);
-                }
-
-                // 1. QUADRANT THREAT MATRIX: Token Suspicion Ratio vs Composite Threat Score
+                // 1. THREAT MATRIX: suspicious-token ratio vs composite threat score
                 {
-                    const ctx = makeBox('Threat Matrix: Token Suspicion Ratio vs Threat Score');
-                    const canvas = ctx.canvas;
-                    const left = 70, top = 30, right = 860, bottom = 255;
-                    const W = right - left, H = bottom - top;
+                    const X_SPLIT = 0.15, Y_SPLIT = 8.0;
+                    const pts = valid.map(d => ({ d: d, ratio: d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0, score: d.threatScore || 0 }));
+                    let maxRatio = 0.01, maxScore = 1;
+                    pts.forEach(p => { if (p.ratio > maxRatio) maxRatio = p.ratio; if (p.score > maxScore) maxScore = p.score; });
+                    const fit = () => ({ xLo: 0, xHi: maxRatio * 1.15 + 0.001, yLo: 0, yHi: maxScore * 1.12 + 0.5 });
+                    let view = fit();
+                    const area = c => ({ left: 70, top: 30, right: c.w - 30, bottom: c.h - 45 });
+                    const ratioOf = d => d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0;
 
-                    // raw data points
-                    const pts = valid.map(d => ({
-                        ratio: d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0,
-                        score: d.threatScore || 0,
-                        data: d
-                    }));
+                    makeChart(grid, 'Threat Matrix: Token Suspicion Ratio vs Threat Score', {
+                        brush: 'xy',
+                        draw: function (c) {
+                            const ctx = c.ctx, b = area(c), W = b.right - b.left, H = b.bottom - b.top;
+                            const xR = view.xHi - view.xLo || 1, yR = view.yHi - view.yLo || 1;
+                            const sx = v => b.left + ((v - view.xLo) / xR) * W;
+                            const sy = v => b.bottom - ((v - view.yLo) / yR) * H;
+                            drawAxes(ctx, b.left, b.top, b.right, b.bottom);
 
-                    // auto-fit initial axes to actual data range
-                    const xThresh = 0.15, yThresh = 8.0;
-                    let rawMaxRatio = 0.01, rawMaxScore = 1;
-                    pts.forEach(p => {
-                        if (p.ratio > rawMaxRatio) rawMaxRatio = p.ratio;
-                        if (p.score > rawMaxScore) rawMaxScore = p.score;
-                    });
-                    let view = {
-                        xLo: 0, xHi: rawMaxRatio * 1.15 + 0.001,
-                        yLo: 0, yHi: rawMaxScore * 1.12 + 0.5
-                    };
+                            // quadrant dividers and labels
+                            const qx = sx(X_SPLIT), qy = sy(Y_SPLIT);
+                            ctx.save(); ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+                            ctx.beginPath();
+                            if (qx > b.left && qx < b.right) { ctx.moveTo(qx, b.top); ctx.lineTo(qx, b.bottom); }
+                            if (qy > b.top && qy < b.bottom) { ctx.moveTo(b.left, qy); ctx.lineTo(b.right, qy); }
+                            ctx.stroke(); ctx.restore();
+                            ctx.font = '10px Ubuntu Mono, monospace';
+                            ctx.textAlign = 'right'; ctx.fillStyle = '#ff4444'; ctx.fillText('OBFUSCATED WEBSHELL', b.right - 4, b.top + 14);
+                            ctx.textAlign = 'left';  ctx.fillStyle = '#ffaa00'; ctx.fillText('RCE SCRIPT', b.left + 4, b.top + 14);
+                            ctx.textAlign = 'right'; ctx.fillStyle = '#4a8bc2'; ctx.fillText('DENSE NORMAL', b.right - 4, b.bottom - 6);
+                            ctx.textAlign = 'left';  ctx.fillStyle = '#777';    ctx.fillText('BENIGN', b.left + 4, b.bottom - 6);
 
-                    const hitPoints = [];
+                            // ticks
+                            ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace';
+                            for (let t = 0; t <= 5; t++) {
+                                const vy = view.yLo + (yR * t) / 5, vx = view.xLo + (xR * t) / 5;
+                                ctx.textAlign = 'right';  ctx.fillText(vy.toFixed(1), b.left - 4, sy(vy) + 4);
+                                ctx.textAlign = 'center'; ctx.fillText((vx * 100).toFixed(1) + '%', sx(vx), b.bottom + 14);
+                            }
 
-                    function drawThreatMatrix() {
-                        clear(ctx);
-                        const xRange = view.xHi - view.xLo || 1;
-                        const yRange = view.yHi - view.yLo || 1;
+                            // axis labels
+                            ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
+                            ctx.fillText('Suspicious Token Ratio (wheel: zoom · Shift+drag: pan · double-click: reset)', b.left + W / 2, b.bottom + 30);
+                            ctx.save(); ctx.translate(14, b.top + H / 2); ctx.rotate(-Math.PI / 2);
+                            ctx.fillText('Threat Score', 0, 0); ctx.restore();
 
-                        drawAxes(ctx, left, top, right, bottom);
-
-                        // quadrant dividers
-                        const qx = left + ((xThresh - view.xLo) / xRange) * W;
-                        const qy = bottom - ((yThresh - view.yLo) / yRange) * H;
-                        ctx.save(); ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.setLineDash([5,4]);
-                        ctx.beginPath();
-                        if (qx > left && qx < right) { ctx.moveTo(qx, top); ctx.lineTo(qx, bottom); }
-                        if (qy > top && qy < bottom) { ctx.moveTo(left, qy); ctx.lineTo(right, qy); }
-                        ctx.stroke(); ctx.setLineDash([]); ctx.restore();
-
-                        // quadrant labels
-                        ctx.font = '10px Ubuntu Mono, monospace';
-                        ctx.textAlign = 'right';  ctx.fillStyle = '#ff4444'; ctx.fillText('OBFUSCATED WEBSHELL', right-4, top+14);
-                        ctx.textAlign = 'left';   ctx.fillStyle = '#ffaa00'; ctx.fillText('RCE SCRIPT', left+4, top+14);
-                        ctx.textAlign = 'right';  ctx.fillStyle = '#4a8bc2'; ctx.fillText('DENSE NORMAL', right-4, bottom-6);
-                        ctx.textAlign = 'left';   ctx.fillStyle = '#777';    ctx.fillText('BENIGN', left+4, bottom-6);
-
-                        // Y ticks
-                        ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'right';
-                        for (let t = 0; t <= 5; t++) {
-                            const v = view.yLo + (yRange * t) / 5;
-                            const y = bottom - ((v - view.yLo) / yRange) * H;
-                            ctx.fillText(v.toFixed(1), left-4, y+4);
-                            ctx.save(); ctx.strokeStyle='#333'; ctx.lineWidth=1;
-                            ctx.beginPath(); ctx.moveTo(left-3,y); ctx.lineTo(left,y); ctx.stroke(); ctx.restore();
-                        }
-
-                        // X ticks
-                        ctx.textAlign = 'center';
-                        for (let t = 0; t <= 5; t++) {
-                            const v = view.xLo + (xRange * t) / 5;
-                            const x = left + ((v - view.xLo) / xRange) * W;
-                            ctx.fillText((v * 100).toFixed(1) + '%', x, bottom+14);
-                            ctx.save(); ctx.strokeStyle='#333'; ctx.lineWidth=1;
-                            ctx.beginPath(); ctx.moveTo(x,bottom); ctx.lineTo(x,bottom+3); ctx.stroke(); ctx.restore();
-                        }
-
-                        // axis labels
-                        ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
-                        ctx.fillText('Suspicious Token Ratio — scroll to zoom, drag to pan, dblclick to reset', left+W/2, bottom+28);
-                        ctx.save(); ctx.translate(14, top+H/2); ctx.rotate(-Math.PI/2);
-                        ctx.fillText('Threat Score', 0, 0); ctx.restore();
-
-                        // dots
-                        hitPoints.length = 0;
-                        pts.forEach(p => {
-                            const px = left + ((p.ratio - view.xLo) / xRange) * W;
-                            const py = bottom - ((p.score - view.yLo) / yRange) * H;
-                            if (px < left || px > right || py < top || py > bottom) return;
-                            let color;
-                            if (p.score >= yThresh && p.ratio >= xThresh) color = '#ff4444';
-                            else if (p.score >= yThresh)                  color = '#ffaa00';
-                            else if (p.ratio >= xThresh)                  color = '#4a8bc2';
-                            else                                           color = '#555';
-                            ctx.fillStyle = color;
-                            ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI*2); ctx.fill();
-                            hitPoints.push({ x: px, y: py, data: p.data, ratio: p.ratio });
-                        });
-                    }
-
-                    drawThreatMatrix();
-
-                    // wheel zoom around cursor
-                    canvas.addEventListener('wheel', function(e) {
-                        e.preventDefault();
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                        const fx = Math.max(0, Math.min(1, (mx - left) / W));
-                        const fy = Math.max(0, Math.min(1, (my - top) / H));
-                        const f = e.deltaY > 0 ? 1.08 : 0.925;
-                        const xR = view.xHi - view.xLo, yR = view.yHi - view.yLo;
-                        const pivX = view.xLo + fx * xR, pivY = view.yHi - fy * yR;
-                        view.xLo = Math.max(0, pivX - fx * xR * f);
-                        view.xHi = pivX + (1 - fx) * xR * f;
-                        view.yLo = Math.max(0, pivY - (1 - fy) * yR * f);
-                        view.yHi = pivY + fy * yR * f;
-                        drawThreatMatrix();
-                    }, { passive: false });
-
-                    // drag pan
-                    let tmDrag = false, tmLX = 0, tmLY = 0;
-                    canvas.addEventListener('mousedown', function(e) {
-                        if (e.button !== 0) return;
-                        tmDrag = true; tmLX = e.clientX; tmLY = e.clientY;
-                        canvas.style.cursor = 'grabbing'; e.preventDefault();
-                    });
-                    document.addEventListener('mousemove', function(e) {
-                        if (!tmDrag) return;
-                        const rect = canvas.getBoundingClientRect();
-                        const dx = (e.clientX - tmLX) / rect.width  * (view.xHi - view.xLo) * (canvas.width  / W);
-                        const dy = (e.clientY - tmLY) / rect.height * (view.yHi - view.yLo) * (canvas.height / H);
-                        view.xLo -= dx; view.xHi -= dx;
-                        view.yLo += dy; view.yHi += dy;
-                        if (view.xLo < 0) { view.xHi -= view.xLo; view.xLo = 0; }
-                        if (view.yLo < 0) { view.yHi -= view.yLo; view.yLo = 0; }
-                        tmLX = e.clientX; tmLY = e.clientY;
-                        drawThreatMatrix();
-                    });
-                    document.addEventListener('mouseup', function() {
-                        if (tmDrag) { tmDrag = false; canvas.style.cursor = 'crosshair'; }
-                    });
-
-                    // hover tooltip
-                    canvas.addEventListener('mousemove', function(e) {
-                        if (tmDrag) return;
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
-                        let hit = null;
-                        for (let j = 0; j < hitPoints.length; j++) {
-                            const hp = hitPoints[j];
-                            if ((hp.x-mx)**2 + (hp.y-my)**2 < 100) { hit = hp; break; }
-                        }
-                        if (hit) {
-                            const d = hit.data;
-                            tooltip.innerHTML =
-                                '<div><span class="label">File:</span> <span class="value">' + escapeHtml(d.path) + '</span></div>' +
-                                '<div><span class="label">Threat Score:</span> <span class="value">' + d.threatScore.toFixed(1) + '</span></div>' +
-                                '<div><span class="label">Token Ratio:</span> <span class="value">' + (hit.ratio*100).toFixed(1) + '%</span></div>' +
-                                '<div><span class="label">Matched / Total:</span> <span class="value">' + (d.suspCount||0) + ' / ' + d.total_tokens + '</span></div>' +
-                                '<div><span class="label">Matched:</span> <span class="value">' + escapeHtml((d.matched_tokens||[]).join(', ')) + '</span></div>';
-                            tooltip.style.display = 'block';
-                            positionTooltip(e, tooltip);
-                            canvas.style.cursor = 'pointer';
-                        } else {
-                            tooltip.style.display = 'none';
-                            canvas.style.cursor = 'crosshair';
-                        }
-                    });
-                    canvas.addEventListener('click', function(e) {
-                        if (tmDrag) return;
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
-                        for (let j = 0; j < hitPoints.length; j++) {
-                            const hp = hitPoints[j];
-                            if ((hp.x-mx)**2 + (hp.y-my)**2 < 100) { filterByPath(hp.data.path); break; }
-                        }
-                    });
-                    // double-click resets to auto-fit
-                    canvas.addEventListener('dblclick', function() {
-                        view = { xLo:0, xHi:rawMaxRatio*1.15+0.001, yLo:0, yHi:rawMaxScore*1.12+0.5 };
-                        drawThreatMatrix();
+                            const dots = [];
+                            pts.forEach(p => {
+                                const x = sx(p.ratio), y = sy(p.score);
+                                if (x < b.left || x > b.right || y < b.top || y > b.bottom) return;
+                                let color = '#555';
+                                if (p.score >= Y_SPLIT && p.ratio >= X_SPLIT) color = '#ff4444';
+                                else if (p.score >= Y_SPLIT) color = '#ffaa00';
+                                else if (p.ratio >= X_SPLIT) color = '#4a8bc2';
+                                dots.push({ x: x, y: y, d: p.d, color: color });
+                            });
+                            drawDots(c, dots, 3.5);
+                        },
+                        hit: (c, x, y) => fileHit(dotAt(c, x, y), d => [
+                            ['Token Ratio', (ratioOf(d) * 100).toFixed(1) + '%'],
+                            ['Matched / Total', (d.suspCount || 0) + ' / ' + d.total_tokens],
+                        ]),
+                        pathsIn: dotsIn,
+                        zoom: function (c, x, y, f) {
+                            const b = area(c);
+                            const fx = Math.max(0, Math.min(1, (x - b.left) / (b.right - b.left)));
+                            const fy = Math.max(0, Math.min(1, (y - b.top) / (b.bottom - b.top)));
+                            const xR = view.xHi - view.xLo, yR = view.yHi - view.yLo;
+                            const pivX = view.xLo + fx * xR, pivY = view.yHi - fy * yR;
+                            view.xLo = Math.max(0, pivX - fx * xR * f);
+                            view.xHi = pivX + (1 - fx) * xR * f;
+                            view.yLo = Math.max(0, pivY - (1 - fy) * yR * f);
+                            view.yHi = pivY + fy * yR * f;
+                        },
+                        pan: function (c, dx, dy) {
+                            const b = area(c);
+                            const ux = dx / (b.right - b.left) * (view.xHi - view.xLo);
+                            const uy = dy / (b.bottom - b.top) * (view.yHi - view.yLo);
+                            view.xLo -= ux; view.xHi -= ux;
+                            view.yLo += uy; view.yHi += uy;
+                            if (view.xLo < 0) { view.xHi -= view.xLo; view.xLo = 0; }
+                            if (view.yLo < 0) { view.yHi -= view.yLo; view.yLo = 0; }
+                        },
+                        reset: function () { view = fit(); },
                     });
                 }
 
-                // 2. TIMELINE HISTOGRAM: File Modifications over Time
+                // 2. TIMELINE: modifications per time bucket. The grey bar counts every
+                // file in the bucket, the coloured part only those the table shows.
                 {
-                    const ctx = makeBox('Incident Timeline: File Modifications over Time');
-                    clear(ctx);
-                    const left = 60, top = 25, right = 870, bottom = 250;
-                    drawAxes(ctx, left, top, right, bottom);
-
                     const mtimes = valid.map(d => d.mtime).filter(t => t > 0).sort((a, b) => a - b);
                     if (mtimes.length > 0) {
                         const minT = mtimes[0];
@@ -2941,8 +3124,7 @@ if (isset($_POST['ajax_action'])) {
                             86400, 2 * 86400, 7 * 86400, 14 * 86400,
                             30 * 86400, 90 * 86400, 180 * 86400, 365 * 86400
                         ];
-                        const targetBuckets = 20;
-                        const idealSize = span / targetBuckets;
+                        const idealSize = span / 20;
                         let bucketSize = NICE_BUCKETS[NICE_BUCKETS.length - 1];
                         for (const candidate of NICE_BUCKETS) {
                             if (candidate >= idealSize) { bucketSize = candidate; break; }
@@ -2953,267 +3135,166 @@ if (isset($_POST['ajax_action'])) {
                         const startT = Math.floor(minT / bucketSize) * bucketSize;
                         const numBuckets = Math.max(1, Math.ceil((maxT - startT + 1) / bucketSize));
                         const buckets = [];
-                        for (let i = 0; i < numBuckets; i++) {
-                            buckets.push({ count: 0, maxThreat: 0, files: [] });
-                        }
-
+                        for (let i = 0; i < numBuckets; i++) buckets.push({ files: [], maxThreat: 0, time: startT + i * bucketSize });
                         valid.forEach(d => {
                             if (!d.mtime) return;
-                            let idx = Math.floor((d.mtime - startT) / bucketSize);
-                            if (idx >= numBuckets) idx = numBuckets - 1;
-                            if (idx < 0) idx = 0;
-                            buckets[idx].count++;
-                            if (d.threatScore > buckets[idx].maxThreat) buckets[idx].maxThreat = d.threatScore;
+                            const idx = Math.max(0, Math.min(numBuckets - 1, Math.floor((d.mtime - startT) / bucketSize)));
                             buckets[idx].files.push(d);
+                            if (d.threatScore > buckets[idx].maxThreat) buckets[idx].maxThreat = d.threatScore;
                         });
+                        const maxCount = Math.max(1, ...buckets.map(k => k.files.length));
+                        const area = c => ({ left: 60, top: 25, right: c.w - 30, bottom: c.h - 50 });
 
-                        const maxBucketCount = Math.max(1, ...buckets.map(b => b.count));
-                        const barW = (right - left) / numBuckets - 3;
-                        const hitBars = [];
-
-                        buckets.forEach((b, i) => {
-                            const bx = left + i * ((right - left) / numBuckets) + 1;
-                            const barH = (b.count / maxBucketCount) * (bottom - top);
-                            const by = bottom - barH;
-
-                            let color = '#4a8bc2';
-                            if (b.maxThreat >= 10.0) color = '#ff4444';
-                            else if (b.maxThreat >= 5.0) color = '#ffaa00';
-
-                            ctx.fillStyle = color;
-                            ctx.fillRect(bx, by, barW, barH);
-
-                            hitBars.push({ x: bx, y: by, w: barW, h: barH, bucket: b, time: startT + i * bucketSize });
+                        makeChart(grid, 'Incident Timeline: File Modifications over Time', {
+                            brush: 'x',
+                            draw: function (c) {
+                                const ctx = c.ctx, b = area(c), H = b.bottom - b.top;
+                                const slot = (b.right - b.left) / numBuckets;
+                                drawAxes(ctx, b.left, b.top, b.right, b.bottom);
+                                buckets.forEach((k, i) => {
+                                    const x = b.left + i * slot + 1, w = Math.max(1, slot - 3);
+                                    const shown = k.files.filter(d => shouldShowFile(d));
+                                    const hAll = (k.files.length / maxCount) * H, hShown = (shown.length / maxCount) * H;
+                                    ctx.fillStyle = '#3a3a3a';
+                                    ctx.fillRect(x, b.bottom - hAll, w, hAll);
+                                    const top = shown.reduce((m, d) => Math.max(m, d.threatScore || 0), 0);
+                                    ctx.fillStyle = top >= 10.0 ? '#ff4444' : (top >= 5.0 ? '#ffaa00' : '#4a8bc2');
+                                    ctx.fillRect(x, b.bottom - hShown, w, hShown);
+                                    if (_chartHover !== null && k.files.some(d => d.path === _chartHover)) {
+                                        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+                                        ctx.strokeRect(x - 1, b.bottom - hAll - 1, w + 2, hAll + 2);
+                                    }
+                                    c.marks.push({ x0: b.left + i * slot, x1: b.left + (i + 1) * slot, bucket: k, shown: shown.length });
+                                });
+                                drawLabel(ctx, formatDate(minT), b.left, b.bottom + 20, 'left');
+                                drawLabel(ctx, formatDate(maxT), b.right, b.bottom + 20, 'right');
+                                drawLabel(ctx, 'File Count', 8, b.top - 8, 'left');
+                                ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
+                                ctx.fillText('Grey: all files · colour: files the table shows (click a bar or drag a range to select)', b.left + (b.right - b.left) / 2, b.bottom + 38);
+                            },
+                            hit: function (c, x, y) {
+                                const b = area(c);
+                                if (y < b.top || y > b.bottom) return null;
+                                const m = c.marks.find(m => x >= m.x0 && x < m.x1);
+                                if (!m || m.bucket.files.length === 0) return null;
+                                const k = m.bucket;
+                                return {
+                                    paths: k.files.map(d => d.path),
+                                    label: formatDate(k.time) + ' to ' + formatDate(k.time + bucketSize),
+                                    hoverPath: null,
+                                    html: tooltipRows([
+                                        ['Timeframe', formatDate(k.time)],
+                                        ['Files Modified', k.files.length + (m.shown !== k.files.length ? ' (' + m.shown + ' shown)' : '')],
+                                        ['Max Threat Score', k.maxThreat.toFixed(1)],
+                                    ]),
+                                };
+                            },
+                            pathsIn: function (c, r) {
+                                let paths = [];
+                                c.marks.forEach(m => { if (m.x1 > r.x0 && m.x0 < r.x1) paths = paths.concat(m.bucket.files.map(d => d.path)); });
+                                return paths;
+                            },
                         });
-
-                        const canvas = ctx.canvas;
-                        canvas.addEventListener('mousemove', function(e) {
-                            const rect = canvas.getBoundingClientRect();
-                            const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                            const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                            let found = false;
-                            for (let hb of hitBars) {
-                                if (mx >= hb.x && mx <= hb.x + hb.w && my >= hb.y && my <= bottom) {
-                                    const info = `
-                                        <div><span class="label">Timeframe:</span> <span class="value">${formatDate(hb.time)}</span></div>
-                                        <div><span class="label">Files Modified:</span> <span class="value">${hb.bucket.count}</span></div>
-                                        <div><span class="label">Max Threat Score:</span> <span class="value">${hb.bucket.maxThreat.toFixed(1)}</span></div>
-                                    `;
-                                    tooltip.innerHTML = info;
-                                    tooltip.style.display = 'block';
-                                    positionTooltip(e, tooltip);
-                                    canvas.style.cursor = 'pointer';
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (!found) {
-                                tooltip.style.display = 'none';
-                                canvas.style.cursor = 'crosshair';
-                            }
-                        });
-
-                        canvas.addEventListener('click', function(e) {
-                            var rect = canvas.getBoundingClientRect();
-                            var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                            var my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                            for (var hb_i = 0; hb_i < hitBars.length; hb_i++) {
-                                var hb = hitBars[hb_i];
-                                if (mx >= hb.x && mx <= hb.x + hb.w && my >= hb.y && my <= bottom) {
-                                    filterByTimeline(hb.time, hb.time + bucketSize);
-                                    break;
-                                }
-                            }
-                        });
-
-                        drawLabel(ctx, formatDate(minT), left, bottom + 35, 'left');
-                        drawLabel(ctx, formatDate(maxT), right, bottom + 35, 'right');
-                        drawLabel(ctx, 'File Count', 8, top + 10, 'left');
                     }
                 }
 
-                // 3. TOP THREAT SCORES BAR CHART
+                // 3. TOP THREAT SCORES among the files the table's filters let
+                // through; bars outside the chart selection are faded
                 {
-                    const ctx = makeBox('Top Composite Threat Scores');
-                    clear(ctx);
-
-                    const selected = valid.slice().sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0)).slice(0, 12);
-                    const left = 200, top = 20, right = 870, bottom = 270;
-                    const rowH = (bottom - top) / Math.max(1, selected.length);
-                    const maxScore = Math.max(10.0, ...selected.map(d => d.threatScore || 0));
-
-                    const barHitAreas = [];
-
-                    selected.forEach((d, i) => {
-                        const score = d.threatScore || 0;
-                        const y = top + i * rowH + 3;
-                        const w = (score / maxScore) * (right - left);
-
-                        ctx.fillStyle = score >= 10.0 ? '#ff4444' : (score >= 5.0 ? '#ffaa00' : '#4a8bc2');
-                        ctx.fillRect(left, y, w, Math.max(8, rowH - 6));
-
-                        const name = String(d.path || '').split('/').pop() || d.path;
-                        drawLabel(ctx, name.length > 26 ? name.slice(0, 23) + '...' : name, left - 8, y + rowH / 2 + 4, 'right');
-                        drawLabel(ctx, score.toFixed(1), Math.min(right - 4, left + w + 6), y + rowH / 2 + 4, 'left');
-
-                        barHitAreas.push({ x: left, y: y, w: w, h: Math.max(8, rowH - 6), data: d });
-                    });
-
-                    const canvas = ctx.canvas;
-                    canvas.addEventListener('click', function(e) {
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                        for (let bar of barHitAreas) {
-                            if (mx >= bar.x && mx <= bar.x + bar.w && my >= bar.y && my <= bar.y + bar.h) {
-                                filterByPath(bar.data.path);
-                                break;
+                    const area = c => ({ left: 200, top: 20, right: c.w - 30, bottom: c.h - 20 });
+                    makeChart(grid, 'Top Composite Threat Scores', {
+                        draw: function (c) {
+                            const ctx = c.ctx, b = area(c);
+                            const top = valid.filter(d => passesTableFilters(d))
+                                .sort((a, z) => (z.threatScore || 0) - (a.threatScore || 0)).slice(0, 12);
+                            if (!top.length) {
+                                drawLabel(ctx, 'No files match the current filters.', c.w / 2, c.h / 2, 'center', '#888');
+                                return;
                             }
-                        }
-                    });
-                    canvas.addEventListener('mousemove', function(e) {
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                        let found = false;
-                        for (let bar of barHitAreas) {
-                            if (mx >= bar.x && mx <= bar.x + bar.w && my >= bar.y && my <= bar.y + bar.h) {
-                                const d = bar.data;
-                                const info = `
-                                    <div><span class="label">File:</span> <span class="value">${escapeHtml(d.path)}</span></div>
-                                    <div><span class="label">Threat Score:</span> <span class="value">${d.threatScore.toFixed(1)}</span></div>
-                                    <div><span class="label">Matched Tokens:</span> <span class="value">${escapeHtml((d.matched_tokens || []).join(', '))}</span></div>
-                                    <div><span class="label">MD5:</span> <span class="value mono">${escapeHtml(d.md5)}</span></div>
-                                `;
-                                tooltip.innerHTML = info;
-                                tooltip.style.display = 'block';
-                                positionTooltip(e, tooltip);
-                                canvas.style.cursor = 'pointer';
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) {
-                            tooltip.style.display = 'none';
-                            canvas.style.cursor = 'crosshair';
-                        }
+                            const rowH = (b.bottom - b.top) / 12;
+                            const maxScore = Math.max(10.0, ...top.map(d => d.threatScore || 0));
+                            top.forEach((d, i) => {
+                                const score = d.threatScore || 0;
+                                const y = b.top + i * rowH + 3, h = Math.max(8, rowH - 6);
+                                const w = (score / maxScore) * (b.right - b.left);
+                                ctx.globalAlpha = _chartSelection && !_chartSelection.has(d.path) ? 0.25 : 1;
+                                ctx.fillStyle = score >= 10.0 ? '#ff4444' : (score >= 5.0 ? '#ffaa00' : '#4a8bc2');
+                                ctx.fillRect(b.left, y, w, h);
+                                const name = String(d.path || '').split('/').pop() || d.path;
+                                drawLabel(ctx, name.length > 26 ? name.slice(0, 23) + '...' : name, b.left - 8, y + h / 2 + 4, 'right');
+                                drawLabel(ctx, score.toFixed(1), Math.min(b.right - 4, b.left + w + 6), y + h / 2 + 4, 'left');
+                                ctx.globalAlpha = 1;
+                                if (d.path === _chartHover) {
+                                    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+                                    ctx.strokeRect(b.left - 1, y - 1, w + 2, h + 2);
+                                }
+                                c.marks.push({ y: y, h: h, d: d });
+                            });
+                        },
+                        hit: function (c, x, y) {
+                            const m = c.marks.find(m => y >= m.y && y <= m.y + m.h);
+                            return fileHit(m, d => [['MD5', '<span class="mono">' + escapeHtml(d.md5) + '</span>']]);
+                        },
                     });
                 }
 
-                // 4. ENTROPY DISTRIBUTION — sorted scatter, Y range follows data density (no blank space)
+                // 4. ENTROPY: every file sorted by entropy, so packed payloads sit
+                // top-right; the Y range follows the data
                 {
-                    const ctx = makeBox('Entropy Distribution (sorted, data-density range)');
-                    clear(ctx);
+                    const sorted = valid.slice().sort((a, b) => (a.entropy || 0) - (b.entropy || 0));
+                    const vals = sorted.map(d => d.entropy || 0);
+                    const eMin = vals[0] || 0, eMax = vals[vals.length - 1] || 1;
+                    const pad = Math.max(0.05, (eMax - eMin) * 0.06);
+                    const yLo = Math.max(0, eMin - pad), yHi = eMax + pad, yR = yHi - yLo || 1;
+                    const pct = q => vals[Math.floor(vals.length * q)] || 0;
+                    const area = c => ({ left: 55, top: 25, right: c.w - 30, bottom: c.h - 40 });
 
-                    // Sort by entropy ascending
-                    const eData = valid.slice().sort((a, b) => (a.entropy || 0) - (b.entropy || 0));
-                    const entVals = eData.map(d => d.entropy || 0);
-                    const eMin = entVals[0] || 0;
-                    const eMax = entVals[entVals.length - 1] || 1;
-                    const ePad = Math.max(0.05, (eMax - eMin) * 0.06);
-                    const yLo = Math.max(0, eMin - ePad);
-                    const yHi = eMax + ePad;
-                    const eRange = yHi - yLo || 1;
+                    makeChart(grid, 'Entropy Distribution (sorted, data-density range)', {
+                        brush: 'xy',
+                        draw: function (c) {
+                            const ctx = c.ctx, b = area(c), W = b.right - b.left, H = b.bottom - b.top;
+                            const sy = v => b.bottom - ((v - yLo) / yR) * H;
 
-                    const left = 55, top = 25, right = 870, bottom = 260;
-                    const W = right - left, H = bottom - top;
+                            [[pct(0.25), '#3a5a3a', 'P25'], [pct(0.50), '#5a5a2a', 'P50'], [pct(0.75), '#5a3a2a', 'P75']].forEach(function ([pv, col, lbl]) {
+                                ctx.save();
+                                ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+                                ctx.beginPath(); ctx.moveTo(b.left, sy(pv)); ctx.lineTo(b.right, sy(pv)); ctx.stroke();
+                                ctx.setLineDash([]);
+                                ctx.fillStyle = col; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'left';
+                                ctx.fillText(lbl + ' ' + pv.toFixed(2), b.left + 4, sy(pv) - 3);
+                                ctx.restore();
+                            });
+                            drawAxes(ctx, b.left, b.top, b.right, b.bottom);
 
-                    // Percentile gridlines (25 / 50 / 75)
-                    const p25 = entVals[Math.floor(entVals.length * 0.25)] || 0;
-                    const p50 = entVals[Math.floor(entVals.length * 0.50)] || 0;
-                    const p75 = entVals[Math.floor(entVals.length * 0.75)] || 0;
-                    [[p25,'#3a5a3a','P25'],[p50,'#5a5a2a','P50'],[p75,'#5a3a2a','P75']].forEach(function([pv, col, lbl]) {
-                        const py = bottom - ((pv - yLo) / eRange) * H;
-                        ctx.save();
-                        ctx.strokeStyle = col;
-                        ctx.lineWidth = 1;
-                        ctx.setLineDash([4, 4]);
-                        ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
-                        ctx.setLineDash([]);
-                        ctx.fillStyle = col;
-                        ctx.font = '10px Ubuntu Mono, monospace';
-                        ctx.textAlign = 'left';
-                        ctx.fillText(lbl + ' ' + pv.toFixed(2), left + 4, py - 3);
-                        ctx.restore();
-                    });
+                            ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'right';
+                            for (let t = 0; t <= 5; t++) {
+                                const v = yLo + (yR * t) / 5;
+                                ctx.fillText(v.toFixed(2), b.left - 4, sy(v) + 4);
+                            }
+                            ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
+                            ctx.fillText('Files sorted by entropy (low → high)', b.left + W / 2, b.bottom + 18);
+                            ctx.save(); ctx.translate(13, b.top + H / 2); ctx.rotate(-Math.PI / 2);
+                            ctx.fillText('Shannon Entropy', 0, 0); ctx.restore();
 
-                    drawAxes(ctx, left, top, right, bottom);
+                            drawDots(c, sorted.map((d, i) => {
+                                let color = '#4a8bc2';
+                                if (d.threatScore >= 15) color = '#ff4444';
+                                else if (d.threatScore >= 8) color = '#ffaa00';
+                                else if ((d.entropy || 0) > HIGH_ENTROPY) color = '#9b59b6';
+                                return { x: b.left + (i / Math.max(1, sorted.length - 1)) * W, y: sy(d.entropy || 0), d: d, color: color };
+                            }), 3);
 
-                    // Y-axis ticks (5 steps across actual data range)
-                    ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'right';
-                    for (let t = 0; t <= 5; t++) {
-                        const v = yLo + (eRange * t) / 5;
-                        const y = bottom - ((v - yLo) / eRange) * H;
-                        ctx.fillText(v.toFixed(2), left - 4, y + 4);
-                        ctx.save(); ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
-                        ctx.beginPath(); ctx.moveTo(left - 3, y); ctx.lineTo(left, y); ctx.stroke();
-                        ctx.restore();
-                    }
-
-                    // X-axis label
-                    ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
-                    ctx.fillText('Files sorted by entropy (low → high)', left + W / 2, bottom + 18);
-                    ctx.save(); ctx.translate(13, top + H / 2); ctx.rotate(-Math.PI / 2);
-                    ctx.fillText('Shannon Entropy', 0, 0); ctx.restore();
-
-                    // Plot dots
-                    const eHits = [];
-                    eData.forEach(function(d, i) {
-                        const px = left + (i / Math.max(1, eData.length - 1)) * W;
-                        const py = bottom - ((( d.entropy || 0) - yLo) / eRange) * H;
-                        let col;
-                        if (d.threatScore >= 15) col = '#ff4444';
-                        else if (d.threatScore >= 8)  col = '#ffaa00';
-                        else if ((d.entropy || 0) > HIGH_ENTROPY) col = '#9b59b6';
-                        else col = '#4a8bc2';
-                        ctx.fillStyle = col;
-                        ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
-                        eHits.push({ x: px, y: py, data: d });
-                    });
-
-                    // Legend
-                    const leg = [['#ff4444','Critical (≥15)'],['#ffaa00','High Risk (≥8)'],['#9b59b6','High Entropy (>' + HIGH_ENTROPY + ')'],['#4a8bc2','Normal']];
-                    let lx = left + 4;
-                    leg.forEach(function([c, lbl]) {
-                        ctx.fillStyle = c; ctx.beginPath(); ctx.arc(lx + 5, top + 12, 4, 0, Math.PI * 2); ctx.fill();
-                        ctx.fillStyle = '#aaa'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'left';
-                        ctx.fillText(lbl, lx + 13, top + 16);
-                        lx += ctx.measureText(lbl).width + 26;
-                    });
-
-                    const canvas = ctx.canvas;
-                    canvas.addEventListener('mousemove', function(e) {
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                        let hit = null;
-                        for (let h of eHits) {
-                            const dx = h.x - mx, dy = h.y - my;
-                            if (dx*dx + dy*dy < 100) { hit = h; break; }
-                        }
-                        if (hit) {
-                            const d = hit.data;
-                            tooltip.innerHTML =
-                                '<div><span class="label">File:</span> <span class="value">' + escapeHtml(d.path) + '</span></div>' +
-                                '<div><span class="label">Entropy:</span> <span class="value">' + (d.entropy||0).toFixed(4) + '</span></div>' +
-                                '<div><span class="label">Threat Score:</span> <span class="value">' + d.threatScore.toFixed(1) + '</span></div>' +
-                                '<div><span class="label">Matched Tokens:</span> <span class="value">' + escapeHtml((d.matched_tokens||[]).join(', ')) + '</span></div>';
-                            tooltip.style.display = 'block';
-                            positionTooltip(e, tooltip);
-                            canvas.style.cursor = 'pointer';
-                        } else {
-                            tooltip.style.display = 'none';
-                            canvas.style.cursor = 'crosshair';
-                        }
-                    });
-                    canvas.addEventListener('click', function(e) {
-                        const rect = canvas.getBoundingClientRect();
-                        const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-                        const my = (e.clientY - rect.top) * (canvas.height / rect.height);
-                        for (let h of eHits) {
-                            const dx = h.x - mx, dy = h.y - my;
-                            if (dx*dx + dy*dy < 100) { filterByPath(h.data.path); break; }
-                        }
+                            const leg = [['#ff4444', 'Critical (≥15)'], ['#ffaa00', 'High Risk (≥8)'], ['#9b59b6', 'High Entropy (>' + HIGH_ENTROPY + ')'], ['#4a8bc2', 'Normal']];
+                            let lx = b.left + 4;
+                            leg.forEach(function ([col, lbl]) {
+                                ctx.fillStyle = col; ctx.beginPath(); ctx.arc(lx + 5, b.top + 12, 4, 0, Math.PI * 2); ctx.fill();
+                                ctx.fillStyle = '#aaa'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'left';
+                                ctx.fillText(lbl, lx + 13, b.top + 16);
+                                lx += ctx.measureText(lbl).width + 26;
+                            });
+                        },
+                        hit: (c, x, y) => fileHit(dotAt(c, x, y), d => [['Entropy', (d.entropy || 0).toFixed(4)]]),
+                        pathsIn: dotsIn,
                     });
                 }
             }
@@ -3240,6 +3321,7 @@ if (isset($_POST['ajax_action'])) {
                 var chunkSize = getChunkSize();
                 _scanCancelled = false;
                 _seenHashes = [];
+                _chartSelection = null;
                 var allFeatures = [];
 
                 resetWarningPanel();
@@ -3301,8 +3383,8 @@ if (isset($_POST['ajax_action'])) {
                 var body = new URLSearchParams();
                 body.set('ajax_action', 'process');
                 body.set('is_not_readable', isNotReadable ? '1' : '0');
-                body.set('paths', paths.join('\0'));
-                body.set('seen_hashes', _seenHashes.join('\0'));
+                body.set('paths', paths.join(','));
+                body.set('seen_hashes', _seenHashes.join(','));
                 body.set('ml', (typeof ML_MODEL !== 'undefined' && ML_MODEL) ? '1' : '0'); // no model: skip ML features
                 return postAction(body).then(function(r) { return r.json(); });
             }
@@ -3532,7 +3614,7 @@ if (isset($_POST['ajax_action'])) {
                     body.set('ajax_action', 'mhr_unlink');
                     body.set('mhr_user', mhrUser); // the server re-checks each file's hash with MHR before deleting
                     body.set('mhr_pass', mhrPass);
-                    body.set('paths', hitFiles.map(function (f) { return f.pathRaw; }).join('\0'));
+                    body.set('paths', hitFiles.map(function (f) { return f.pathRaw; }).join(','));
 
                     return postAction(body)
                         .then(function (r) { return r.json(); })

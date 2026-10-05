@@ -23,7 +23,8 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
   * Sort by modification time, suspicious token count, Z-score, or residual
   * Filter to show only anomalies
   * One-click copy of results (with full details)
-  * Clickable file paths to copy MD5 hash
+  * Click a file path to copy it; the 📋 icon copies its MD5 hash
+  * Linked charts: drag a box on the Threat Matrix or Entropy chart, or click a timeline bar, to select those files (Ctrl/⌘ adds more); the table then shows only the selection, and Esc clears it. Charts fade whatever the table's filters hide, hovering a file in a chart highlights its table row (and the other way round), and the Threat Matrix zooms with the wheel, pans with Shift+drag and resets on double-click
 * **Color-coded output** – highlights blacklisted, unreadable, and suspicious files
 * **Self-contained** – single PHP file, no external dependencies
 
@@ -287,6 +288,20 @@ $$
 Score' = Score + 3
 $$
 
+#### ML Points
+
+Last, the ML model's score $P_{ML}$ (see [ML Model](#ml-model)) adds points, after the multipliers above so it is never multiplied:
+
+$$
+Score' = Score + \begin{cases}
+0 & P_{ML} \leq 0.6 \\
+8 \cdot \frac{P_{ML} - 0.6}{0.9 - 0.6} & 0.6 < P_{ML} < 0.9 \\
+8 + 2 \cdot \frac{P_{ML} - 0.9}{1 - 0.9} & P_{ML} \geq 0.9
+\end{cases}
+$$
+
+So a file the model scores 0.9 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed. Compared with treating the model as a separate yes/no flag, this left the benchmark's overall catch and false positives unchanged (207/211 webshells, 18/1927 benign files) while ranking far more webshells correctly: 207 instead of 179 reach HIGH RISK, and 173 instead of 151 reach CRITICAL, with no new false positives at either level.
+
 The final score is rounded to two decimal places.
 
 ### Anomaly Classification
@@ -308,15 +323,14 @@ Z_{entropy} > T
 RareOwner
 \lor
 Residual > 5
-\lor
-P_{ML} \geq 0.9
 $$
 
 Where:
 
 * $T$ = configured Z-score threshold
-* $P_{ML}$ = the ML model's webshell probability (see below)
 * $\lor$ = logical OR
+
+The ML model enters through $ThreatScore$ (see [ML Points](#ml-points)).
 
 SussyFinder additionally treats the following as anomalies:
 
@@ -357,7 +371,7 @@ $$
 P_{ML} = \sigma\left(b + s \sum_{i \in bits} w_i\right)
 $$
 
-$P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. A file scoring 0.9 or more that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
+$P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. It is turned into threat points (see [ML Points](#ml-points)), so it can only raise a file's score, never lower it: the model can add flags but never clears one. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
 
 #### Where the model comes from
 
@@ -431,6 +445,8 @@ Options:
 * `--dump rows.json` — save the extracted feature rows (`test/train-ml.js --rows` reuses them)
 
 Its `ml only` line scores the shipped model on the corpus it was trained on, so that number is optimistic. Use `test/train-ml.js` for held-out rates.
+
+`node test/ui.js` drives the page in headless Chrome with real mouse and keyboard events: chart selection, hover linking, filters, zoom, HiDPI sizing and resizing, and that a file named `a');alert(1);('.php` runs no script. It scans a temporary copy of the corpus with the whitelist and blacklist off, so nothing is deleted.
 
 ## Requirements
 

@@ -16,6 +16,7 @@ one self-contained file, no dependencies. `README.md` documents the maths
 | `main-cli.php` | Old CLI variant. **Parked**, see rules. |
 | `whitelist.txt` / `blacklist.txt` | MD5 lists, fetched from GitHub raw at runtime. `push.sh` dedupes and publishes them. |
 | `test/run.js` | The test suite: detector self-checks + detection benchmark on the local PHP, or with `--php all` on every PHTest version plus a page/AJAX smoke test. |
+| `test/ui.js` | Browser test of the page (charts, selection, hover linking, file-name escaping) in headless Chrome, on a temp copy of the corpus with both lists off. |
 | `test/webshells`, `test/WordPress`, `test/laravel` | Test corpora: malicious vs benign. Their working trees are dirty on purpose; never commit or "clean" them. |
 | `PHTest/` | Separate git repo: Docker images for PHP 4.1.2 … 8.5.6. See `PHTest/README.md`. |
 
@@ -81,9 +82,12 @@ one self-contained file, no dependencies. `README.md` documents the maths
   Paths travel **`rawurlencode()`d in both directions** (`path`,
   `duplicate_of`, `new_hashes`, scan lists, `mhr_unlink` results), so names
   that aren't valid UTF-8 survive JSON. The page decodes them for display
-  (`decodePath()`) and sends back `pathRaw`. Lists go as **NUL-separated
+  (`decodePath()`) and sends back `pathRaw`. Lists go as **comma-separated
   strings** (`postList()`), not arrays or JSON: one field stays under
-  `max_input_vars`, and no `json_decode` is needed on old PHP. Responses go
+  `max_input_vars`, and no `json_decode` is needed on old PHP. Never use NUL
+  as a separator in a request: hardened hosts (Suhosin's default
+  `disallow_nul`, some WAFs) strip or drop such values, which silently emptied
+  every scan on a real host. Responses go
   through `ajaxRespond()`, which folds in captured PHP warnings and falls back
   to `utf8Safe()` so the body is never empty.
 - **`mhr_unlink`** deletes only files whose *current* md5 MHR confirms in that
@@ -93,6 +97,15 @@ one self-contained file, no dependencies. `README.md` documents the maths
   Regular files only (a FIFO would hang `md5_file`). Symlinked files are
   listed; symlinked dirs are followed only inside the scan root. Anything
   unscannable is reported with `trigger_error()`, not skipped silently.
+- **Charts** share one selection (`_chartSelection`, a Set of paths) and one
+  hover (`_chartHover`). `shouldShowFile()` = `passesTableFilters()` + that
+  selection, and it's what both the table and the charts use (charts fade
+  what it hides). `renderTable()` ends in `syncCharts()`, which rebuilds the
+  charts for a new dataset and otherwise just redraws them, so every filter
+  change reaches the charts through the table. New charts go through
+  `makeChart()` (DPR-sized canvas, shared drag/hover/click handling); don't
+  add `document`/`window` listeners inside it: the shared ones are registered
+  once at load.
 - **Page output:** file names are attacker-controlled. Escape with
   `escapeHtml()` for HTML, and never put data inside inline `onclick="f('…')"`:
   use a `data-` attribute (the document click listener handles `data-copy`,
@@ -114,6 +127,7 @@ node test/run.js --list               # + missed webshells and false positives
 node test/run.js --tokens             # + per-token webshell vs benign counts, for tuning weights
 node test/run.js --php all            # every PHTest version (docker + built images, ~5 min) + page/AJAX smoke test
 node test/run.js --php 4.3.11,8.5.6   # just those versions
+node test/ui.js                       # the page in headless Chrome: charts, selection, hover, escaping (~10 s)
 ```
 
 Baseline (threshold 3.5, local PHP and every container alike): **anomaly
@@ -165,6 +179,14 @@ the bench, and neither is the `uploads/` rule (no corpus file lives there).
   so detection doesn't depend on the scanning host's `short_open_tag` (it did:
   a local run missed `shell_exec` in NCC-Shell.php that a container caught).
   `<?=`, `<?php` and `<?xml` are left alone.
+- The ML score is part of the threat score (`mlPoints()`: 0 at or below
+  `ML_FLOOR` 0.6, 8 at `ML_THRESHOLD` 0.9, 10 at 1.0), not a separate flag.
+  `ruleScore` keeps the rules-only part. Floor sweep on `node test/run.js`:
+  0.5 and lower add false positives, 0.7 and higher lose catches; 0.6 keeps
+  207/211 and 18 FP while HIGH RISK goes 179 → 207 and CRITICAL 151 → 173.
+  That benchmark is in-sample for the model; `node test/train-ml.js` repeats
+  the sweep on held-out scores and needs the corpora (fetch them outside any
+  web root: `/home/http` is served by Apache).
 - About 15 of the remaining misses are ASP/JSP/Perl shells saved as `.php`;
   PHP tokenization can't see them.
 - After making important decision dump it here
