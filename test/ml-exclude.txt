@@ -1,5 +1,0 @@
-# Files left out of ML training and evaluation: mislabeled samples in the
-# corpora. One substring of "<corpus name>/<path>" per line.
-
-# A robots.txt, not a webshell
-blackarch-webshells/php/robots.php

@@ -1,34 +1,33 @@
-// Unified test runner: detector self-checks + detection benchmark, on the local
-// PHP or on every test/PHTest version (plus a page/AJAX smoke test there).
+// Benchmark and per-PHP-version test runner, on the local PHP or on every
+// test/PHTest version (plus a page/AJAX smoke test there).
 //
-// For each PHP it runs main.php's real feature extraction (via the SUSSY_LIB
-// include) over test/corpora/positive/blackarch-webshells (malicious) mixed with
-// test/corpora/noise/wordpress-7.2-alpha + test/corpora/noise/laravel-skeleton (benign), then scores the rows with main.php's real client-side
-// scoring block and prints detection/false-positive rates.
+// For each PHP it runs test/unit.js's PHP unit checks, then main.php's real
+// feature extraction over the benchmark samples (the .gitmodules entries
+// with benchmark = true: webshells mixed with legitimate code), scores the
+// rows with main.php's real client-side scoring block and prints detection
+// and false-positive rates.
 //
-// Usage:
-//   node test/run.js                         local `php` only
-//   node test/run.js --php all               every version in test/PHTest/versions.list (docker)
-//   node test/run.js --php 4.3.11,8.5.6      just those versions
-//   extra: --list (misses/false positives), --tokens (per-token counts), --threshold 3.5,
-//          --no-ml (rules only), --dump rows.json (the extracted feature rows),
-//          --dump-scored FILE (every row after scoring, with zScores, threatScore etc.)
-//
-// Exits 1 if a self-check fails, a supported version (4.3+) can't extract
+// Exits 1 if a unit check fails, a supported version (4.3+) can't extract
 // features, or its page/AJAX smoke test fails. A file that crashes PHP itself
-// is skipped and reported, not failed. Containers mount the repo
-// READ-ONLY so a blacklist hit can never delete corpus files.
+// is skipped and reported, not failed. Containers mount the repo READ-ONLY so
+// a blacklist hit can never delete sample files.
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const vm = require('vm');
+const lib = require('./lib');
+const unit = require('./unit');
 
-const root = path.join(__dirname, '..');
-const args = process.argv.slice(2);
-const opt = name => { const i = args.indexOf(name); return i === -1 ? null : args[i + 1]; };
-const threshold = parseFloat(opt('--threshold') || '3.5');
-const web = fs.readFileSync(path.join(root, 'main.php'), 'utf8');
+const args = lib.cli({
+    php: { type: 'string', arg: 'all|4.3.11,8.5.6', help: 'run on test/PHTest versions (Docker) instead of the local php' },
+    list: { type: 'boolean', help: 'missed webshells, false positives, per-version differences' },
+    tokens: { type: 'boolean', help: 'how often each token appears in webshells vs. benign files' },
+    threshold: { type: 'string', arg: 'z', help: "Z-score threshold (default: main.php's Z_THRESHOLD)" },
+    'no-ml': { type: 'boolean', help: 'rules only' },
+    dump: { type: 'string', arg: 'file', help: 'write every scored row (zScores, threatScore, mal, ...) as JSON' },
+}, 'Usage: node test/run.js [options]');
+
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'sussy-test-'));
 fs.chmodSync(work, 0o755); // Apache in the containers runs as www-data
 const containers = [];
@@ -37,157 +36,138 @@ process.on('exit', () => {
     fs.rmSync(work, { recursive: true, force: true });
 });
 process.on('SIGINT', () => process.exit(130));
-const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const PHTEST = path.join(lib.ROOT, 'test', 'PHTest');
 
-// --- Structural detector self-checks: snippet => signals that must / must not appear ---
-const cases = [
-    ["<?php $_GET['a']($_GET['b']);", ['@input_call', '@dyn_call'], []],
-    ["<?php $f = 'ba'.'se64_decode';", ['base64_decode', '@concat_name'], []],
-    ['<?php $f = "\\x73ystem";', ['system', '@concat_name'], []],
-    ["<?php 'system'('id');", ['system', '@concat_name', '@dyn_call'], []],
-    ["<?php \\system('id');", ['system'], []],
-    ["<?php echo `id`;", ['`'], []],
-    ["<?php preg_replace('/x/e', $_POST['c'], 'x');", ['@preg_e'], []],
-    ["<?php preg_replace('#x#i', 'y', 'x'); function_exists('exec');", [], ['@preg_e', 'exec', '@concat_name']],
-    ['<?php $q = "SELECT `{$t}`"; $s = "$a eval";', [], ['`', 'eval']],
-    ["<?php $this->exec('x'); A::system(); new $cls(); $o->$m();", [], ['exec', 'system', '@dyn_call']],
-    ["<?php __halt_compiler();" + 'A'.repeat(2000), ['@halt_payload'], []],
-    ["<?php $x = '" + 'A'.repeat(6000) + "';", ['@long_line'], []],
-    ["<?if(1)shell_exec($_GET['c']);", ['shell_exec'], []], // short open tag, whatever this host's short_open_tag
-    ['<%@ Page Language="C#" %><% Response.Write(Request.Form["c"]); %>', ['@foreign_code'], []],
-    ['#!/usr/bin/perl\nuse CGI;\nprint `id`;', ['@foreign_code'], []],
-    ['<html><% if (x) { %>tpl<% } %></html><?php echo 1; ?>', [], ['@foreign_code']],
-];
-fs.writeFileSync(path.join(work, 'cases.txt'), cases.map(c => c[0]).join('\0'));
-
-// --- Listing fixture: which names getSortedByPattern must return (rawurlencoded) ---
-// Also holds what must NOT be listed or must not hang the scan: a FIFO named
-// .php, a "root -> /" symlink (not followed, but warned about), non-PHP names.
-const fixture = path.join(work, 'fixture');
-fs.mkdirSync(path.join(fixture, 'sub'), { recursive: true });
-fs.mkdirSync(path.join(work, 'outside'));
-const shellBody = '<?php $f = "ba"."se64_decode"; `id`;';
-['a.php', 'x.php.jpg', 'shell.php.', '.user.ini', 'notes.txt', 'jquery.shape.js', 'it\'s "odd".php', 'sub/deep.php', '../outside/target.php']
-    .forEach(n => fs.writeFileSync(path.join(fixture, n), shellBody));
-fs.writeFileSync(Buffer.from(path.join(fixture, 'caf') + '\xe9.php', 'latin1'), shellBody); // not valid UTF-8
-execFileSync('mkfifo', [path.join(fixture, 'fifo.php')]);
-fs.symlinkSync('/', path.join(fixture, 'out'));
-fs.symlinkSync('../outside/target.php', path.join(fixture, 'linked.php'));
-const listingWant = ['.user.ini', 'a.php', 'caf%E9.php', 'deep.php', 'it%27s%20%22odd%22.php', 'linked.php', 'shell.php.', 'x.php.jpg'].sort();
-
-// Extraction script run by each PHP. Must stay PHP 4.3-safe (no -r in PHP 4 CGI,
-// so it's a file; json_encode comes from main.php's fallback on old PHP).
-// PHP itself can crash on a file (4.3.0's tokenizer segfaults on some modern
-// code), so rows are appended to <state>/rows as they're produced, finished
-// paths to <state>/done, and the current path to <state>/progress. After a
-// crash the runner adds that path to skip.txt and reruns, which resumes where
-// it stopped (the UI isolates such files the same way, one by one).
-const phpString = s => "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
-const extractScript = (repo, dir, state) => `<?php
-define('SUSSY_LIB', true);
-include ${phpString(repo + '/main.php')};
-$cases = array();
-foreach (explode("\\0", file_get_contents(${phpString(dir + '/cases.txt')})) as $src) {
-    $t = getFileTokens($src);
-    $cases[] = array_values(array_unique(array_merge(compareTokens($tokenNeedles, tokenTextSet($t)), findStructuralSignals($t, $src, $tokenNeedles))));
+const bench = lib.loadCorpora().filter(c => c.benchmark);
+const missing = bench.filter(c => !lib.isCheckedOut(c));
+if (missing.length) {
+    console.error(`benchmark samples not checked out: git submodule update --init ${missing.map(c => c.path).join(' ')}`);
+    process.exit(1);
 }
-$skip = array_flip(explode("\\0", file_get_contents(${phpString(dir + '/skip.txt')})));
-if (file_exists(${phpString(state + '/done')})) {
-    foreach (explode("\\0", file_get_contents(${phpString(state + '/done')})) as $file) {
-        $skip[$file] = 1;
-    }
-}
-$rows = fopen(${phpString(state + '/rows')}, 'a');
-$done = fopen(${phpString(state + '/done')}, 'a');
-foreach (array('test/corpora/positive/blackarch-webshells', 'test/corpora/noise/wordpress-7.2-alpha', 'test/corpora/noise/laravel-skeleton') as $corpus) {
-    $r = getSortedByPattern(${phpString(repo + '/')} . $corpus, $pattern);
-    $seen = array();
-    $new = array();
-    foreach ($r['file_readable'] as $file) {
-        if (isset($skip[$file])) {
-            continue;
-        }
-        $fh = fopen(${phpString(state + '/progress')}, 'w');
-        fwrite($fh, $file);
-        fclose($fh);
-        foreach (scanReadablePaths(array($file), array(), array(), $tokenNeedles, $seen, $new) as $row) {
-            // Same test as test/train-ml.js: a file with no PHP and no other server code can't run as a webshell
-            $content = file_get_contents($file);
-            $row['no_php'] = !preg_match('/<\\?(?!xml)/i', $content); // as main.php's @foreign_code: any <? but <?xml ("<?$d=..." is PHP)
-            $row['foreign'] = (bool) preg_match('/<%|Response\\.Write|CreateObject|Runtime\\.getRuntime|^#!.*perl|\\buse CGI\\b/im', $content);
-            fwrite($rows, json_encode($row) . "\\n");
-        }
-        fwrite($done, $file . "\\0");
-        fflush($rows);
-        fflush($done);
-    }
-}
-$GLOBALS['phpWarnings'] = array();
-$listing = getSortedByPattern(${phpString(dir + '/fixture')}, $pattern);
-$names = array();
-foreach ($listing['file_readable'] as $file) {
-    $names[] = rawurlencode(basename($file));
-}
-$outsideWarned = false;
-foreach ($GLOBALS['phpWarnings'] as $warning) {
-    if (strpos($warning, 'outside the scanned directory') !== false) {
-        $outsideWarned = true;
-    }
-}
-echo json_encode(array('php' => PHP_VERSION, 'weights' => $tokenNeedles, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned));
-`;
+const shellPrefixes = bench.filter(c => c.label === 'shell').map(c => c.path + '/');
+const inShellCorpus = d => shellPrefixes.some(p => d.rel.startsWith(p));
+const isMal = d => inShellCorpus(d) && lib.isRunnable(d);
+const selfcheck = unit.prepareSelfcheck(work);
 
 // --- Targets: local php, or test/PHTest containers ---
-const versionOk = v => { const [a, b] = v.split('.').map(Number); return a > 4 || (a === 4 && b >= 3); };
-let targets;
-const phpOpt = opt('--php');
-if (!phpOpt) {
+// Each has the paths PHP sees: repo (main.php and samples), work (this temp dir), state (extraction state).
+function localTarget() {
     const state = path.join(work, 'state');
     fs.mkdirSync(state);
-    fs.writeFileSync(path.join(work, 'extract.php'), extractScript(root, work, state));
-    targets = [{
-        name: 'local', supported: true, repo: root,
-        // error_log into the temp dir: a php.ini with error_log=./error_log would litter the repo
-        runPhp: () => execFileSync('php', ['-d', 'error_log=' + path.join(work, 'php-errors.log'), path.join(work, 'extract.php')], { maxBuffer: 1 << 28 }),
-        read: file => { try { return fs.readFileSync(path.join(state, file), 'utf8'); } catch (e) { return ''; } },
-    }];
-} else {
-    const known = fs.readFileSync(path.join(root, 'test/PHTest/versions.list'), 'utf8').split('\n')
+    const php = file => lib.execAsync('php', ['-d', 'error_log=' + path.join(work, 'php-errors.log'), file]); // not ./error_log in the repo
+    return {
+        name: 'local', supported: true, repo: lib.ROOT, work, state,
+        php, read: file => { try { return fs.readFileSync(path.join(state, file), 'utf8'); } catch (e) { return ''; } },
+    };
+}
+function containerTargets(spec) {
+    const known = fs.readFileSync(path.join(PHTEST, 'versions.list'), 'utf8').split('\n')
         .filter(l => l.trim() && !l.startsWith('#')).map(l => { const [v, type] = l.split('|'); return { v, type }; });
-    const want = phpOpt === 'all' ? known : phpOpt.split(',').map(v => known.find(k => k.v === v) || { v, type: null });
-    fs.writeFileSync(path.join(work, 'extract.php'), extractScript('/var/www/html', '/work', '/tmp'));
-    targets = want.map(({ v, type }, i) => {
-        const legacy = type === 'legacy';
-        const name = 'sf-test-' + v;
+    const want = spec === 'all' ? known : spec.split(',').map(v => known.find(k => k.v === v) || { v, type: null });
+    const supported = v => { const [a, b] = v.split('.').map(Number); return a > 4 || (a === 4 && b >= 3); };
+    return want.map(({ v, type }, i) => {
+        const container = 'sf-test-' + v, legacy = type === 'legacy';
+        const exec = (cmd, opts = {}) => lib.execAsync('docker', ['exec', container].concat(cmd), Object.assign({ stdio: ['ignore', 'pipe', 'ignore'] }, opts));
         return {
-            name: 'PHP ' + v, v, type, supported: versionOk(v), repo: '/var/www/html', port: 18100 + i,
-            container: name, legacy,
-            runPhp: () => execFileSync('docker', ['exec', name].concat(legacy ? ['php-cgi', '-q'] : ['php'], ['/work/extract.php']), { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }),
-            read: file => { try { return execFileSync('docker', ['exec', name, 'cat', '/tmp/' + file], { maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString(); } catch (e) { return ''; } },
+            name: 'PHP ' + v, v, legacy, supported: supported(v), container, port: 18100 + i,
+            repo: '/var/www/html', work: '/work', state: '/tmp',
+            php: file => exec((legacy ? ['php-cgi', '-q'] : ['php']).concat(file)),
+            read: file => { try { return execFileSync('docker', ['exec', container, 'cat', '/tmp/' + file], { maxBuffer: lib.MAX_BUFFER, stdio: ['ignore', 'pipe', 'ignore'] }).toString(); } catch (e) { return ''; } },
         };
     });
+}
+
+async function startContainer(t) {
+    const ini = t.legacy ? '/usr/local/lib/php.ini' : '/usr/local/etc/php/php.ini';
+    const image = t.legacy ? 'phtest-php:' + t.v : `php:${t.v}-apache`;
+    try {
+        execFileSync('docker', ['rm', '-f', t.container], { stdio: 'ignore' });
+        execFileSync('docker', ['run', '-d', '--rm', '--name', t.container, '-p', t.port + ':80',
+            '-v', lib.ROOT + ':/var/www/html:ro', '-v', work + ':/work:ro',
+            '-v', path.join(PHTEST, 'conf', t.v, 'php.ini') + ':' + ini + ':ro', image], { stdio: 'ignore' });
+        containers.push(t.container);
+    } catch (e) {
+        return `container failed to start (image ${image} built?)`;
+    }
+    for (let i = 0; i < 40; i++) {
+        try { execFileSync('curl', ['-s', '-o', '/dev/null', `http://127.0.0.1:${t.port}/`]); break; } catch (e) { await sleep(250); }
+    }
+    return null;
+}
+
+// --- Steps per target ---
+const inTarget = (t, hostPath) => path.join(t.work, path.relative(work, hostPath));
+
+async function runUnitChecks(t) {
+    const job = lib.phpJob(path.join(work, `selfcheck-${t.v || 'local'}.php`), path.join(t.repo, 'test/php/selfcheck.php'),
+        selfcheck.vars(path.join(t.repo, 'main.php'), t.work));
+    try {
+        const raw = String(await t.php(inTarget(t, job)));
+        return unit.checkSelfcheck(JSON.parse(raw.slice(raw.indexOf('{'))), selfcheck.models);
+    } catch (e) {
+        return ['unit checks produced no JSON'];
+    }
+}
+
+async function extractBenchmark(t) {
+    const job = lib.phpJob(path.join(work, `extract-${t.v || 'local'}.php`), path.join(t.repo, 'test/php/extract.php'), {
+        SUSSY_MAIN: path.join(t.repo, 'main.php'), SUSSY_STATE: t.state,
+        SUSSY_DIRS: bench.map(c => path.join(t.repo, path.relative(lib.ROOT, c.dir))), SUSSY_SKIP: inTarget(t, path.join(work, 'skip.txt')),
+    });
+    const { summary, crashed } = await lib.runResumable({ run: () => t.php(inTarget(t, job)), read: t.read, skipFile: path.join(work, 'skip.txt') });
+    const rows = summary ? lib.contentOnly(lib.parseRows(t.read('rows'))) : [];
+    rows.forEach(d => { d.rel = d.path.slice(t.repo.length + 1); });
+    return { summary, crashed, rows };
+}
+
+function benchmark(summary, rows) {
+    const ctx = lib.loadScoring({ weights: summary.weights, model: args['no-ml'] ? null : lib.readModel() });
+    const threshold = args.threshold ? parseFloat(args.threshold) : lib.constant(ctx, 'Z_THRESHOLD');
+    const anomalyScore = lib.constant(ctx, 'ANOMALY_SCORE'), criticalScore = lib.constant(ctx, 'CRITICAL_SCORE');
+    const scored = ctx.analyzeData(rows, threshold);
+    const notCode = scored.filter(d => inShellCorpus(d) && !lib.isRunnable(d));
+    const mal = scored.filter(isMal), ben = scored.filter(d => !inShellCorpus(d));
+    if (notCode.length) console.log(`not counted        ${notCode.length} shell-corpus file(s) with no server code: ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
+    const line = (label, hit) => {
+        const r = lib.rates(mal, ben, hit);
+        console.log(`${label.padEnd(18)} detected ${r.tp}/${r.nMal} (${lib.pct(r.tp, r.nMal)})   false positives ${r.fp}/${r.nBen} (${lib.pct(r.fp, r.nBen)})`);
+        return r;
+    };
+    const anomaly = line('anomaly', d => d.isAnomaly);
+    line(`score >= ${anomalyScore}`, d => d.threatScore >= anomalyScore);
+    line(`score >= ${criticalScore}`, d => d.threatScore >= criticalScore);
+    line('  zSusp only', d => d.zScores.susp > threshold && d.threatScore < anomalyScore);
+    line('  zEntropy only', d => d.zScores.entropy > threshold && d.threatScore < anomalyScore);
+    line('  residual only', d => d.residual > 5 && d.threatScore < anomalyScore);
+    // In-sample: the shipped model was trained on these files (test/train-ml.js has the cross-validated numbers)
+    line('  ml only*', d => d.mlOnly);
+    console.log('  * trained on these samples; node test/train-ml.js for held-out rates');
+    if (args.dump) fs.writeFileSync(args.dump, JSON.stringify(scored.map(d => Object.assign({ mal: isMal(d) }, d))));
+    return { scored, anomaly, weights: summary.weights };
 }
 
 // --- Web smoke test (containers only): page, inline JS, scan + process over HTTP ---
 function webCheck(t) {
     const url = `http://127.0.0.1:${t.port}/main.php`;
     const curl = (extra, csrfHeader = true) => {
-        const args = ['-s', '-m', '120'].concat(csrfHeader ? ['-H', 'X-Sussy-Request: 1'] : [], extra, [url]);
-        try { return execFileSync('curl', args, { maxBuffer: 1 << 26 }).toString(); } catch (e) { return ''; }
+        const a = ['-s', '-m', '120'].concat(csrfHeader ? ['-H', 'X-Sussy-Request: 1'] : [], extra, [url]);
+        try { return execFileSync('curl', a, { maxBuffer: 1 << 26 }).toString(); } catch (e) { return ''; }
     };
     const json = s => { try { return JSON.parse(s); } catch (e) { return null; } };
+    const shells = path.join(t.repo, lib.corpus('blackarch-webshells').path, 'php');
     const page = curl([], false);
     const js = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n;\n');
     let jsOk = page.includes('</html>');
     try { new vm.Script(js); } catch (e) { jsOk = false; }
-    const scan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/var/www/html/test/corpora/positive/blackarch-webshells/php']));
-    // Must return (the FIFO can't hang it) and list the fixture's 8 names
+    const scan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=' + shells]));
+    // Must return (the FIFO can't hang it) and list the fixture's names
     const fixtureScan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture']));
     // Without the CSRF header every action is refused
     const noHeader = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture'], false));
     // Paths are rawurlencoded on the wire, then form-encoded; the Latin-1 name must round-trip
-    const micro = '/var/www/html/test/corpora/positive/blackarch-webshells/php/micro.php';
-    const microMd5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(root, 'test/corpora/positive/blackarch-webshells/php/micro.php'))).digest('hex');
+    const micro = shells + '/micro.php';
+    const microMd5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(lib.ROOT, path.relative(t.repo, micro)))).digest('hex');
     const latin1 = '%2Fwork%2Ffixture%2Fcaf%E9.php';
     const wire = p => encodeURIComponent(encodeURIComponent(p));
     // comma-separated (%2C); a path that doesn't exist must come back as a warning, not vanish
@@ -198,170 +178,92 @@ function webCheck(t) {
     const procOk = feats.length === 3 && decodeURIComponent(feats[0].duplicate_of) === '/earlier/micro.php' &&
         feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1 &&
         proc.warnings.some(w => w.indexOf('Skipped /work/fixture/missing.php') === 0);
-    const fixtureOk = !!fixtureScan && fixtureScan.total === listingWant.length;
+    const fixtureOk = !!fixtureScan && fixtureScan.total === unit.LISTING_WANT.length;
     const csrfOk = !!noHeader && noHeader.error === 'forbidden';
-    const ok = jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk;
     return {
-        ok, text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'}, fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
+        ok: jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk,
+        text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'}, fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
             `process ${procOk ? 'OK' : 'FAIL'}, CSRF check ${csrfOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : ''),
     };
 }
 
-// --- Run ---
-let failed = 0;
-const results = [];
-targets.forEach(t => {
+/** All steps for one PHP; returns its result record (ok === false fails the run) */
+async function runTarget(t) {
+    const r = { t, ok: true };
+    const fail = () => { if (t.supported) r.ok = false; };
     if (t.container) {
-        const ini = t.legacy ? '/usr/local/lib/php.ini' : '/usr/local/etc/php/php.ini';
-        const image = t.legacy ? 'phtest-php:' + t.v : `php:${t.v}-apache`;
-        try {
-            execFileSync('docker', ['rm', '-f', t.container], { stdio: 'ignore' });
-            execFileSync('docker', ['run', '-d', '--rm', '--name', t.container, '-p', t.port + ':80',
-                '-v', root + ':/var/www/html:ro', '-v', work + ':/work:ro',
-                '-v', path.join(root, 'test/PHTest/conf', t.v, 'php.ini') + ':' + ini + ':ro', image], { stdio: 'ignore' });
-            containers.push(t.container);
-        } catch (e) {
-            console.log(`\n== ${t.name}: container failed to start (image ${image} built?)`);
-            if (t.supported) failed++;
-            return;
-        }
-        for (let i = 0; i < 40; i++) {
-            try { execFileSync('curl', ['-s', '-o', '/dev/null', `http://127.0.0.1:${t.port}/`]); break; } catch (e) { sleep(250); }
-        }
+        const err = await startContainer(t);
+        if (err) { console.log(`\n== ${t.name}: ${err}`); fail(); return r; }
     }
-
-    // Extract features; if PHP dies on a file, skip that file and resume
-    let out = null;
-    const crashed = [];
-    while (!out) {
-        fs.writeFileSync(path.join(work, 'skip.txt'), crashed.join('\0'));
-        try {
-            const raw = t.runPhp().toString();
-            out = JSON.parse(raw.slice(raw.indexOf('{')));
-        } catch (e) {
-            const last = t.read('progress');
-            if (!last || crashed.includes(last)) break; // no progress: a real failure, not a per-file crash
-            crashed.push(last);
-        }
-    }
-    if (out) {
-        const byPath = new Map(); // a crash between writing a row and marking it done can repeat a row
-        t.read('rows').split('\n').filter(Boolean).forEach(l => { const row = JSON.parse(l); byPath.set(row.path, row); });
-        out.features = [...byPath.values()];
-    }
-    const r = { t, out, crashed };
-    results.push(r);
-    console.log(`\n== ${t.name}${out ? ' (' + out.php + ')' : ''}`);
-    crashed.forEach(f => console.log(`PHP crashed on     ${f.slice(t.repo.length + 1)} (skipped; the UI isolates such files the same way)`));
-    if (!out) {
+    r.unitFailures = await runUnitChecks(t);
+    const ex = await extractBenchmark(t);
+    r.crashed = ex.crashed;
+    console.log(`\n== ${t.name}${ex.summary ? ' (' + ex.summary.php + ')' : ''}`);
+    ex.crashed.forEach(f => console.log(`PHP crashed on     ${f.slice(t.repo.length + 1)} (skipped; the UI isolates such files the same way)`));
+    r.unitFailures.forEach(f => console.log('  FAIL ' + f));
+    console.log(`unit checks        ${r.unitFailures.length ? r.unitFailures.length + ' FAILED' : 'OK'}`);
+    if (r.unitFailures.length) fail();
+    if (ex.summary) {
+        Object.assign(r, benchmark(ex.summary, ex.rows));
+    } else {
         console.log(t.supported ? 'FAIL: feature extraction produced no JSON' : 'feature extraction failed (expected: below the PHP 4.3 floor)');
-        if (t.supported) failed++;
-        if (t.container) { const w = webCheck(t); r.web = w; console.log('web                ' + w.text); if (t.supported && !w.ok) failed++; }
-        return;
+        fail();
     }
+    if (t.container) {
+        r.web = webCheck(t);
+        console.log('web                ' + r.web.text);
+        if (!r.web.ok) fail();
+    }
+    return r;
+}
 
-    // Self-checks
-    let casesFailed = 0;
-    cases.forEach(([src, want, reject], i) => {
-        const got = out.cases[i] || [];
-        const bad = want.filter(x => !got.includes(x)).map(x => 'missing ' + x).concat(reject.filter(x => got.includes(x)).map(x => 'unexpected ' + x));
-        if (bad.length) { casesFailed++; console.log('  FAIL ' + src.slice(0, 60) + ': ' + bad.join(', ') + '  got [' + got + ']'); }
-    });
-    console.log(`self-checks        ${cases.length - casesFailed}/${cases.length} passed`);
-    if (casesFailed && t.supported) failed++;
-    r.casesFailed = casesFailed;
-
-    // Listing checks on the fixture
-    const listed = (out.listing || []).slice().sort();
-    r.listingOk = JSON.stringify(listed) === JSON.stringify(listingWant) && out.outside_warned === true;
-    console.log('listing checks     ' + (r.listingOk ? 'OK' : `FAIL: got [${listed.join(', ')}]` + (out.outside_warned ? '' : ', no warning for the outside symlink')));
-    if (!r.listingOk && t.supported) failed++;
-
-    // Benchmark: main.php's client-side scoring block, run as-is
-    const start = web.indexOf('// --- Client-side threat scoring');
-    const end = web.indexOf('// --- End client-side threat scoring ---');
-    // --no-ml: rules only (the shipped model was trained on these corpora, so its numbers here are in-sample)
-    const ctx = vm.createContext({ tokenWeights: out.weights, ML_MODEL: args.includes('--no-ml') ? null : JSON.parse(fs.readFileSync(path.join(root, 'ml-model.json'), 'utf8')) });
-    vm.runInContext(web.slice(start, end), ctx);
-    // The corpora were copied at different times (webshells keep 2024 mtimes), so
-    // timestamps would "detect" them for free; score on content only.
-    out.features.forEach(d => { d.mtime = 0; d.ctime = 0; d.rel = d.path.slice(t.repo.length + 1); });
-    if (opt('--dump')) fs.writeFileSync(opt('--dump'), JSON.stringify(out.features));
-    const rows = ctx.analyzeData(out.features, threshold);
-    // A file in the shell corpus that can't run (a saved 404 page, a robots.txt) is a labelling
-    // error, not a missed shell; test/train-ml.js drops the same files
-    const notCode = rows.filter(d => d.rel.startsWith('test/corpora/positive/') && d.no_php && !d.foreign);
-    const isMal = d => d.rel.startsWith('test/corpora/positive/') && !(d.no_php && !d.foreign);
-    const mal = rows.filter(isMal), ben = rows.filter(d => !d.rel.startsWith('test/corpora/positive/'));
-    if (notCode.length) console.log(`not counted     ${notCode.length} shell-corpus file(s) with no server code: ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
-    const report = (label, hit) => {
-        const tp = mal.filter(hit).length, fp = ben.filter(hit).length;
-        const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
-        console.log(`${label.padEnd(18)} detected ${tp}/${mal.length} (${pct(tp, mal.length)})   false positives ${fp}/${ben.length} (${pct(fp, ben.length)})`);
-        return [tp, fp];
-    };
-    r.anomaly = report('anomaly', d => d.isAnomaly);
-    report('score >= 8', d => d.threatScore >= 8);
-    report('score >= 15', d => d.threatScore >= 15);
-    report('  zSusp only', d => d.zScores.susp > threshold && d.threatScore < 8);
-    report('  zEntropy only', d => d.zScores.entropy > threshold && d.threatScore < 8);
-    report('  residual only', d => d.residual > 5 && d.threatScore < 8);
-    // In-sample: the shipped model was trained on these files (test/train-ml.js has the cross-validated numbers)
-    report('  ml only*', d => d.mlOnly);
-    console.log('  * trained on this corpus; node test/train-ml.js for held-out rates');
-    r.rows = rows;
-    r.isMal = isMal;
-    if (opt('--dump-scored')) fs.writeFileSync(opt('--dump-scored'), JSON.stringify(rows.map(d => Object.assign({ mal: isMal(d) }, d))));
-
-    if (t.container) { const w = webCheck(t); r.web = w; console.log('web                ' + w.text); if (t.supported && !w.ok) failed++; }
-});
-
-// --- Cross-version comparison against the newest version that produced features ---
-const withRows = results.filter(r => r.rows);
-const ref = withRows[withRows.length - 1];
-if (withRows.length > 1) {
-    const sig = d => d.matched_tokens.slice().sort().join(',');
-    const refMap = new Map(ref.rows.map(d => [d.rel, sig(d)]));
+// --- Reports across targets ---
+const signature = d => d.matched_tokens.slice().sort().join(',');
+function printSummary(results, ref) {
+    const refByRel = new Map(ref.scored.map(d => [d.rel, d]));
+    results.forEach(r => { r.diff = r.scored ? r.scored.filter(d => signature(refByRel.get(d.rel) || { matched_tokens: [] }) !== signature(d)) : []; });
+    if (results.length < 2) return refByRel;
     console.log(`\n== Summary (matches compared with ${ref.t.name})`);
-    console.log('PHP        self-checks  listing  anomaly detected / FP      web  files matching differently');
-    results.forEach(r => {
-        const diff = r.rows ? r.rows.filter(d => refMap.get(d.rel) !== sig(d)) : [];
-        r.diff = diff;
-        console.log((r.t.v || r.t.name).padEnd(10) + ' ' +
-            (r.rows ? `${cases.length - r.casesFailed}/${cases.length}` : '-').padEnd(12) + ' ' +
-            (r.rows ? (r.listingOk ? 'OK' : 'FAIL') : '-').padEnd(8) + ' ' +
-            (r.anomaly ? `${r.anomaly[0]} / ${r.anomaly[1]}` : (r.t.supported ? 'FAIL' : 'n/a (below 4.3)')).padEnd(26) + ' ' +
-            (r.web ? (r.web.ok ? 'OK' : 'FAIL') : '-').padEnd(4) + ' ' +
-            (r.rows ? diff.length : '-') + (r.crashed.length ? `  (PHP crashed on ${r.crashed.length} file(s), skipped)` : ''));
-    });
+    console.log('PHP        unit checks  anomaly detected / FP      web  files matching differently');
+    results.forEach(r => console.log((r.t.v || r.t.name).padEnd(10) + ' ' +
+        (r.unitFailures ? (r.unitFailures.length ? r.unitFailures.length + ' FAILED' : 'OK') : '-').padEnd(12) + ' ' +
+        (r.anomaly ? `${r.anomaly.tp} / ${r.anomaly.fp}` : (r.t.supported ? 'FAIL' : 'n/a (below 4.3)')).padEnd(26) + ' ' +
+        (r.web ? (r.web.ok ? 'OK' : 'FAIL') : '-').padEnd(4) + ' ' +
+        (r.scored ? r.diff.length : '-') + (r.crashed && r.crashed.length ? `  (PHP crashed on ${r.crashed.length} file(s), skipped)` : '')));
+    return refByRel;
 }
-
-// --- Detail listings, for the reference (newest) run ---
-if (ref && args.includes('--tokens')) {
+function printTokens(ref) {
     const count = {};
-    ref.rows.forEach(d => d.matched_tokens.forEach(x => {
-        count[x] = count[x] || [0, 0];
-        count[x][ref.isMal(d) ? 0 : 1]++;
-    }));
+    ref.scored.forEach(d => d.matched_tokens.forEach(x => { (count[x] = count[x] || [0, 0])[isMal(d) ? 0 : 1]++; }));
     console.log(`\n${ref.t.name}: token                  webshells  benign  weight`);
-    Object.keys(count).sort((a, b) => count[b][1] - count[a][1]).forEach(x => {
-        console.log(x.padEnd(28) + String(count[x][0]).padStart(10) + String(count[x][1]).padStart(8) + String(ref.out.weights[x]).padStart(8));
-    });
+    Object.keys(count).sort((a, b) => count[b][1] - count[a][1]).forEach(x =>
+        console.log(x.padEnd(28) + String(count[x][0]).padStart(10) + String(count[x][1]).padStart(8) + String(ref.weights[x]).padStart(8)));
 }
-if (ref && args.includes('--list')) {
+function printLists(results, ref, refByRel) {
     console.log(`\n${ref.t.name} MISSED:`);
-    ref.rows.filter(d => ref.isMal(d) && !d.isAnomaly).forEach(d => console.log('  ' + d.rel + '  [' + d.matched_tokens.join(', ') + ']'));
+    ref.scored.filter(d => isMal(d) && !d.isAnomaly).forEach(d => console.log('  ' + d.rel + '  [' + d.matched_tokens.join(', ') + ']'));
     console.log(`\n${ref.t.name} FALSE POSITIVES:`);
-    ref.rows.filter(d => !ref.isMal(d) && d.isAnomaly).forEach(d => console.log('  ' + d.rel + '  score=' + d.threatScore + '  [' + d.matched_tokens.join(', ') + ']'));
-    results.filter(r => r.diff && r.diff.length).forEach(r => {
-        const refRows = new Map(ref.rows.map(d => [d.rel, d]));
+    ref.scored.filter(d => !inShellCorpus(d) && d.isAnomaly).forEach(d => console.log('  ' + d.rel + '  score=' + d.threatScore + '  [' + d.matched_tokens.join(', ') + ']'));
+    results.filter(r => r !== ref && r.diff && r.diff.length).forEach(r => {
         console.log(`\n${r.t.name} matches differently from ${ref.t.name}:`);
         r.diff.forEach(d => {
-            const o = refRows.get(d.rel);
-            const mine = new Set(d.matched_tokens), theirs = new Set(o ? o.matched_tokens : []);
-            const only = [...mine].filter(x => !theirs.has(x)), missing = [...theirs].filter(x => !mine.has(x));
-            console.log('  ' + d.rel + (only.length ? '  +[' + only.join(', ') + ']' : '') + (missing.length ? '  -[' + missing.join(', ') + ']' : ''));
+            const mine = new Set(d.matched_tokens), theirs = new Set((refByRel.get(d.rel) || { matched_tokens: [] }).matched_tokens);
+            const only = [...mine].filter(x => !theirs.has(x)), gone = [...theirs].filter(x => !mine.has(x));
+            console.log('  ' + d.rel + (only.length ? '  +[' + only.join(', ') + ']' : '') + (gone.length ? '  -[' + gone.join(', ') + ']' : ''));
         });
     });
 }
-process.exit(failed ? 1 : 0);
+
+(async () => {
+    const targets = args.php ? containerTargets(args.php) : [localTarget()];
+    const results = [];
+    for (const t of targets) results.push(await runTarget(t));
+    const withRows = results.filter(r => r.scored);
+    const ref = withRows[withRows.length - 1]; // the newest PHP that produced rows
+    if (ref) {
+        const refByRel = printSummary(results, ref);
+        if (args.tokens) printTokens(ref);
+        if (args.list) printLists(results, ref, refByRel);
+    }
+    process.exit(results.every(r => r.ok) ? 0 : 1);
+})().catch(e => { console.error(e); process.exit(1); });

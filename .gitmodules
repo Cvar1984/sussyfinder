@@ -21,6 +21,7 @@
 	url = https://github.com/BlackArch/webshells.git
 	shallow = true
 	family = blackarch-webshells
+	benchmark = true
 [submodule "test/corpora/positive/deepinghost-bypass"]
 	path = test/corpora/positive/deepinghost-bypass
 	url = https://github.com/DeEpinGh0st/PHP-bypass-collection.git
@@ -407,6 +408,7 @@
 	url = https://github.com/laravel/laravel.git
 	shallow = true
 	family = laravel
+	benchmark = true
 [submodule "test/corpora/noise/magento2"]
 	path = test/corpora/noise/magento2
 	url = https://github.com/magento/magento2.git
@@ -892,6 +894,7 @@
 	url = https://github.com/WordPress/WordPress.git
 	shallow = true
 	family = wordpress
+	benchmark = true
 [submodule "test/corpora/noise/yii-1.1.0"]
 	path = test/corpora/noise/yii-1.1.0
 	url = https://github.com/yiisoft/yii.git

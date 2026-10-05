@@ -495,9 +495,7 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
     }
     // ASP/JSP/CGI shell code in a file named like PHP (no PHP in it at all):
     // nothing for the PHP checks above to see
-    if (!preg_match('/<\?(?!xml)/i', $content) &&
-        (preg_match('/<%.*?(Response\.Write|CreateObject|Server\.MapPath|Request\.(Form|QueryString)|WScript\.Shell|FileSystemObject|Runtime\.getRuntime|java\.io\.|<%@\s*page)/is', $content) ||
-         preg_match('/^#!\S*perl|^\s*use CGI\b/m', $content))) {
+    if (!hasPhpCode($content) && hasForeignServerCode($content)) {
         $found['@foreign_code'] = true;
     }
     if ($maxLine > 5000) {
@@ -509,6 +507,30 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
 
     return array_keys($found);
 }
+/**
+ * Whether a file holds any PHP: any "<?" except "<?xml" ("<?$d=..." is PHP).
+ *
+ * @param string $content
+ * @return bool
+ */
+function hasPhpCode($content)
+{
+    return (bool) preg_match('/<\?(?!xml)/i', $content);
+}
+
+/**
+ * Whether a file holds server code in another language: an ASP/JSP directive
+ * or ASP/JSP code using its server objects, or a Perl CGI script.
+ *
+ * @param string $content
+ * @return bool
+ */
+function hasForeignServerCode($content)
+{
+    return (bool) (preg_match('/<%@\s*(page|language)\b|<%.*?(Response\.Write|CreateObject|Server\.MapPath|Request\.(Form|QueryString)|WScript\.Shell|FileSystemObject|Runtime\.getRuntime|java\.io\.)/is', $content) ||
+        preg_match('/^#!.*\bperl\b|^\s*use CGI\b/m', $content));
+}
+
 /**
  * Shannon entropy in bits per byte (0 = one repeated byte, 8 = random)
  *
@@ -959,6 +981,7 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             'md5'            => $fileSum,
             'is_blacklisted' => $isBlacklisted,
             'is_htaccess'    => $isHtaccess,
+            'has_php'        => hasPhpCode($content),
             'duplicate_of'   => $duplicateOf,
             'error'          => $error,
             'is_unreadable'  => false,
@@ -997,6 +1020,7 @@ function scanUnreadablePaths($paths)
             'md5'            => 'N/A',
             'is_blacklisted' => false,
             'is_htaccess'    => false,
+            'has_php'        => null,
             'duplicate_of'   => false,
             'error'          => null,
             'is_unreadable'  => true,
@@ -1883,13 +1907,20 @@ if (isset($_POST['ajax_action'])) {
             let analyzedData = [];
             let currentSort = 'threat';
             let currentFilterMode = 'all';
-            let currentThreshold = 3.5;
+            let currentThreshold; // set to Z_THRESHOLD after the scoring block below
             let insightsVisible = false;
             let chartsVisible = false;
             let currentSearch = '';
             let searchTokensOnly = false;
 
             // --- Client-side threat scoring (offloaded from PHP) ---
+
+            // Default robust Z-score above which a statistic is an outlier
+            // (the Z-threshold control; test/run.js and test/train-ml.js use it too)
+            const Z_THRESHOLD = 3.5;
+            // Threat score at which a file is an anomaly (HIGH RISK), and CRITICAL
+            const ANOMALY_SCORE = 8;
+            const CRITICAL_SCORE = 15;
 
             // Whole-file Shannon entropy (bits/byte, computed server-side) above
             // this means packed/encoded content: 98/202 test webshells vs 1/1927
@@ -2181,8 +2212,8 @@ if (isset($_POST['ajax_action'])) {
                         d.mhr_hit === true;
                     // ML points can lift a file over the bar, never pull one under it;
                     // mlOnly marks files flagged only because of them
-                    const ruleAnomaly = ruleScore >= 8.0 || otherTriggers;
-                    const isAnomaly = threatScore >= 8.0 || otherTriggers;
+                    const ruleAnomaly = ruleScore >= ANOMALY_SCORE || otherTriggers;
+                    const isAnomaly = threatScore >= ANOMALY_SCORE || otherTriggers;
                     const mlOnly = isAnomaly && !ruleAnomaly;
 
                     return {
@@ -2203,6 +2234,7 @@ if (isset($_POST['ajax_action'])) {
             }
 
             // --- End client-side threat scoring ---
+            currentThreshold = Z_THRESHOLD;
 
             function shortenUnlinkError(msg) {
                 if (!msg) return msg;
@@ -2448,10 +2480,10 @@ if (isset($_POST['ajax_action'])) {
                             color = '#f72f2f';
                             badge = `<span style="background:#cc0000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">MHR HIT (${d.mhr_detection_rate}%)</span> `;
                             status = escapeHtml(d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown')));
-                        } else if (d.threatScore >= 15.0) {
+                        } else if (d.threatScore >= CRITICAL_SCORE) {
                             color = '#dddbdb';
                             badge = `<span style="background:#990000;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">CRITICAL (${d.threatScore.toFixed(1)})</span> `;
-                        } else if (d.threatScore >= 8.0) {
+                        } else if (d.threatScore >= ANOMALY_SCORE) {
                             color = '#dddbdb';
                             badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
                         } else if (d.is_htaccess) {
@@ -3294,8 +3326,8 @@ if (isset($_POST['ajax_action'])) {
 
                             drawDots(c, sorted.map((d, i) => {
                                 let color = '#4a8bc2';
-                                if (d.threatScore >= 15) color = '#ff4444';
-                                else if (d.threatScore >= 8) color = '#ffaa00';
+                                if (d.threatScore >= CRITICAL_SCORE) color = '#ff4444';
+                                else if (d.threatScore >= ANOMALY_SCORE) color = '#ffaa00';
                                 else if ((d.entropy || 0) > HIGH_ENTROPY) color = '#9b59b6';
                                 return { x: b.left + (i / Math.max(1, sorted.length - 1)) * W, y: sy(d.entropy || 0), d: d, color: color };
                             }), 3);
@@ -3381,7 +3413,7 @@ if (isset($_POST['ajax_action'])) {
                         document.getElementById('ajaxProgress').style.display = 'none';
                         window.rawFileData = allFeatures;
                         window.lastScanFeatures = allFeatures;
-                        currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                        currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
                         analyzedData = analyzeData(allFeatures, currentThreshold);
                         renderTable(analyzedData);
                     })
@@ -3486,7 +3518,7 @@ if (isset($_POST['ajax_action'])) {
                         if (_scanCancelled) { return; }
                         // Incremental render every 3 chunks so user sees progress
                         if ((idx + 1) % 3 === 0 || idx + 1 === chunks.length) {
-                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
                             analyzedData = analyzeData(allFeatures, currentThreshold);
                             renderTable(analyzedData);
                         }
@@ -3650,7 +3682,7 @@ if (isset($_POST['ajax_action'])) {
                             // per-file failed-deletion list with paths, via renderWarningPanel)
                             // *before* logWarning adds the one summary line below it — so the
                             // outcome is reported exactly once, not twice in different words.
-                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
                             analyzedData = analyzeData(features, currentThreshold);
                             renderTable(analyzedData);
 
@@ -3665,7 +3697,7 @@ if (isset($_POST['ajax_action'])) {
                             );
                         })
                         .catch(function (err) {
-                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || 3.5;
+                            currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
                             analyzedData = analyzeData(features, currentThreshold);
                             renderTable(analyzedData);
                             var errMsg = 'MHR unlink request failed: ' + err.message;
