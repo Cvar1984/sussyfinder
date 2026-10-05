@@ -2,4 +2,4 @@
 # corpora. One substring of "<corpus name>/<path>" per line.
 
 # A robots.txt, not a webshell
-blackarch-webshells/php/robots.php
+webshells/php/robots.php

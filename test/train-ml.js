@@ -1,10 +1,10 @@
 // Trains the client-side ML model (logistic regression over main.php's hashed
-// token features, see mlFeatures()) on the corpora in test/corpora.json,
+// token features, see mlFeatures()) on the sample submodules in .gitmodules,
 // reports cross-validated detection/false-positive rates, and with --write
 // stores the int8-quantized weights in ml-model.json, which main.php downloads.
 //
 // Usage:
-//   node test/fetch-corpora.js            download the corpora first (once)
+//   git submodule update --init test/   download the samples first (once; ~5 GB, shallow)
 //   node test/train-ml.js                 cross-validate only
 //   node test/train-ml.js --write         cross-validate, then train on everything and write ml-model.json
 //   extra: --folds 5, --l2 0.001, --epochs 400, --cap 2000 (benign training files
@@ -85,8 +85,27 @@ fs.writeFileSync(extractScript, extractCode);
 const featureHash = crypto.createHash('sha1').update(featureCode).update(extractCode).digest('hex').slice(0, 12);
 const run = (cmd, a) => new Promise((resolve, reject) => execFile(cmd, a, { maxBuffer: 1 << 30 }, (e, out) => e ? reject(e) : resolve(out)));
 
+// Sample corpora are the submodules carrying a "label" (shell or benign) in
+// .gitmodules; "family" groups corpora held out together, "subdir" narrows a
+// repo to the part that holds samples. Git ignores these extra keys.
+function loadCorpora() {
+    const subs = new Map();
+    const cfg = execFileSync('git', ['config', '-f', path.join(root, '.gitmodules'), '--get-regexp', '^submodule\\.'], { encoding: 'utf8' });
+    for (const line of cfg.split('\n').filter(Boolean)) {
+        const sp = line.indexOf(' '), key = line.slice(0, sp), dot = key.lastIndexOf('.');
+        const name = key.slice('submodule.'.length, dot);
+        if (!subs.has(name)) subs.set(name, {});
+        subs.get(name)[key.slice(dot + 1)] = line.slice(sp + 1);
+    }
+    const pinned = new Map(execFileSync('git', ['ls-files', '-s'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 })
+        .split('\n').filter(l => l.startsWith('160000')).map(l => [l.split('\t')[1], l.split(' ')[1]]));
+    return [...subs.values()].filter(s => s.label).map(s => ({
+        name: path.basename(s.path), path: s.path, label: s.label,
+        family: s.family || path.basename(s.path), subdir: s.subdir, commit: pinned.get(s.path),
+    }));
+}
 function corpusDir(c) {
-    return c.path ? path.join(root, c.path) : path.join(__dirname, 'corpora', c.name, c.subdir || '');
+    return path.join(root, c.path, c.subdir || '');
 }
 async function extract(c) {
     const cache = path.join(cacheDir, `${c.name}-${(c.commit || 'local').slice(0, 10)}-${featureHash}.jsonl`);
@@ -109,10 +128,11 @@ function toBits(hex) {
 }
 
 (async () => {
-    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'corpora.json'), 'utf8'));
-    const corpora = manifest.corpora.filter(c => fs.existsSync(corpusDir(c)));
-    const missing = manifest.corpora.length - corpora.length;
-    if (missing) log(`${missing} corpora not downloaded (node test/fetch-corpora.js), skipping them`);
+    const listed = loadCorpora();
+    // An uninitialized submodule is an empty directory
+    const corpora = listed.filter(c => fs.existsSync(corpusDir(c)) && fs.readdirSync(corpusDir(c)).length);
+    const missing = listed.length - corpora.length;
+    if (missing) log(`${missing} sample submodules not checked out (git submodule update --init test/), skipping them`);
     const exclude = fs.readFileSync(path.join(__dirname, 'ml-exclude.txt'), 'utf8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
 
     let next = 0, done = 0;

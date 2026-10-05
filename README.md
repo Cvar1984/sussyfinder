@@ -364,10 +364,19 @@ To turn the model off, set `define('_ML_', false);` near the top of `main.php`. 
 
 #### Training data
 
-`test/corpora.json` pins public sources to exact commits. `node test/fetch-corpora.js` downloads them into the git-ignored `test/corpora/`:
+Every test sample is a git submodule pinned to an exact commit: `test/webshells`, `test/WordPress` and `test/laravel`, plus 94 more under `test/corpora/`. In `.gitmodules`, each sample entry also carries `label` (`shell` or `benign`), `family` (corpora held out together in cross-validation) and, where needed, `subdir`. Git ignores these extra keys; `test/train-ml.js` reads them. The samples are:
 
 * **Webshells:** public webshell collections, plus well-known standalone shells.
 * **Legitimate code:** current frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and others), and old releases for legacy procedural code, such as WordPress 2.0/3.0, Drupal 6/7 and phpBB 3.0.
+
+Submodules aren't downloaded by a normal clone. Fetch what you need:
+
+```bash
+git submodule update --init test/webshells test/WordPress test/laravel   # benchmark set
+git submodule update --init test/                                         # everything, ~5 GB
+```
+
+Corpus submodules are marked `shallow`, so a corpus pinned to a branch tip downloads a single commit. Old releases pinned below the tip come with some history.
 
 > **Warning:** the webshell corpora are real, working shells. They are only read and tokenized, never executed, but keep the checkout out of any web root. Inside a directory your web server runs PHP from, they are live backdoors.
 
@@ -456,7 +465,7 @@ You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_`
 ![Charts](demo1.png)
 ![Results table](demo2.png)
 
-> Clone the webshells submodule for testing purposes.
+> The test samples are git submodules; see [Training data](#training-data) for how to fetch them.
 
 ## Security & Disclaimer
 
