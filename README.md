@@ -1,11 +1,10 @@
 # SussyFinder
 
-[![CodeFactor](https://www.codefactor.io/repository/github/cvar1984/sussyfinder/badge)](https://www.codefactor.io/repository/github/cvar1984/sussyfinder)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://makeapullrequest.com)
 
-PHP web application that scans a directory for files with specific extensions (e.g., PHP scripts) and performs in-depth analysis to detect potentially malicious code.
+PHP web application that scans a directory for PHP and related files and analyses each one for malicious code.
 
-It combines token-based pattern matching, statistical anomaly detection (Shannon entropy, Z-scores, residual analysis), and MD5 hash whitelist/blacklisting to help identify suspicious files in a web server environment.
+It combines token-based pattern matching, statistical anomaly detection (Shannon entropy, robust Z-scores), and MD5 hash whitelist/blacklisting to help identify suspicious files in a web server environment.
 
 > **⚠️ Use with caution** – this tool can delete files identified as blacklisted. Always review flagged files before taking action.
 
@@ -16,7 +15,7 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
 * **Shannon entropy calculation** – per-file byte entropy detects heavily obfuscated or encoded content
-* **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser, that flags files the rules miss. It is trained on 1,605 webshells and 184,589 files from 58 legitimate projects. In cross-validation it catches 88% of webshells on its own, at 0.06% false positives on projects it never saw.
+* **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser. Its score adds points to the threat score, so it can lift a file the rules underrate; it never lowers a score.
 * **Client-side statistical analysis** – computes robust (median/MAD) Z-scores for size, mtime, tokens, suspicious token count, entropy and the ctime–mtime gap, plus residuals and file-owner rarity, to flag outliers
 * **Interactive web interface** with:
 
@@ -65,17 +64,15 @@ For example:
 
 | Data                | Approximate Entropy |
 | ------------------- | ------------------: |
-| `AAAAAA`            |                 $0$ |
+| `AAAAAA`            |                   0 |
 | `ABCDEF`            |      $\approx 2.58$ |
 | Random/encoded data |              Higher |
 
 Plain PHP source sits around 4.5–5.2 bits/byte. SussyFinder treats a file as high-entropy above:
 
 $$
-Entropy > 5.5
+\text{entropy} > 5.5
 $$
-
-On the bundled test corpus this threshold matches 98 of 202 webshells and 1 of 1927 legitimate WordPress/Laravel files.
 
 ### Median and MAD
 
@@ -84,13 +81,13 @@ Mean and standard deviation are pulled toward the very outliers being hunted (an
 $$
 \tilde{x} = \operatorname{median}(x_1, \dots, x_n)
 \qquad
-MAD = \operatorname{median}(|x_i - \tilde{x}|)
+\mathrm{MAD} = \operatorname{median}(|x_i - \tilde{x}|)
 $$
 
 The spread is scaled so it matches a standard deviation on normally distributed data:
 
 $$
-s = 1.4826 \times MAD
+s = 1.4826 \times \mathrm{MAD}
 $$
 
 When more than half the values tie (MAD = 0, e.g. most files match no suspicious tokens), the mean absolute deviation is used instead:
@@ -171,13 +168,7 @@ Where:
 
 A positive residual indicates that a file contains more suspicious tokens than expected for its total token count.
 
-SussyFinder flags a file when:
-
-$$
-R_i > 5
-$$
-
-This provides a complementary detection method to the Z-score because a file may have a suspiciously high number of tokens relative to its own size or structure even when the absolute suspicious-token count is not extremely large.
+The residual is shown in each row and is available as a sort order, but it doesn't flag a file on its own. It counts every matched token equally, so long legitimate files full of routine calls (`substr`, `implode`, `require`) score high on it. The webshells it singles out tend to be ones that probe the server, and the [Server Reconnaissance](#server-reconnaissance) rule scores those directly.
 
 ### Threat Score
 
@@ -186,8 +177,7 @@ SussyFinder also calculates a weighted threat score from matched tokens.
 The general model is:
 
 $$
-Score =
-\sum_{i=1}^{n} w_i
+\text{Score} = \sum_{i=1}^{n} w_i
 $$
 
 Where:
@@ -199,24 +189,24 @@ Example token weights include:
 
 | Category           | Example                         | Weight |
 | ------------------ | ------------------------------- | -----: |
-| Critical RCE       | `eval`, `exec`, `system`        | $10.0$ |
-| Obfuscation        | `base64_decode`, `gzinflate`    |  $5.0$ |
-| Suspicious I/O     | `move_uploaded_file`, `$_FILES` |  $2.0$ |
-| User input         | `$_GET`, `$_POST`, `$_COOKIE`   |  $0.5$ |
-| Routine operations | `include`, `fopen`, `substr`    |  $0.1$ |
+| Critical RCE       | `eval`, `exec`, `system`        |   10.0 |
+| Obfuscation        | `base64_decode`, `gzinflate`    |    5.0 |
+| Suspicious I/O     | `move_uploaded_file`, `$_FILES` |    2.0 |
+| User input         | `$_GET`, `$_POST`, `$_COOKIE`   |    0.5 |
+| Routine operations | `include`, `fopen`, `substr`    |    0.1 |
 
 Structural signals appear among the matched tokens with an `@` prefix (no real PHP token can look like that):
 
 | Signal          | Meaning                                                  | Weight |
 | --------------- | -------------------------------------------------------- | -----: |
-| `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    | $10.0$ |
-| `@foreign_code` | ASP, JSP or Perl CGI code in a PHP-named file with no PHP | $10.0$ |
-| `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             | $10.0$ |
-| `` ` ``         | Backtick operator (shell execution)                      | $10.0$ |
-| `@concat_name`  | Function name hidden in a string (the name is added too) |  $5.0$ |
-| `@halt_payload` | Over 1 KiB of data after `__halt_compiler()`             |  $5.0$ |
-| `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |  $2.0$ |
-| `@long_line`    | A line over 5000 characters                              |  $2.0$ |
+| `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    |   10.0 |
+| `@foreign_code` | ASP, JSP or Perl CGI code in a PHP-named file with no PHP |   10.0 |
+| `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             |   10.0 |
+| `` ` ``         | Backtick operator (shell execution)                      |   10.0 |
+| `@concat_name`  | Function name hidden in a string (the name is added too) |    5.0 |
+| `@halt_payload` | Over 1 KiB of data after `__halt_compiler()`             |    5.0 |
+| `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |    2.0 |
+| `@long_line`    | A line over 5000 characters                              |    2.0 |
 
 `@input_call`, `@preg_e`, `@foreign_code` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
 
@@ -224,10 +214,10 @@ Additional multipliers are applied when combinations of suspicious behaviors are
 
 #### Non-Critical Dampening
 
-Obfuscation and suspicious-I/O tokens (e.g. `base64_decode`, `gzinflate`, `move_uploaded_file`) are common in entirely legitimate code — compression libraries, mail clients, HTTP clients, media parsers, upload handlers. On their own they're a weak signal; they matter most in combination with a real execution primitive (see the multipliers below). When a file has **no** Critical RCE token, their weight is reduced:
+Obfuscation and suspicious-I/O tokens (e.g. `base64_decode`, `gzinflate`, `move_uploaded_file`) are common in legitimate code: compression libraries, mail clients, HTTP clients, media parsers and upload handlers. On their own they're a weak signal; they matter most in combination with a real execution primitive (see the multipliers below). When a file has **no** Critical RCE token, their weight is reduced:
 
 $$
-w_i' = w_i \times 0.3
+w_i' = 0.3 \times w_i
 $$
 
 This does not apply to Routine-operations-tier tokens, and has no effect once a Critical RCE token is present in the file (the combination multipliers below take over instead).
@@ -237,7 +227,7 @@ This does not apply to Routine-operations-tier tokens, and has no effect once a 
 If a file contains both a critical execution token and an obfuscation token:
 
 $$
-Score' = Score \times 2.5
+\text{Score}' = 2.5 \times \text{Score}
 $$
 
 #### Critical + Upload Handling
@@ -245,7 +235,7 @@ $$
 If a file contains both a critical execution token and upload-related functionality:
 
 $$
-Score' = Score \times 1.8
+\text{Score}' = 1.8 \times \text{Score}
 $$
 
 #### Critical + User Input
@@ -253,7 +243,7 @@ $$
 If a file contains both a critical execution token and a user-input token:
 
 $$
-Score' = Score \times 2.0
+\text{Score}' = 2.0 \times \text{Score}
 $$
 
 #### Upload Folder
@@ -261,7 +251,7 @@ $$
 Upload folders hold user files, so real code in one was almost always planted. A non-`.htaccess` file with more than 5 tokens inside an `uploads` directory gets:
 
 $$
-Score' = Score + 10
+\text{Score}' = \text{Score} + 10
 $$
 
 #### Suspicious Path Bonus
@@ -277,7 +267,7 @@ Otherwise, if the file is located in directories such as:
 and the score is already suspicious or entropy is high:
 
 $$
-Score' = Score + 5
+\text{Score}' = \text{Score} + 5
 $$
 
 #### High-Entropy Bonus
@@ -285,22 +275,30 @@ $$
 For files with entropy above 5.5:
 
 $$
-Score' = Score + 3
+\text{Score}' = \text{Score} + 3
+$$
+
+#### Server Reconnaissance
+
+A webshell's header usually shows the server it landed on: the OS, the current user and uid, disk space, PHP settings. Legitimate code rarely asks for two of these at once. The calls counted are `php_uname`, `phpinfo`, `get_cfg_var`, `get_current_user`, `getmyuid`, `getmygid`, `getmypid`, `getmyinode`, `posix_getuid`, `posix_geteuid`, `posix_getegid`, `posix_getlogin`, `disk_total_space`, `disk_free_space`, `diskfreespace` and `getlastmod`. A file calling two or more different ones gets:
+
+$$
+\text{Score}' = \text{Score} + 6
 $$
 
 #### ML Points
 
-Last, the ML model's score $P_{ML}$ (see [ML Model](#ml-model)) adds points, after the multipliers above so it is never multiplied:
+Last, the ML model's score $P_{\mathrm{ML}}$ (see [ML Model](#ml-model)) adds points. They are added after the multipliers above, so they are never multiplied:
 
 $$
-Score' = Score + \begin{cases}
-0 & P_{ML} \leq 0.6 \\
-8 \cdot \frac{P_{ML} - 0.6}{0.9 - 0.6} & 0.6 < P_{ML} < 0.9 \\
-8 + 2 \cdot \frac{P_{ML} - 0.9}{1 - 0.9} & P_{ML} \geq 0.9
+\text{Score}' = \text{Score} + \begin{cases}
+0 & P_{\mathrm{ML}} \leq 0.6 \\
+8 \cdot \dfrac{P_{\mathrm{ML}} - 0.6}{0.9 - 0.6} & 0.6 < P_{\mathrm{ML}} < 0.9 \\
+8 + 2 \cdot \dfrac{P_{\mathrm{ML}} - 0.9}{1 - 0.9} & P_{\mathrm{ML}} \geq 0.9
 \end{cases}
 $$
 
-So a file the model scores 0.9 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed. Compared with treating the model as a separate yes/no flag, this left the benchmark's overall catch and false positives unchanged (207/211 webshells, 18/1927 benign files) while ranking far more webshells correctly: 207 instead of 179 reach HIGH RISK, and 173 instead of 151 reach CRITICAL, with no new false positives at either level.
+A file the model scores 0.9 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
 
 The final score is rounded to two decimal places.
 
@@ -311,48 +309,28 @@ A file is considered anomalous when one or more statistical or security conditio
 Conceptually:
 
 $$
-Anomaly =
-ThreatScore \geq 8
-\lor
-Z_{entropy} > T
-\lor
-|Z_{mtime}| > T
-\lor
-|Z_{ctime-mtime}| > T
-\lor
-RareOwner
-\lor
-Residual > 5
+\text{anomaly} = \text{Score} \geq 8
+\lor Z_{\mathrm{entropy}} > T
+\lor \lvert Z_{\mathrm{mtime}} \rvert > T
+\lor \lvert Z_{\mathrm{gap}} \rvert > T
+\lor \text{rare owner}
 $$
 
 Where:
 
+* $\text{Score}$ = the threat score above, including ML points
+* $Z_{\mathrm{gap}}$ = Z-score of the ctime − mtime gap
 * $T$ = configured Z-score threshold
 * $\lor$ = logical OR
-
-The ML model enters through $ThreatScore$ (see [ML Points](#ml-points)).
 
 SussyFinder additionally treats the following as anomalies:
 
 * Blacklisted files
 * Unreadable files
 
-File size (`Z_size`) is still computed and shown in the interface, but is not
-used to decide anomaly status: tested against real webshell samples, size
-alone never uniquely caught a malicious file while being the largest source
-of false positives — legitimate codebases routinely contain very large or
-very small files with no bearing on maliciousness. The suspicious-token
-count Z-score (`Z_suspicious`) was dropped as a trigger for the same reason
-(0 unique catches, 5 false positives); the weighted threat score already
-covers "many suspicious tokens".
+File size (`Z_size`), the suspicious-token count Z-score (`Z_suspicious`) and the residual are computed and shown in the interface, but none of them decides anomaly status. Tested against real webshells, none of them caught a webshell the other signals missed, and each flagged legitimate files: codebases routinely contain very large files, or files full of routine calls. The weighted threat score already covers "many suspicious tokens".
 
-`.htaccess` files and byte-identical duplicates are shown with their own
-badges/counters but no longer auto-flagged as anomalies either — a shared
-Apache config file or a stock duplicate (e.g. WordPress's many identical
-"Silence is golden" `index.php` stubs) isn't inherently suspicious on its
-own. Only content/threat-based signals decide anomaly status.
-
-This means the statistical analysis is used alongside deterministic security indicators rather than as the sole detection mechanism.
+`.htaccess` files and byte-identical duplicates get their own badges and counters, but neither is flagged as an anomaly for that alone. A shared Apache config file or a stock duplicate (e.g. WordPress's many identical "Silence is golden" `index.php` stubs) isn't suspicious by itself. Only content and threat signals decide anomaly status.
 
 ### ML Model
 
@@ -368,10 +346,10 @@ For each file, PHP's `mlFeatures()` turns the token stream into a set of short f
 Each string is hashed into one of 2048 buckets with `crc32`, and the bucket set is sent as a 512-character hex bitmap (`ml_features`). The browser adds up the weights of the set bits:
 
 $$
-P_{ML} = \sigma\left(b + s \sum_{i \in bits} w_i\right)
+P_{\mathrm{ML}} = \sigma\left(b + s \sum_{i \in \text{set bits}} w_i\right)
 $$
 
-$P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. It is turned into threat points (see [ML Points](#ml-points)), so it can only raise a file's score, never lower it: the model can add flags but never clears one. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
+$P_{\mathrm{ML}}$ is a ranking score from 0 to 1, not a calibrated probability. It is turned into threat points (see [ML Points](#ml-points)), so it can only raise a file's score, never lower it: the model can add flags but never clears one. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
 
 #### Where the model comes from
 
@@ -386,12 +364,14 @@ To turn the model off, set `define('_ML_', false);` near the top of `main.php`. 
 
 #### Training data
 
-`test/corpora.json` pins 97 public sources to exact commits. `node test/fetch-corpora.js` downloads them (about 5 GB) into the git-ignored `test/corpora/`:
+`test/corpora.json` pins public sources to exact commits. `node test/fetch-corpora.js` downloads them into the git-ignored `test/corpora/`:
 
-* **Webshells:** 20 collections (BlackArch, tennc, xl7dev, tanjiti, bartblaze, JohnTroony, nikicat, webshellpub and others), plus well-known standalone shells such as b374k, p0wny and wwwolf.
-* **Legitimate code:** 77 checkouts from 58 project families. These cover current frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress, PrestaShop, MediaWiki, Nextcloud, TYPO3 and about 40 more) and old releases for legacy procedural code, such as WordPress 2.0/3.0, Drupal 6/7, phpBB 3.0, phpMyAdmin 2.11, Joomla 2.5 and CakePHP 1.3.
+* **Webshells:** public webshell collections, plus well-known standalone shells.
+* **Legitimate code:** current frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and others), and old releases for legacy procedural code, such as WordPress 2.0/3.0, Drupal 6/7 and phpBB 3.0.
 
-After cleaning, that is **1,605 unique webshells** (765 clusters of near-identical variants) and **184,589 unique legitimate files**. Cleaning means:
+> **Warning:** the webshell corpora are real, working shells. They are only read and tokenized, never executed, but keep the checkout out of any web root. Inside a directory your web server runs PHP from, they are live backdoors.
+
+Before training, the data is cleaned by:
 
 * removing exact duplicates by MD5
 * removing `.htaccess` files
@@ -400,22 +380,10 @@ After cleaning, that is **1,605 unique webshells** (765 clusters of near-identic
 
 #### Accuracy
 
-`node test/train-ml.js` reports 5-fold cross-validated rates, so every file is scored by a model that never saw it:
+`node test/train-ml.js` reports 5-fold cross-validated rates, so every file is scored by a model that never saw it. Run it for current figures:
 
 * Near-identical shells (feature-set Jaccard ≥ 0.8) share a fold, so a variant of a training shell can't count as a detection.
 * Whole project families share a fold, for example every WordPress version. So false positives are always measured on projects the model never trained on.
-
-Last run:
-
-| Detector                       | Webshells detected  | Shell clusters | False positives        |
-| ------------------------------ | ------------------: | -------------: | ---------------------: |
-| Rules only (anomaly)           | 1096/1605 (68.3%)   | 459/765        | 2599/184589 (1.4%)     |
-| ML alone, score ≥ 0.9          | 1419/1605 (88.4%)   | 647/765        | 115/184589 (0.06%)     |
-| Rules or ML                    | 1511/1605 (94.1%)   | 700/765        | 2693/184589 (1.5%)     |
-
-* **What ML adds on top of the rules:** 415 shells (244 clusters) at the cost of 94 extra false positives (0.05%).
-* **Worst families for ML false positives:** WordPress (1.4%, mostly the old releases) and Zen Cart (1.2%). Every other family is at or below 0.6%, and 45 of the 58 families get none.
-* **Use `--by-family`** to print the per-project table.
 
 Things to keep in mind:
 
@@ -434,15 +402,17 @@ Options:
 
 ### Benchmark
 
-`node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. It also runs structural-detector self-checks and fails if any of them break.
+`node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. Files in the webshell corpus with no server code at all (a saved 404 page, a `robots.txt`) can't run, so they aren't counted as missed shells; the run lists them by name. It also runs structural-detector self-checks and fails if any of them break.
 
 `node test/run.js --php all` does the same on every PHP version in `PHTest/` (Docker, PHP 4.1–8.5), plus a page/AJAX smoke test per version, and lists files that match differently than on the newest PHP.
 
-* `--list` — print missed webshells and false positives
-* `--tokens` — print how often each token appears in webshells vs. benign files, for tuning weights
-* `--threshold 3.5` — Z-score threshold to evaluate
-* `--php all` or `--php 4.3.11,8.5.6` — run on PHTest versions instead of the local `php`
-* `--dump rows.json` — save the extracted feature rows (`test/train-ml.js --rows` reuses them)
+* `--list`: print missed webshells and false positives
+* `--tokens`: print how often each token appears in webshells vs. benign files, for tuning weights
+* `--threshold 3.5`: Z-score threshold to evaluate
+* `--php all` or `--php 4.3.11,8.5.6`: run on PHTest versions instead of the local `php`
+* `--no-ml`: score with the rules alone
+* `--dump rows.json`: save the extracted feature rows
+* `--dump-scored rows.json`: save every row after scoring (Z-scores, threat score, ML points), for analysis
 
 Its `ml only` line scores the shipped model on the corpus it was trained on, so that number is optimistic. Use `test/train-ml.js` for held-out rates.
 
@@ -483,9 +453,8 @@ You can disable fetching by setting the constants `_WHITELIST_` or `_BLACKLIST_`
 
 ## Screenshots
 
-![Demo](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo1.png)
-![Demo](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/demo2.png)
-![Profile](https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/profile.png)
+![Charts](demo1.png)
+![Results table](demo2.png)
 
 > Clone the webshells submodule for testing purposes.
 

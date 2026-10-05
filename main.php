@@ -1901,6 +1901,11 @@ if (isset($_POST['ajax_action'])) {
              * @param {Object} d       feature row from the server
              * @param {Object} weights tokenWeights map (key -> weight)
              */
+            // Server-reconnaissance calls; see the recon bonus in calculateThreatScore()
+            const RECON_TOKENS = ['php_uname', 'phpinfo', 'get_cfg_var', 'get_current_user', 'getmyuid', 'getmygid', 'getmypid',
+                'getmyinode', 'posix_getuid', 'posix_geteuid', 'posix_getegid', 'posix_getlogin', 'disk_total_space',
+                'disk_free_space', 'diskfreespace', 'getlastmod'];
+
             function calculateThreatScore(d, weights) {
                 var score = 0.0;
                 var hasCritical = false;
@@ -1961,6 +1966,15 @@ if (isset($_POST['ajax_action'])) {
                 }
 
                 if (d.entropy > HIGH_ENTROPY) score += 3.0;
+
+                // A webshell's header shows the box it landed on: OS, user and uid,
+                // disk space, PHP settings. Benign code rarely asks for two of these
+                // at once (2+: 79/211 test webshells, 0/1927 benign files)
+                let recon = 0;
+                for (var r = 0; r < tokens.length; r++) {
+                    if (RECON_TOKENS.indexOf(tokens[r]) !== -1) recon++;
+                }
+                if (recon >= 2) score += 6.0;
 
                 return Math.round(score * 100) / 100;
             }
@@ -2152,7 +2166,10 @@ if (isset($_POST['ajax_action'])) {
                     // size just isn't a meaningful malice signal on its own. zSusp
                     // dropped out for the same reason (0 unique catches, 5 false
                     // positives in node test/run.js): the weighted threatScore
-                    // already covers "many suspicious tokens".
+                    // already covers "many suspicious tokens". The residual (more
+                    // matched tokens than the file's size predicts) dropped out once
+                    // the recon bonus scored what it was catching: its only unique
+                    // webshell catches were recon-heavy shells, for 7 false positives.
                     //
                     // Entropy only matters on the high side; a near-empty stub
                     // isn't an outlier worth reviewing.
@@ -2160,7 +2177,6 @@ if (isset($_POST['ajax_action'])) {
                         (Math.abs(zMtime) > threshold) ||
                         (Math.abs(zCtime) > threshold) ||
                         rareOwner ||
-                        (residual > 5) ||
                         d.is_blacklisted ||
                         d.mhr_hit === true;
                     // ML points can lift a file over the bar, never pull one under it;

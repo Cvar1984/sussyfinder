@@ -11,7 +11,8 @@
 //   node test/run.js --php all               every version in PHTest/versions.list (docker)
 //   node test/run.js --php 4.3.11,8.5.6      just those versions
 //   extra: --list (misses/false positives), --tokens (per-token counts), --threshold 3.5,
-//          --dump rows.json (write the extracted feature rows, for test/train-ml.js)
+//          --no-ml (rules only), --dump rows.json (the extracted feature rows),
+//          --dump-scored FILE (every row after scoring, with zScores, threatScore etc.)
 //
 // Exits 1 if a self-check fails, a supported version (4.3+) can't extract
 // features, or its page/AJAX smoke test fails. A file that crashes PHP itself
@@ -110,6 +111,10 @@ foreach (array('test/webshells', 'test/WordPress', 'test/laravel') as $corpus) {
         fwrite($fh, $file);
         fclose($fh);
         foreach (scanReadablePaths(array($file), array(), array(), $tokenNeedles, $seen, $new) as $row) {
+            // Same test as test/train-ml.js: a file with no PHP and no other server code can't run as a webshell
+            $content = file_get_contents($file);
+            $row['no_php'] = !preg_match('/<\\?(?!xml)/i', $content); // as main.php's @foreign_code: any <? but <?xml ("<?$d=..." is PHP)
+            $row['foreign'] = (bool) preg_match('/<%|Response\\.Write|CreateObject|Runtime\\.getRuntime|^#!.*perl|\\buse CGI\\b/im', $content);
             fwrite($rows, json_encode($row) . "\\n");
         }
         fwrite($done, $file . "\\0");
@@ -275,15 +280,20 @@ targets.forEach(t => {
     // Benchmark: main.php's client-side scoring block, run as-is
     const start = web.indexOf('// --- Client-side threat scoring');
     const end = web.indexOf('// --- End client-side threat scoring ---');
-    const ctx = vm.createContext({ tokenWeights: out.weights, ML_MODEL: JSON.parse(fs.readFileSync(path.join(root, 'ml-model.json'), 'utf8')) });
+    // --no-ml: rules only (the shipped model was trained on these corpora, so its numbers here are in-sample)
+    const ctx = vm.createContext({ tokenWeights: out.weights, ML_MODEL: args.includes('--no-ml') ? null : JSON.parse(fs.readFileSync(path.join(root, 'ml-model.json'), 'utf8')) });
     vm.runInContext(web.slice(start, end), ctx);
     // The corpora were copied at different times (webshells keep 2024 mtimes), so
     // timestamps would "detect" them for free; score on content only.
     out.features.forEach(d => { d.mtime = 0; d.ctime = 0; d.rel = d.path.slice(t.repo.length + 1); });
     if (opt('--dump')) fs.writeFileSync(opt('--dump'), JSON.stringify(out.features));
     const rows = ctx.analyzeData(out.features, threshold);
-    const isMal = d => d.rel.startsWith('test/webshells/');
-    const mal = rows.filter(isMal), ben = rows.filter(d => !isMal(d));
+    // A file in the shell corpus that can't run (a saved 404 page, a robots.txt) is a labelling
+    // error, not a missed shell; test/train-ml.js drops the same files
+    const notCode = rows.filter(d => d.rel.startsWith('test/webshells/') && d.no_php && !d.foreign);
+    const isMal = d => d.rel.startsWith('test/webshells/') && !(d.no_php && !d.foreign);
+    const mal = rows.filter(isMal), ben = rows.filter(d => !d.rel.startsWith('test/webshells/'));
+    if (notCode.length) console.log(`not counted     ${notCode.length} shell-corpus file(s) with no server code: ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
     const report = (label, hit) => {
         const tp = mal.filter(hit).length, fp = ben.filter(hit).length;
         const pct = (a, b) => (100 * a / Math.max(1, b)).toFixed(1) + '%';
@@ -301,6 +311,7 @@ targets.forEach(t => {
     console.log('  * trained on this corpus; node test/train-ml.js for held-out rates');
     r.rows = rows;
     r.isMal = isMal;
+    if (opt('--dump-scored')) fs.writeFileSync(opt('--dump-scored'), JSON.stringify(rows.map(d => Object.assign({ mal: isMal(d) }, d))));
 
     if (t.container) { const w = webCheck(t); r.web = w; console.log('web                ' + w.text); if (t.supported && !w.ok) failed++; }
 });

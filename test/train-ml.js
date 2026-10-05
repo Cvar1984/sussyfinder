@@ -56,14 +56,14 @@ vm.runInContext(web.slice(start, end), ctx);
 const threshold = vm.runInContext('ML_THRESHOLD', ctx);
 
 // --- Feature extraction, cached per corpus and per feature-code version ---
-// The cache key covers everything in main.php that shapes a row, so editing
-// the extractor (or the needles) re-extracts instead of reusing stale rows.
+// The cache key covers everything that shapes a row: main.php's extractor and
+// needles, and this file's extraction script (its no_php/foreign labels), so
+// editing either re-extracts instead of reusing stale rows.
 const featureCode = web.slice(0, web.indexOf('// test/run.js includes this file'));
-const featureHash = crypto.createHash('sha1').update(featureCode).digest('hex').slice(0, 12);
 const cacheDir = path.join(__dirname, 'corpora', '.rows');
 fs.mkdirSync(cacheDir, { recursive: true });
 const extractScript = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'sussy-ml-')), 'extract.php');
-fs.writeFileSync(extractScript, `<?php
+const extractCode = `<?php
 define('SUSSY_LIB', true);
 include ${JSON.stringify(mainPath)};
 $base = rtrim($argv[1], '/') . '/';
@@ -74,13 +74,15 @@ foreach ($r['file_readable'] as $file) {
     foreach (scanReadablePaths(array($file), array(), array(), $tokenNeedles, $seen, $new) as $row) {
         $content = file_get_contents($file);
         // Server code in another language (ASP, JSP, CGI) in a PHP-named file
-        $row['no_php'] = !preg_match('/<\\?(php|=|\\s)/i', $content);
+        $row['no_php'] = !preg_match('/<\\?(?!xml)/i', $content); // as main.php's @foreign_code: any <? but <?xml ("<?$d=..." is PHP)
         $row['foreign'] = (bool) preg_match('/<%|Response\\.Write|CreateObject|Runtime\\.getRuntime|^#!.*perl|\\buse CGI\\b/im', $content);
         $row['path'] = substr($file, strlen($base));
         echo json_encode($row), "\\n";
     }
 }
-`);
+`;
+fs.writeFileSync(extractScript, extractCode);
+const featureHash = crypto.createHash('sha1').update(featureCode).update(extractCode).digest('hex').slice(0, 12);
 const run = (cmd, a) => new Promise((resolve, reject) => execFile(cmd, a, { maxBuffer: 1 << 30 }, (e, out) => e ? reject(e) : resolve(out)));
 
 function corpusDir(c) {
