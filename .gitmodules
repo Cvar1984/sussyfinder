@@ -7,3 +7,6 @@
 [submodule "PHTest"]
 	path = PHTest
 	url = https://github.com/Cvar1984/PHTest.git
+[submodule "test/webshells"]
+	path = test/webshells
+	url = https://github.com/BlackArch/webshells.git
