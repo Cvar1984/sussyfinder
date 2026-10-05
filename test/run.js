@@ -273,7 +273,7 @@ targets.forEach(t => {
     // Benchmark: main.php's client-side scoring block, run as-is
     const start = web.indexOf('// --- Client-side threat scoring');
     const end = web.indexOf('// --- End client-side threat scoring ---');
-    const ctx = vm.createContext({ tokenWeights: out.weights });
+    const ctx = vm.createContext({ tokenWeights: out.weights, ML_MODEL: JSON.parse(fs.readFileSync(path.join(root, 'ml-model.json'), 'utf8')) });
     vm.runInContext(web.slice(start, end), ctx);
     // The corpora were copied at different times (webshells keep 2024 mtimes), so
     // timestamps would "detect" them for free; score on content only.

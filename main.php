@@ -30,10 +30,13 @@ define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
 define('_MHR_', true);
 define('_ML_', true); // ML second opinion; false skips its feature extraction (~40% less analysis time)
+// Where the ML weights come from (an http(s) URL or a local file path)
+define('_ML_MODEL_URL_', 'https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/ml-model.json');
 
 $mhrUsername = '';
 $mhrPassword = '';
 $GLOBALS['phpWarnings'] = array();
+$GLOBALS['mlWanted'] = true; // false when the page has no usable model (see 'process')
 
 /**
  * Summary of errorHandler
@@ -529,6 +532,9 @@ function shannonEntropy($data)
 // Hashed feature space for the ML model (a power of two; the model's weight
 // count must match, see test/train-ml.js)
 define('ML_BUCKETS', 2048);
+// Bump whenever mlFeatures() changes what it emits: a model trained on other
+// features is refused (ml-model.json carries the version it was trained on)
+define('ML_FEATURE_VERSION', 1);
 
 /**
  * Binary feature vector for the client-side ML model, as a hex bitmap of
@@ -623,6 +629,34 @@ function mlFeatures($tokens, $content, $entropy)
         $hex .= dechex($nibble);
     }
     return $hex;
+}
+
+/**
+ * Download the ML model (ml-model.json) and check it fits this main.php.
+ * Returns the JSON text to embed in the page, or 'null' with a warning when
+ * it's unavailable, malformed, or trained for different features. The text
+ * is matched against a strict pattern (digits, hex and fixed keys only), so
+ * nothing from the download can break out of the <script> it goes into.
+ *
+ * @param string $url
+ * @return string
+ */
+function mlModelJson($url)
+{
+    if (preg_match('#^https?://#i', $url)) {
+        $json = trim(implode("\n", urlFileArray($url)));
+    } else {
+        $json = is_readable($url) ? trim(file_get_contents($url)) : ''; // a local copy, e.g. offline
+    }
+    if (!preg_match('/^\{"features":(\d+),"buckets":(\d+),"scale":-?[0-9.]+(e[-+]?\d+)?,"bias":-?[0-9.]+(e[-+]?\d+)?,"weights":"([0-9a-f]+)"\}$/', $json, $m)) {
+        trigger_error('ML model unavailable or malformed (' . $url . '); ML scoring is off for this scan', E_USER_WARNING);
+        return 'null';
+    }
+    if ($m[1] != ML_FEATURE_VERSION || $m[2] != ML_BUCKETS || strlen($m[5]) != 2 * ML_BUCKETS) {
+        trigger_error('ML model was trained for feature version ' . $m[1] . ' / ' . $m[2] . ' buckets, this main.php uses ' . ML_FEATURE_VERSION . ' / ' . ML_BUCKETS . '; update main.php. ML scoring is off for this scan', E_USER_WARNING);
+        return 'null';
+    }
+    return $json;
 }
 
 /**
@@ -917,7 +951,7 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             'owner'          => $owner,
             'entropy'        => $entropy,
             'total_tokens'   => $totalTokens,
-            'ml_features'    => _ML_ ? mlFeatures($tokens, $content, $entropy) : null,
+            'ml_features'    => (_ML_ && $GLOBALS['mlWanted']) ? mlFeatures($tokens, $content, $entropy) : null,
             'matched_tokens' => $matchedTokens,
             'md5'            => $fileSum,
             'is_blacklisted' => $isBlacklisted,
@@ -1227,6 +1261,9 @@ if (isset($_POST['ajax_action'])) {
 
     if ($ajaxAction == 'process') {
         $paths = array_map('rawurldecode', postList('paths'));
+        if (inputValue($_POST, 'ml') === '0') {
+            $GLOBALS['mlWanted'] = false; // the page has no model to score with
+        }
 
         if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
             $isUnreadable = true;
@@ -1739,6 +1776,7 @@ if (isset($_POST['ajax_action'])) {
         // Emit token weight map so JS can replicate PHP scoring exactly
         echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
         echo '<script>const mhrEnabled = ' . json_encode((bool)_MHR_) . ';</script>';
+        echo '<script>const ML_MODEL = ' . (_ML_ ? mlModelJson(_ML_MODEL_URL_) : 'null') . ';</script>';
         echo '<script>const serverWarnings = ' . json_encode(array_values($GLOBALS['phpWarnings'])) . ';</script>';
         ?>
         <!-- Warning banner for critical errors & failed deletions -->
@@ -1892,8 +1930,9 @@ if (isset($_POST['ajax_action'])) {
 
             // Tiny ML model: logistic regression over the hashed token features
             // from mlFeatures() in PHP (one bit per bucket), int8 weights as hex.
-            // Trained and cross-validated by node test/train-ml.js --write.
-            const ML_MODEL = {"scale":0.00936201,"bias":0.0182935,"weights":"0dfeffff160006f802f90bfe010108fe07fc04ff07fa0ff705fe2c0003fefd00f3f9100b0afe06fc00030102fefffef00efac8c8021e500613f5cb07f3faff091101ed1105f9080100fd01effbfa0b06fde4fefefcffd5fe02061204f903f8f601fcfffaf300fc11fbfefdff0304fef30b1c2efaf8fcfc210ce7000003fbfc0023fc02171a0000121afffdf2fbfcff00000b0304ff02cb00fe0202fffefdf509fdf5ff08c100fce8fef3010400fdf9f100f40ff0fafe21f9fbd60405fefbfdc6e5eef902fd02f9ff06fef6fd050000fe04fd7c0800040bff0401f5fbfdfc01000403fcfefec2fcfef4fbf914f90023dc0200f801f9fd01ecf0fefffdf9fffaf9f801fdfffb01fcff010d080005fef5fdfafe0d00fe0002fefe022d0b09fb270efd010ffb04ecfffcff12fbfb1300070dfffc0403000e00fb04f513fdfffbfdfefee01904f90903fedf12f409fff1fc020104fd00f9f409edff20ff0de8fa1003fefef6f9feff0202ff00fdf60bfcfa08feff03ff0805fe0e01e9f6fefffffe21ffecfd010a0003fef45afffefcf00700ecff4a02fdfb0afc013f12030f070738fefc05feff0ffffafc0210021420fdffff0e01031ef4fdfe00f804fc03f61a120bfef6f900f900150060f90005fff8fd11fd1cfef509f2fefbfffb0401fb04f50701f9fdfe02edfeebfbfd04fefffe01fefd00fffbeefe05fdc30d01eae7030702ff02040d3000fdf1ff05fe0000fb120312faf4f5fe2bfffbfefe1904fcf9fbfdfe1102fbfc021701f8f6fefafffe5bf5ff01fffc06030008f1fdfef002f1fefafbfee7fdfe02fdffe00201fcff2bf7ef0302010cfd1af706f401f4dffef2ff00fffe0203faf8f0f305fff8ff02fcfbfdfff906ffff0af701fff800fef8ff00fe06fafdfe0001fdfefcff04fd41fcffe2f6fafd00fcfe7f00fd04fefffcfe09fdf9fc21fbfefdfcfffcffec0b1c0bfe00fdff0603fefefffd0be1f6ff0b0633fefe0bfefafc04ef04010507fd0201fe06fdff02fdfafe043b12040a0011fd00fefe02260005ff02fdf6fc05f804fdfc04fafefbf7fb00de00f5fc0207f9fefdfdeff900f81300fcfed4fb06fe0012f1f900000601fef205ff14faf53604fbe2fefd0b01fef914f9060afc04f2f9fb0c0401f700fd12010b0000fefd9dfdfd04fc180df7fc03090503fb000cfefaf4e6fd02fefde8fefc0a05fd09fffd00fdfefd03f3fe0a06fe00fcfff6fefee902fffb13fe00fefdfeff1400eefcfcfdfbfd02fffffe0fea00a80410f106f9090410e800fdfafe00051e2004f6e2f0fefcfd0efafc00fafefffff2fa00feec01fffefbf4170301f9d0fff9fe070a0efffdff03fe0900ff0c06fc0119fe00fcfff60bfefe03fe09070300fefe0107fe07fdfbfbfbfbfbf2fe010717fff9ff0500f800f3fe1afcf4fa0301fe00f4ee0ed800fc01f90402fd3e00031df9f112fefb0111dc12e60f05ffee0901f5fffbfef2c5fdfdfdfdfb011ffdfe00ff0324021cfd02fe02f71709fffd1aff001601feff1901fefffd41f7ffe60bfeebf801100904200204fdf4f9fd111b0e140001f8fffefdfdfcffff02f90a039f03fd2b07fd020012f202fa03fffffcfff8f8f2fff20800fd03f7fc0a04fffafcfcfc03ff03050bfcfcfdff05110bff031100fdf8f9ddfeff03f7ffff2301fe051bfb00fcff03fb19fafdfaff0429040ef3ff121f2515fbfcfd0115fd091402feff06fe06dbfcfcfcfbe3fa000100fffc0a0800fe021afe13fe2800fdf700f9f903e902fc0003effc02fefd0105fcfe1afe08fefc20dc070302f60000dd01e306010efff60704fd00ff1b0c05ff07ff03fe00fe0903fd000af6001402ecf0f9ffeb01fffdbf00f10ef6fef2dfe1fcecfffa01ff13f704fdfdf609051607f52307f932fefe0cff2f2bd9e9fcfbf20aff071005fefbfd01fefdfed30200fa0301fe01f6f61c09fe200f00ff00fd15fff910fefdfff1fed4fdfbff00081615fcfef20a0001fffcfe030110fd00ff000bfee7fae5fffafcf700ecf8ff09f902fcfe001dfff3fc01f3fdf507ff05061111f506fbf70110fffff8fef8ffe10ffc00c5f7ff0002fbf2fbf9fe1808fcfeffd203f9010b0004fffefaf5f416d501ff14ff14fc01fd00d3fefa0503090222eb00ff03030bfffa0102ff00fa00fffcfcfcff01ede7fd02fd0410fcff00fd00fffdfc10f9fbfcf4f10002fefe0900ff0101ff01f3fee0f8fbeefb02fe0103fbfae30401bb010700fd03ff12ff2902030302fe21ffff050010fb08f8111105030bfe10fefcfefffefdf600fd0c08f8e628030a03f400f9f1f9f90809fdffe9fd01fdfaf6fdb3f8250806fafe02051ff4edfefea1fefdff02000304ffff03fefa00fefd060dff0dfdfe09fe210301f94e90fe000b0bfe07fbfcf9fff615fdfc010301fdfafb00f3fe02fefffc04f302fb01fefc09f9d811fff1fb07fffb00fe0009fefa07feef1500fafcfde503ff06faf8fc02fc14fffefe000106fffe02e901fd00fafffbfdeaf5fe05fffffdfc1005f6fafb0501fffbffed08000e01fc060301fe01fc001cfa040700fbe4fd020cfcfefe08f509fbfd0406001aff02ecfe0e0100f801fd000114fa00f2d80c000bfdffe7fb06f8ffee0701fff8fe2af908fcf60dff060214fd02fdfc05170409ff0003fbc5fd13ff02fcf908fefff4fefe01fd06fe04db0904fe00fffffffe00e8fb03fdfff602fb2315fe05f8fe04fdfaf6fefe03fe00fd0ffdfe02f9fffd22fe0cf83f13ffff00e602e0feffdb080016f7fffafced01fdf0f6ebfdf708f5fff403f81d0e05fefdfefb06fafe08fefe04fbfbc9f8030002f9f2fc0dfd03ff08fffc0cfbeefeff06f8edf60600fefd0205191725f0fafcfe0004fa04fc"};
+            // Trained and cross-validated by node test/train-ml.js --write, which
+            // writes ml-model.json; the server embeds it in the page as ML_MODEL
+            // (null when unavailable or disabled).
             // Score at or above which the model alone flags a file (a ranking
             // score from training, not a calibrated probability)
             const ML_THRESHOLD = 0.9;
@@ -1912,8 +1951,8 @@ if (isset($_POST['ajax_action'])) {
              * @return {number|null} null when there is nothing to score
              */
             function mlScore(hex, model) {
-                model = model || ML_MODEL;
-                if (!hex || !model.weights) return null;
+                model = model || (typeof ML_MODEL !== 'undefined' ? ML_MODEL : null);
+                if (!hex || !model || !model.weights) return null;
                 let w = _mlWeightCache.get(model.weights);
                 if (!w) {
                     w = new Int8Array(model.weights.length / 2);
@@ -3264,6 +3303,7 @@ if (isset($_POST['ajax_action'])) {
                 body.set('is_not_readable', isNotReadable ? '1' : '0');
                 body.set('paths', paths.join('\0'));
                 body.set('seen_hashes', _seenHashes.join('\0'));
+                body.set('ml', (typeof ML_MODEL !== 'undefined' && ML_MODEL) ? '1' : '0'); // no model: skip ML features
                 return postAction(body).then(function(r) { return r.json(); });
             }
 

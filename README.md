@@ -342,7 +342,7 @@ This means the statistical analysis is used alongside deterministic security ind
 
 ### ML Model
 
-A tiny machine-learning model gives a second opinion. It is a logistic regression with 2048 int8 weights (a 4 KB hex string in `main.php`). Like the rest of the scoring it runs in plain JavaScript in the browser, with no WebAssembly, library or download needed.
+A tiny machine-learning model gives a second opinion. It is a logistic regression with 2048 int8 weights, stored as a 4 KB file, `ml-model.json`, in this repository. Like the rest of the scoring it runs in plain JavaScript in the browser, with no WebAssembly or library needed.
 
 For each file, PHP's `mlFeatures()` turns the token stream into a set of short feature strings:
 
@@ -358,6 +358,15 @@ P_{ML} = \sigma\left(b + s \sum_{i \in bits} w_i\right)
 $$
 
 $P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. A file scoring 0.9 or more that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
+
+#### Where the model comes from
+
+Like the whitelist and blacklist, the model isn't built into `main.php`. When the page loads, the server downloads `ml-model.json` from this repository over verified TLS. Retraining therefore updates every install without anyone replacing `main.php`.
+
+* **Validation:** the file must match a strict format (fixed keys, digits and hex only) before it reaches the page.
+* **Version check:** the file carries the feature version it was trained on (`ML_FEATURE_VERSION`). If that doesn't match the installed `main.php`, the model is refused, because those scores would be meaningless.
+* **Failure:** if the download fails, the file is malformed or the versions differ, the page shows a warning and ML is off for that scan. The server also skips ML feature extraction for that scan.
+* **Self-hosting:** to pin a model or work offline, set `_ML_MODEL_URL_` to another URL or to a local file path.
 
 To turn the model off, set `define('_ML_', false);` near the top of `main.php`. The server then skips `mlFeatures()`, which saves about 40% of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
 
@@ -397,13 +406,13 @@ Last run:
 Things to keep in mind:
 
 * The score ranks files; it isn't a calibrated probability. A low score does not mean a file is safe.
-* The weights are public in `main.php`, so a determined attacker can write a shell that scores low. The model is a second opinion beside the rules, not a replacement.
+* The weights are public in `ml-model.json`, so a determined attacker can write a shell that scores low. The model is a second opinion beside the rules, not a replacement.
 * Every webshell comes from public collections, which lean towards older, well-known shells. There is no held-out set of new, unpublished shells.
 * ASP/JSP/CGI shells saved with a PHP name contain no PHP for either detector to read. The `@foreign_code` rule catches those instead.
 
 Options:
 
-* `--write`: retrain on all the data and store the new weights in `main.php`. This is needed after changing `mlFeatures()` or `ML_BUCKETS`.
+* `--write`: retrain on all the data and write `ml-model.json`. Bump `ML_FEATURE_VERSION` first whenever `mlFeatures()` or `ML_BUCKETS` changes, so older installs refuse the new model instead of mis-scoring with it.
 * `--check DIR`: report how many files in a directory you trust (for example your own codebase) the model would flag.
 * `--by-family`: print false positives per legitimate project family.
 * `--list`: print held-out misses and false positives.

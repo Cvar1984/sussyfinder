@@ -1,12 +1,12 @@
 // Trains the client-side ML model (logistic regression over main.php's hashed
 // token features, see mlFeatures()) on the corpora in test/corpora.json,
 // reports cross-validated detection/false-positive rates, and with --write
-// stores the int8-quantized weights in main.php.
+// stores the int8-quantized weights in ml-model.json, which main.php downloads.
 //
 // Usage:
 //   node test/fetch-corpora.js            download the corpora first (once)
 //   node test/train-ml.js                 cross-validate only
-//   node test/train-ml.js --write         cross-validate, then train on everything and update main.php
+//   node test/train-ml.js --write         cross-validate, then train on everything and write ml-model.json
 //   extra: --folds 5, --l2 0.001, --epochs 400, --cap 2000 (benign training files
 //          per corpus), --similar 0.8, --by-family, --list,
 //          --check DIR (repeatable: how many files in DIR, assumed benign, get flagged)
@@ -39,6 +39,7 @@ const similar = parseFloat(opt('--similar', '0.8'));
 const mainPath = path.join(root, 'main.php');
 const web = fs.readFileSync(mainPath, 'utf8');
 const buckets = parseInt(web.match(/define\('ML_BUCKETS', (\d+)\)/)[1], 10);
+const featureVersion = parseInt(web.match(/define\('ML_FEATURE_VERSION', (\d+)\)/)[1], 10);
 const t0 = Date.now();
 const log = msg => process.stderr.write(`[${((Date.now() - t0) / 1000).toFixed(0)}s] ${msg}\n`);
 
@@ -233,7 +234,7 @@ function toBits(hex) {
         return { w, b };
     }
 
-    // int8 weights as hex (two's complement), plus scale and bias: what main.php ships
+    // int8 weights as hex (two's complement), plus scale and bias: what ml-model.json holds
     function quantize(model) {
         let max = 0;
         for (const x of model.w) max = Math.max(max, Math.abs(x));
@@ -314,10 +315,9 @@ function toBits(hex) {
     }
 
     if (args.includes('--write')) {
-        const line = 'const ML_MODEL = ' + JSON.stringify(finalModel) + ';';
-        const updated = web.replace(/const ML_MODEL = .*;/, () => line);
-        if (updated === web && !web.includes(line)) throw new Error('ML_MODEL line not found in main.php');
-        fs.writeFileSync(mainPath, updated);
-        console.log(`\nwrote ML_MODEL (${finalModel.weights.length / 2} int8 weights, trained on ${mal.length} shells + ${capped.length} benign files) to main.php`);
+        // Key order matters: main.php checks the file against a fixed pattern
+        const file = { features: featureVersion, buckets, scale: finalModel.scale, bias: finalModel.bias, weights: finalModel.weights };
+        fs.writeFileSync(path.join(root, 'ml-model.json'), JSON.stringify(file) + '\n');
+        console.log(`\nwrote ml-model.json (feature version ${featureVersion}, ${buckets} int8 weights, trained on ${mal.length} shells + ${capped.length} benign files)`);
     }
 })().catch(e => { console.error(e); process.exit(1); });
