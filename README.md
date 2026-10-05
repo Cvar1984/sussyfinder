@@ -16,6 +16,7 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
 * **Shannon entropy calculation** – per-file byte entropy detects heavily obfuscated or encoded content
+* **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser, that flags files the rules miss. It is trained on 1,605 webshells and 184,589 files from 58 legitimate projects. In cross-validation it catches 88% of webshells on its own, at 0.06% false positives on projects it never saw.
 * **Client-side statistical analysis** – computes robust (median/MAD) Z-scores for size, mtime, tokens, suspicious token count, entropy and the ctime–mtime gap, plus residuals and file-owner rarity, to flag outliers
 * **Interactive web interface** with:
 
@@ -208,6 +209,7 @@ Structural signals appear among the matched tokens with an `@` prefix (no real P
 | Signal          | Meaning                                                  | Weight |
 | --------------- | -------------------------------------------------------- | -----: |
 | `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    | $10.0$ |
+| `@foreign_code` | ASP, JSP or Perl CGI code in a PHP-named file with no PHP | $10.0$ |
 | `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             | $10.0$ |
 | `` ` ``         | Backtick operator (shell execution)                      | $10.0$ |
 | `@concat_name`  | Function name hidden in a string (the name is added too) |  $5.0$ |
@@ -215,7 +217,7 @@ Structural signals appear among the matched tokens with an `@` prefix (no real P
 | `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |  $2.0$ |
 | `@long_line`    | A line over 5000 characters                              |  $2.0$ |
 
-`@input_call`, `@preg_e` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
+`@input_call`, `@preg_e`, `@foreign_code` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
 
 Additional multipliers are applied when combinations of suspicious behaviors are present.
 
@@ -306,11 +308,14 @@ Z_{entropy} > T
 RareOwner
 \lor
 Residual > 5
+\lor
+P_{ML} \geq 0.9
 $$
 
 Where:
 
 * $T$ = configured Z-score threshold
+* $P_{ML}$ = the ML model's webshell probability (see below)
 * $\lor$ = logical OR
 
 SussyFinder additionally treats the following as anomalies:
@@ -335,6 +340,84 @@ own. Only content/threat-based signals decide anomaly status.
 
 This means the statistical analysis is used alongside deterministic security indicators rather than as the sole detection mechanism.
 
+### ML Model
+
+A tiny machine-learning model gives a second opinion. It is a logistic regression with 2048 int8 weights, stored as a 4 KB file, `ml-model.json`, in this repository. Like the rest of the scoring it runs in plain JavaScript in the browser, with no WebAssembly or library needed.
+
+For each file, PHP's `mlFeatures()` turns the token stream into a set of short feature strings:
+
+* token-type bigrams (`T_VARIABLE (`, `T_EVAL (`, …)
+* names of called functions and of variables
+* the shape of string literals: length bucket, base64-looking, `\x..` escapes
+* bucketed longest-line length, token count and entropy
+
+Each string is hashed into one of 2048 buckets with `crc32`, and the bucket set is sent as a 512-character hex bitmap (`ml_features`). The browser adds up the weights of the set bits:
+
+$$
+P_{ML} = \sigma\left(b + s \sum_{i \in bits} w_i\right)
+$$
+
+$P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. A file scoring 0.9 or more that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
+
+#### Where the model comes from
+
+Like the whitelist and blacklist, the model isn't built into `main.php`. When the page loads, the server downloads `ml-model.json` from this repository over verified TLS. Retraining therefore updates every install without anyone replacing `main.php`.
+
+* **Validation:** the file must match a strict format (fixed keys, digits and hex only) before it reaches the page.
+* **Version check:** the file carries the feature version it was trained on (`ML_FEATURE_VERSION`). If that doesn't match the installed `main.php`, the model is refused, because those scores would be meaningless.
+* **Failure:** if the download fails, the file is malformed or the versions differ, the page shows a warning and ML is off for that scan. The server also skips ML feature extraction for that scan.
+* **Self-hosting:** to pin a model or work offline, set `_ML_MODEL_URL_` to another URL or to a local file path.
+
+To turn the model off, set `define('_ML_', false);` near the top of `main.php`. The server then skips `mlFeatures()`, which saves about 40% of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
+
+#### Training data
+
+`test/corpora.json` pins 97 public sources to exact commits. `node test/fetch-corpora.js` downloads them (about 5 GB) into the git-ignored `test/corpora/`:
+
+* **Webshells:** 20 collections (BlackArch, tennc, xl7dev, tanjiti, bartblaze, JohnTroony, nikicat, webshellpub and others), plus well-known standalone shells such as b374k, p0wny and wwwolf.
+* **Legitimate code:** 77 checkouts from 58 project families. These cover current frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress, PrestaShop, MediaWiki, Nextcloud, TYPO3 and about 40 more) and old releases for legacy procedural code, such as WordPress 2.0/3.0, Drupal 6/7, phpBB 3.0, phpMyAdmin 2.11, Joomla 2.5 and CakePHP 1.3.
+
+After cleaning, that is **1,605 unique webshells** (765 clusters of near-identical variants) and **184,589 unique legitimate files**. Cleaning means:
+
+* removing exact duplicates by MD5
+* removing `.htaccess` files
+* removing shell-collection files with no server code at all, such as README pages
+* removing the mislabels listed in `test/ml-exclude.txt`
+
+#### Accuracy
+
+`node test/train-ml.js` reports 5-fold cross-validated rates, so every file is scored by a model that never saw it:
+
+* Near-identical shells (feature-set Jaccard ≥ 0.8) share a fold, so a variant of a training shell can't count as a detection.
+* Whole project families share a fold, for example every WordPress version. So false positives are always measured on projects the model never trained on.
+
+Last run:
+
+| Detector                       | Webshells detected  | Shell clusters | False positives        |
+| ------------------------------ | ------------------: | -------------: | ---------------------: |
+| Rules only (anomaly)           | 1096/1605 (68.3%)   | 459/765        | 2599/184589 (1.4%)     |
+| ML alone, score ≥ 0.9          | 1419/1605 (88.4%)   | 647/765        | 115/184589 (0.06%)     |
+| Rules or ML                    | 1511/1605 (94.1%)   | 700/765        | 2693/184589 (1.5%)     |
+
+* **What ML adds on top of the rules:** 415 shells (244 clusters) at the cost of 94 extra false positives (0.05%).
+* **Worst families for ML false positives:** WordPress (1.4%, mostly the old releases) and Zen Cart (1.2%). Every other family is at or below 0.6%, and 45 of the 58 families get none.
+* **Use `--by-family`** to print the per-project table.
+
+Things to keep in mind:
+
+* The score ranks files; it isn't a calibrated probability. A low score does not mean a file is safe.
+* The weights are public in `ml-model.json`, so a determined attacker can write a shell that scores low. The model is a second opinion beside the rules, not a replacement.
+* Every webshell comes from public collections, which lean towards older, well-known shells. There is no held-out set of new, unpublished shells.
+* ASP/JSP/CGI shells saved with a PHP name contain no PHP for either detector to read. The `@foreign_code` rule catches those instead.
+
+Options:
+
+* `--write`: retrain on all the data and write `ml-model.json`. Bump `ML_FEATURE_VERSION` first whenever `mlFeatures()` or `ML_BUCKETS` changes, so older installs refuse the new model instead of mis-scoring with it.
+* `--check DIR`: report how many files in a directory you trust (for example your own codebase) the model would flag.
+* `--by-family`: print false positives per legitimate project family.
+* `--list`: print held-out misses and false positives.
+* `--cap N`: the maximum number of legitimate files per corpus used in training (default 2000, so huge projects don't drown out the rest).
+
 ### Benchmark
 
 `node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. It also runs structural-detector self-checks and fails if any of them break.
@@ -345,6 +428,9 @@ This means the statistical analysis is used alongside deterministic security ind
 * `--tokens` — print how often each token appears in webshells vs. benign files, for tuning weights
 * `--threshold 3.5` — Z-score threshold to evaluate
 * `--php all` or `--php 4.3.11,8.5.6` — run on PHTest versions instead of the local `php`
+* `--dump rows.json` — save the extracted feature rows (`test/train-ml.js --rows` reuses them)
+
+Its `ml only` line scores the shipped model on the corpus it was trained on, so that number is optimistic. Use `test/train-ml.js` for held-out rates.
 
 ## Requirements
 

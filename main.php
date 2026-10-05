@@ -29,10 +29,14 @@ error_reporting(E_ALL);
 define('_WHITELIST_', true);
 define('_BLACKLIST_', true);
 define('_MHR_', true);
+define('_ML_', true); // ML second opinion; false skips its feature extraction (~40% less analysis time)
+// Where the ML weights come from (an http(s) URL or a local file path)
+define('_ML_MODEL_URL_', 'https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/ml-model.json');
 
 $mhrUsername = '';
 $mhrPassword = '';
 $GLOBALS['phpWarnings'] = array();
+$GLOBALS['mlWanted'] = true; // false when the page has no usable model (see 'process')
 
 /**
  * Summary of errorHandler
@@ -489,6 +493,13 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
             $maxLine = strlen($line);
         }
     }
+    // ASP/JSP/CGI shell code in a file named like PHP (no PHP in it at all):
+    // nothing for the PHP checks above to see
+    if (!preg_match('/<\?(?!xml)/i', $content) &&
+        (preg_match('/<%.*?(Response\.Write|CreateObject|Server\.MapPath|Request\.(Form|QueryString)|WScript\.Shell|FileSystemObject|Runtime\.getRuntime|java\.io\.|<%@\s*page)/is', $content) ||
+         preg_match('/^#!\S*perl|^\s*use CGI\b/m', $content))) {
+        $found['@foreign_code'] = true;
+    }
     if ($maxLine > 5000) {
         $found['@long_line'] = true;
     }
@@ -516,6 +527,136 @@ function shannonEntropy($data)
         $entropy -= $p * log($p) / log(2);
     }
     return $entropy;
+}
+
+// Hashed feature space for the ML model (a power of two; the model's weight
+// count must match, see test/train-ml.js)
+define('ML_BUCKETS', 2048);
+// Bump whenever mlFeatures() changes what it emits: a model trained on other
+// features is refused (ml-model.json carries the version it was trained on)
+define('ML_FEATURE_VERSION', 1);
+
+/**
+ * Binary feature vector for the client-side ML model, as a hex bitmap of
+ * ML_BUCKETS bits. Each feature is a short string (a token-type bigram, a
+ * called function's name, a variable's name, a string literal's shape, a
+ * bucketed file statistic) hashed into a bucket with crc32. "& mask" keeps
+ * the low bits the same on 32- and 64-bit PHP.
+ *
+ * @param array  $tokens  getFileTokens() output
+ * @param string $content raw file content
+ * @param float  $entropy shannonEntropy($content)
+ * @return string
+ */
+function mlFeatures($tokens, $content, $entropy)
+{
+    $skip = array(T_WHITESPACE => 1, T_COMMENT => 1);
+    if (defined('T_DOC_COMMENT')) {
+        $skip[constant('T_DOC_COMMENT')] = 1;
+    }
+    $member = array(T_OBJECT_OPERATOR => 1, T_PAAMAYIM_NEKUDOTAYIM => 1, T_FUNCTION => 1, T_NEW => 1);
+    if (defined('T_NULLSAFE_OBJECT_OPERATOR')) {
+        $member[constant('T_NULLSAFE_OBJECT_OPERATOR')] = 1;
+    }
+
+    $names = array();
+    $sig = array();
+    foreach ($tokens as $token) {
+        if (!is_array($token)) {
+            $token = array(0, $token);
+        }
+        if (!isset($skip[$token[0]])) {
+            $sig[] = $token;
+        }
+    }
+
+    $set = array();
+    $prev = 'START';
+    $n = count($sig);
+    for ($i = 0; $i < $n; $i++) {
+        $id = $sig[$i][0];
+        $text = $sig[$i][1];
+        if ($id == 0) {
+            $type = $text;
+        } else {
+            if (!isset($names[$id])) {
+                $names[$id] = token_name($id);
+            }
+            $type = $names[$id];
+        }
+        $set['b:' . $prev . ' ' . $type] = 1;
+        $prev = $type;
+
+        if ($id == T_STRING || $id == T_EVAL || $id == T_VARIABLE) {
+            $before = ($i > 0) ? $sig[$i - 1][0] : 0;
+            $isCall = ($i + 1 < $n && $sig[$i + 1][1] == '(');
+            if ($id == T_VARIABLE) {
+                $set['v:' . strtolower($text)] = 1;
+            } elseif (!isset($member[$before]) && ($isCall || $id == T_EVAL)) {
+                $set['c:' . ltrim(strtolower($text), '\\')] = 1;
+            }
+        } elseif ($id == T_CONSTANT_ENCAPSED_STRING) {
+            $len = strlen($text) - 2;
+            $set['s:len' . (strlen(decbin(max(0, $len))) >> 1)] = 1;
+            if ($len >= 40 && preg_match('/^.[A-Za-z0-9+\/=\s]+.$/', $text)) {
+                $set['s:b64'] = 1;
+            }
+            if (preg_match('/\\\\(x[0-9a-f]{2}|[0-7]{3})/i', $text)) {
+                $set['s:esc'] = 1;
+            }
+        }
+    }
+
+    $maxLine = 0;
+    foreach (explode("\n", $content) as $line) {
+        if (strlen($line) > $maxLine) {
+            $maxLine = strlen($line);
+        }
+    }
+    // Bit lengths, i.e. log2 buckets, in integer math so no PHP build rounds differently
+    $set['f:line' . strlen(decbin($maxLine))] = 1;
+    $set['f:tok' . strlen(decbin($n))] = 1;
+    $set['f:ent' . (int) ($entropy * 4)] = 1;
+
+    $mask = ML_BUCKETS - 1;
+    $bits = array_fill(0, ML_BUCKETS / 4, 0);
+    foreach ($set as $feature => $one) {
+        $b = crc32($feature) & $mask;
+        $bits[$b >> 2] |= 1 << ($b & 3);
+    }
+    $hex = '';
+    foreach ($bits as $nibble) {
+        $hex .= dechex($nibble);
+    }
+    return $hex;
+}
+
+/**
+ * Download the ML model (ml-model.json) and check it fits this main.php.
+ * Returns the JSON text to embed in the page, or 'null' with a warning when
+ * it's unavailable, malformed, or trained for different features. The text
+ * is matched against a strict pattern (digits, hex and fixed keys only), so
+ * nothing from the download can break out of the <script> it goes into.
+ *
+ * @param string $url
+ * @return string
+ */
+function mlModelJson($url)
+{
+    if (preg_match('#^https?://#i', $url)) {
+        $json = trim(implode("\n", urlFileArray($url)));
+    } else {
+        $json = is_readable($url) ? trim(file_get_contents($url)) : ''; // a local copy, e.g. offline
+    }
+    if (!preg_match('/^\{"features":(\d+),"buckets":(\d+),"scale":-?[0-9.]+(e[-+]?\d+)?,"bias":-?[0-9.]+(e[-+]?\d+)?,"weights":"([0-9a-f]+)"\}$/', $json, $m)) {
+        trigger_error('ML model unavailable or malformed (' . $url . '); ML scoring is off for this scan', E_USER_WARNING);
+        return 'null';
+    }
+    if ($m[1] != ML_FEATURE_VERSION || $m[2] != ML_BUCKETS || strlen($m[5]) != 2 * ML_BUCKETS) {
+        trigger_error('ML model was trained for feature version ' . $m[1] . ' / ' . $m[2] . ' buckets, this main.php uses ' . ML_FEATURE_VERSION . ' / ' . ML_BUCKETS . '; update main.php. ML scoring is off for this scan', E_USER_WARNING);
+        return 'null';
+    }
+    return $json;
 }
 
 /**
@@ -796,6 +937,7 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             $newlySeen[] = $fileSum . ':' . $filePath;
         }
 
+        $entropy       = shannonEntropy($content);
         $error = null;
         if ($isBlacklisted) {
             $error = unlinkWithReason($filePath);
@@ -807,8 +949,9 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             'mtime'          => $mtime,
             'ctime'          => $ctime,
             'owner'          => $owner,
-            'entropy'        => shannonEntropy($content),
+            'entropy'        => $entropy,
             'total_tokens'   => $totalTokens,
+            'ml_features'    => (_ML_ && $GLOBALS['mlWanted']) ? mlFeatures($tokens, $content, $entropy) : null,
             'matched_tokens' => $matchedTokens,
             'md5'            => $fileSum,
             'is_blacklisted' => $isBlacklisted,
@@ -846,6 +989,7 @@ function scanUnreadablePaths($paths)
             'owner'          => null,
             'entropy'        => null,
             'total_tokens'   => null,
+            'ml_features'    => null,
             'matched_tokens' => array('NOT_READABLE'),
             'md5'            => 'N/A',
             'is_blacklisted' => false,
@@ -883,6 +1027,7 @@ $tokenNeedles = array(
     '`' => 10.0, // backtick operator = shell_exec
     '@input_call' => 10.0, // $_GET['a']($_GET['b'])
     '@preg_e' => 10.0, // preg_replace('/.../e') evaluates the replacement
+    '@foreign_code' => 10.0, // ASP/JSP/CGI code in a PHP-named file
 
     // High Obfuscation & De-encoding (Weight: 5.0)
     'base64_decode' => 5.0,
@@ -1116,6 +1261,9 @@ if (isset($_POST['ajax_action'])) {
 
     if ($ajaxAction == 'process') {
         $paths = array_map('rawurldecode', postList('paths'));
+        if (inputValue($_POST, 'ml') === '0') {
+            $GLOBALS['mlWanted'] = false; // the page has no model to score with
+        }
 
         if (isset($_POST['is_not_readable']) && $_POST['is_not_readable'] == '1') {
             $isUnreadable = true;
@@ -1628,6 +1776,7 @@ if (isset($_POST['ajax_action'])) {
         // Emit token weight map so JS can replicate PHP scoring exactly
         echo '<script>const tokenWeights = ' . json_encode($tokenNeedles) . ';</script>';
         echo '<script>const mhrEnabled = ' . json_encode((bool)_MHR_) . ';</script>';
+        echo '<script>const ML_MODEL = ' . (_ML_ ? mlModelJson(_ML_MODEL_URL_) : 'null') . ';</script>';
         echo '<script>const serverWarnings = ' . json_encode(array_values($GLOBALS['phpWarnings'])) . ';</script>';
         ?>
         <!-- Warning banner for critical errors & failed deletions -->
@@ -1643,6 +1792,9 @@ if (isset($_POST['ajax_action'])) {
                 <option value="tokens">Sort: Tokens</option>
                 <option value="zSusp">Sort: Z‑Score</option>
                 <option value="residual">Sort: Residual</option>
+<?php if (_ML_) { ?>
+                <option value="ml">Sort: ML Score</option>
+<?php } ?>
             </select>
 
             <select id="severityFilter" onchange="applySeverityFilter()" title="Filter results">
@@ -1719,7 +1871,7 @@ if (isset($_POST['ajax_action'])) {
                 var hasUploadReq = false;
                 var hasInput = false;
 
-                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','create_function','`','@input_call','@preg_e'];
+                var critTokens = ['eval','exec','shell_exec','system','passthru','proc_open','create_function','`','@input_call','@preg_e','@foreign_code'];
                 // Full "High Obfuscation & De-encoding" (5.0) and upload/IO-request tiers —
                 // kept in sync with the weight categories in $tokenNeedles.
                 var obfTokens  = ['base64_decode','gzinflate','str_rot13','gzuncompress','convert_uu','rawurldecode','urldecode','hex2bin','bin2hex','exif_read_data','readgzfile','$sistemit_com_enc','@concat_name','@halt_payload'];
@@ -1774,6 +1926,52 @@ if (isset($_POST['ajax_action'])) {
                 if (d.entropy > HIGH_ENTROPY) score += 3.0;
 
                 return Math.round(score * 100) / 100;
+            }
+
+            // Tiny ML model: logistic regression over the hashed token features
+            // from mlFeatures() in PHP (one bit per bucket), int8 weights as hex.
+            // Trained and cross-validated by node test/train-ml.js --write, which
+            // writes ml-model.json; the server embeds it in the page as ML_MODEL
+            // (null when unavailable or disabled).
+            // Score at or above which the model alone flags a file (a ranking
+            // score from training, not a calibrated probability)
+            const ML_THRESHOLD = 0.9;
+            const _mlWeightCache = new Map();
+            // Hex digit -> value by char code: parseInt() per digit was 36x slower
+            const _mlNibble = new Uint8Array(128);
+            '0123456789abcdef'.split('').forEach(function (c, i) {
+                _mlNibble[c.charCodeAt(0)] = i;
+                _mlNibble[c.toUpperCase().charCodeAt(0)] = i;
+            });
+
+            /**
+             * ML webshell score (0..1, higher = more shell-like).
+             * @param {string} hex   ml_features bitmap from the server
+             * @param {Object} model defaults to ML_MODEL
+             * @return {number|null} null when there is nothing to score
+             */
+            function mlScore(hex, model) {
+                model = model || (typeof ML_MODEL !== 'undefined' ? ML_MODEL : null);
+                if (!hex || !model || !model.weights) return null;
+                let w = _mlWeightCache.get(model.weights);
+                if (!w) {
+                    w = new Int8Array(model.weights.length / 2);
+                    for (let i = 0; i < w.length; i++) w[i] = parseInt(model.weights.substr(i * 2, 2), 16);
+                    _mlWeightCache.clear();
+                    _mlWeightCache.set(model.weights, w);
+                }
+                // A bitmap from a different ML_BUCKETS than the model was trained with
+                if (hex.length * 4 !== w.length) return null;
+                let sum = 0;
+                for (let i = 0, k = 0; i < hex.length; i++, k += 4) {
+                    const nibble = _mlNibble[hex.charCodeAt(i) & 127];
+                    if (nibble === 0) continue;
+                    if (nibble & 1) sum += w[k];
+                    if (nibble & 2) sum += w[k + 1];
+                    if (nibble & 4) sum += w[k + 2];
+                    if (nibble & 8) sum += w[k + 3];
+                }
+                return 1 / (1 + Math.exp(-(model.bias + sum * model.scale)));
             }
 
             function medianOf(sorted) {
@@ -1850,6 +2048,8 @@ if (isset($_POST['ajax_action'])) {
                             residual: 0,
                             rareOwner: false,
                             isAnomaly: true,
+                            mlScore: null,
+                            mlOnly: false,
                             threatScore: 0,
                             date: formatDate(d.mtime),
                             suspCount: 0
@@ -1897,7 +2097,7 @@ if (isset($_POST['ajax_action'])) {
                     //
                     // Entropy only matters on the high side; a near-empty stub
                     // isn't an outlier worth reviewing.
-                    const isAnomaly = (threatScore >= 8.0) ||
+                    const ruleAnomaly = (threatScore >= 8.0) ||
                         (zEntropy > threshold) ||
                         (Math.abs(zMtime) > threshold) ||
                         (Math.abs(zCtime) > threshold) ||
@@ -1905,6 +2105,12 @@ if (isset($_POST['ajax_action'])) {
                         (residual > 5) ||
                         d.is_blacklisted ||
                         d.mhr_hit === true;
+                    // The ML model is a second opinion: it can flag a file the
+                    // rules miss (mlOnly), never clear one they flag. It was
+                    // trained on PHP, so .htaccess files aren't scored.
+                    const ml = d.is_htaccess ? null : mlScore(d.ml_features);
+                    const mlOnly = !ruleAnomaly && ml !== null && ml >= ML_THRESHOLD;
+                    const isAnomaly = ruleAnomaly || mlOnly;
 
                     return {
                         ...d,
@@ -1912,6 +2118,8 @@ if (isset($_POST['ajax_action'])) {
                         residual: residual,
                         rareOwner: rareOwner,
                         isAnomaly: isAnomaly,
+                        mlScore: ml,
+                        mlOnly: mlOnly,
                         threatScore: threatScore,
                         date: d.mtime ? formatDate(d.mtime) : 'N/A',
                         suspCount: suspCount
@@ -2140,6 +2348,7 @@ if (isset($_POST['ajax_action'])) {
                 else if (currentSort === 'tokens') filtered.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
                 else if (currentSort === 'zSusp') filtered.sort((a, b) => Math.abs(b.zScores.susp) - Math.abs(a.zScores.susp));
                 else if (currentSort === 'residual') filtered.sort((a, b) => (b.residual || 0) - (a.residual || 0));
+                else if (currentSort === 'ml') filtered.sort((a, b) => (b.mlScore || 0) - (a.mlScore || 0));
 
                 let html = '';
                 if (filtered.length === 0) {
@@ -2168,6 +2377,8 @@ if (isset($_POST['ajax_action'])) {
                         } else if (d.threatScore >= 8.0) {
                             color = '#dddbdb';
                             badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
+                        } else if (d.mlOnly) {
+                            badge = `<span style="background:#6a3d9a;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;" title="flagged by the ML model only">ML (${Math.round(d.mlScore * 100)}%)</span> `;
                         } else if (d.is_htaccess) {
                             color = '#66ccff';
                             badge = '<span style="background:#005580;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HTACCESS</span> ';
@@ -2190,7 +2401,7 @@ if (isset($_POST['ajax_action'])) {
                         } else {
                             const sizeKB = (d.size / 1024).toFixed(1);
                             const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
-                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
+                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' | ML: ' + Math.round(d.mlScore * 100) + '%' : ''} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
                         }
 
                         const fileLink = `<span class="file-link" data-copy="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>`;
@@ -2222,6 +2433,7 @@ if (isset($_POST['ajax_action'])) {
                         if (d.is_unreadable) line += ' (NOT_READABLE)';
                         else if (d.is_blacklisted) line += ' (BLACKLIST)';
                         else if (d.mhr_hit) line += ' (MHR HIT ' + d.mhr_detection_rate + '%)';
+                        else if (d.mlOnly) line += ' (ML ' + Math.round(d.mlScore * 100) + '%)';
                         else if (d.is_htaccess) line += ' (HTACCESS)';
                         else if (d.duplicate_of !== false) line += ' (' + d.duplicate_of + ')';
                         else if (d.matched_tokens && d.matched_tokens.length > 0) {
@@ -2229,7 +2441,7 @@ if (isset($_POST['ajax_action'])) {
                         }
                         if (!d.is_unreadable && d.size !== null) {
                             const sizeKB = (d.size / 1024).toFixed(1);
-                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
+                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' | ML: ' + Math.round(d.mlScore * 100) + '%' : ''} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
                             if (d.md5 && d.md5 !== 'N/A') line += ` | MD5: ${d.md5}`;
                         } else {
                             line += ` | ${d.date}`;
@@ -3091,6 +3303,7 @@ if (isset($_POST['ajax_action'])) {
                 body.set('is_not_readable', isNotReadable ? '1' : '0');
                 body.set('paths', paths.join('\0'));
                 body.set('seen_hashes', _seenHashes.join('\0'));
+                body.set('ml', (typeof ML_MODEL !== 'undefined' && ML_MODEL) ? '1' : '0'); // no model: skip ML features
                 return postAction(body).then(function(r) { return r.json(); });
             }
 
