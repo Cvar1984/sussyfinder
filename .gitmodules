@@ -1,0 +1,9 @@
+[submodule "test/WordPress"]
+	path = test/WordPress
+	url = https://github.com/WordPress/WordPress.git
+[submodule "test/laravel"]
+	path = test/laravel
+	url = https://github.com/laravel/laravel.git
+[submodule "PHTest"]
+	path = PHTest
+	url = https://github.com/Cvar1984/PHTest.git
