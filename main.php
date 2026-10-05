@@ -518,6 +518,105 @@ function shannonEntropy($data)
     return $entropy;
 }
 
+// Hashed feature space for the ML model (a power of two; the model's weight
+// count must match, see test/train-ml.js)
+define('ML_BUCKETS', 2048);
+
+/**
+ * Binary feature vector for the client-side ML model, as a hex bitmap of
+ * ML_BUCKETS bits. Each feature is a short string (a token-type bigram, a
+ * called function's name, a variable's name, a string literal's shape, a
+ * bucketed file statistic) hashed into a bucket with crc32. "& mask" keeps
+ * the low bits the same on 32- and 64-bit PHP.
+ *
+ * @param array  $tokens  getFileTokens() output
+ * @param string $content raw file content
+ * @param float  $entropy shannonEntropy($content)
+ * @return string
+ */
+function mlFeatures($tokens, $content, $entropy)
+{
+    $skip = array(T_WHITESPACE => 1, T_COMMENT => 1);
+    if (defined('T_DOC_COMMENT')) {
+        $skip[constant('T_DOC_COMMENT')] = 1;
+    }
+    $member = array(T_OBJECT_OPERATOR => 1, T_PAAMAYIM_NEKUDOTAYIM => 1, T_FUNCTION => 1, T_NEW => 1);
+    if (defined('T_NULLSAFE_OBJECT_OPERATOR')) {
+        $member[constant('T_NULLSAFE_OBJECT_OPERATOR')] = 1;
+    }
+
+    $names = array();
+    $sig = array();
+    foreach ($tokens as $token) {
+        if (!is_array($token)) {
+            $token = array(0, $token);
+        }
+        if (!isset($skip[$token[0]])) {
+            $sig[] = $token;
+        }
+    }
+
+    $set = array();
+    $prev = 'START';
+    $n = count($sig);
+    for ($i = 0; $i < $n; $i++) {
+        $id = $sig[$i][0];
+        $text = $sig[$i][1];
+        if ($id == 0) {
+            $type = $text;
+        } else {
+            if (!isset($names[$id])) {
+                $names[$id] = token_name($id);
+            }
+            $type = $names[$id];
+        }
+        $set['b:' . $prev . ' ' . $type] = 1;
+        $prev = $type;
+
+        if ($id == T_STRING || $id == T_EVAL || $id == T_VARIABLE) {
+            $before = ($i > 0) ? $sig[$i - 1][0] : 0;
+            $isCall = ($i + 1 < $n && $sig[$i + 1][1] == '(');
+            if ($id == T_VARIABLE) {
+                $set['v:' . strtolower($text)] = 1;
+            } elseif (!isset($member[$before]) && ($isCall || $id == T_EVAL)) {
+                $set['c:' . ltrim(strtolower($text), '\\')] = 1;
+            }
+        } elseif ($id == T_CONSTANT_ENCAPSED_STRING) {
+            $len = strlen($text) - 2;
+            $set['s:len' . (strlen(decbin(max(0, $len))) >> 1)] = 1;
+            if ($len >= 40 && preg_match('/^.[A-Za-z0-9+\/=\s]+.$/', $text)) {
+                $set['s:b64'] = 1;
+            }
+            if (preg_match('/\\\\(x[0-9a-f]{2}|[0-7]{3})/i', $text)) {
+                $set['s:esc'] = 1;
+            }
+        }
+    }
+
+    $maxLine = 0;
+    foreach (explode("\n", $content) as $line) {
+        if (strlen($line) > $maxLine) {
+            $maxLine = strlen($line);
+        }
+    }
+    // Bit lengths, i.e. log2 buckets, in integer math so no PHP build rounds differently
+    $set['f:line' . strlen(decbin($maxLine))] = 1;
+    $set['f:tok' . strlen(decbin($n))] = 1;
+    $set['f:ent' . (int) ($entropy * 4)] = 1;
+
+    $mask = ML_BUCKETS - 1;
+    $bits = array_fill(0, ML_BUCKETS / 4, 0);
+    foreach ($set as $feature => $one) {
+        $b = crc32($feature) & $mask;
+        $bits[$b >> 2] |= 1 << ($b & 3);
+    }
+    $hex = '';
+    foreach ($bits as $nibble) {
+        $hex .= dechex($nibble);
+    }
+    return $hex;
+}
+
 /**
  * Try every remote download method and return array of strings from a URL.
  *
@@ -796,6 +895,7 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             $newlySeen[] = $fileSum . ':' . $filePath;
         }
 
+        $entropy       = shannonEntropy($content);
         $error = null;
         if ($isBlacklisted) {
             $error = unlinkWithReason($filePath);
@@ -807,8 +907,9 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
             'mtime'          => $mtime,
             'ctime'          => $ctime,
             'owner'          => $owner,
-            'entropy'        => shannonEntropy($content),
+            'entropy'        => $entropy,
             'total_tokens'   => $totalTokens,
+            'ml_features'    => mlFeatures($tokens, $content, $entropy),
             'matched_tokens' => $matchedTokens,
             'md5'            => $fileSum,
             'is_blacklisted' => $isBlacklisted,
@@ -846,6 +947,7 @@ function scanUnreadablePaths($paths)
             'owner'          => null,
             'entropy'        => null,
             'total_tokens'   => null,
+            'ml_features'    => null,
             'matched_tokens' => array('NOT_READABLE'),
             'md5'            => 'N/A',
             'is_blacklisted' => false,
@@ -1643,6 +1745,7 @@ if (isset($_POST['ajax_action'])) {
                 <option value="tokens">Sort: Tokens</option>
                 <option value="zSusp">Sort: Z‑Score</option>
                 <option value="residual">Sort: Residual</option>
+                <option value="ml">Sort: ML Score</option>
             </select>
 
             <select id="severityFilter" onchange="applySeverityFilter()" title="Filter results">
@@ -1776,6 +1879,40 @@ if (isset($_POST['ajax_action'])) {
                 return Math.round(score * 100) / 100;
             }
 
+            // Tiny ML model: logistic regression over the hashed token features
+            // from mlFeatures() in PHP (one bit per bucket), int8 weights as hex.
+            // Trained and cross-validated by node test/train-ml.js --write.
+            const ML_MODEL = {"scale":0.0131344,"bias":0.338891,"weights":"0b0300001c000401000005000000fe0004ff010101fb020400ff34fd000000ffef0000fd0009000c00020002010100ff0000d8c7000923010600f9fffcff00030700f81c02fffe0000fd02fafe00fe0000e9fffc0003e700ff000201feff010201ff00d2f10000180000fc0001fbffff0afe0cfefd0000ff00fd000400ffff02030301060f001afc010000fe00ff0002000402010000e0000000fe00fbff060000230400f500ffed00001001fcffff010708e5fe040003fffff5000100ff00e9ecf500ffff01f4ff0100f8000d0101ff00fe36000001fe00fcff0900fd00000000010000fda90000ff000000fffe06060000fd00000000fc0200fffffdff01fd01000000fc00fcff01fc0d070302fe00ffff0fff0000000000fff80503000208030000ff030300000007000111010501000001fb0002030300fd08000001fe0000f20301f9ff0202e9f901fc01000200fdf90600ffff00f5000401150c0008fe01fff4faff0001fffcff00ff01fdfe21fd0104ff05fff40200feff0000000001fff90002ff0100fff70c0000f7fffffe00ff1e0000fb0004027f0f01010405090000000000fe00feff000200000afef501ff00ff1e05010001fdfb00010001fd0100fe0000ff0000fc26f5ff01ff00ffff002400fc01fd00ff00000001f9fee90002ef000000f300ff0000fe0bffff0000ff0000fffb000000e4fd02f3f9fffe0000000201280001f800ff0000ffff03fd1cfdfe02ff0501fa00000003ff010100010500ff00020100f7fc00ff00002f000601010000ff0005f8fe00ff01ff000000fff800000fff06e4ff000c010004fe0000ff17ff0bfffe0001ef020001000000000103ffffed0001010000ff00000501fe03000300fa0000ff0201fc00f801fd0000000000ff00feff00f420f6fff7fa000101edff1f000000fe01030000fe000101f8ff00ff00fe00fa00fc0000000000000300ff000003f4fe000e06f50000000103000000fe000105000005ff070000fd01fb0002160200030000fe010000000afeff0003000600fcff00feff0101ff0200fffef304feffffff000000fffe03fff5fdfc0809f1fdff00000303f80100020100fc0000fff40200fd01fe00fef504010008fc0efb00fffdeeff0105ffff02000e0105fc000201e70000010004e80bff0208fff8f900ed00ff01f400ff0003fe00ffff00010300030000000000fa0005010001ff01010100f80300fe02010304fffe00f702f90000ff010002fe0401000101da0113e404fcfe00fe070002fd000004ff10f001fb07010102ff000008fe000300feff0000ff0101000103fd0201ffee00fe01fdff040002ff03000701000205ff001600080001ff010000fc01fefb0200fffefe01000000fefd00fe00f70008000201ff010500020102fe0905fffd000101000bf101fb010000000dff002301020e02fefeff0aff00f4fff801000002fdfff801ff010801ffff0200000100fcff0003010d000100fffe0000040000ff01fffe14010003000000010156fffffafbfd00feff000100ff050000faff0000ff050504fff8ff00ffff030200fcff06fff703000d07050300fe0a00ff010001ff0000fe0000efff010100ea00ff0100f80005010001ff010003020000feff2ffff905000000fff0ff000505010001fe01fffd0100000002010500ff00000025ff09fc0006010713fdfe01ff0b0004ff0000fc000110ee0102ff01f601ff000000fe020000ff03010109010a0000fd00f30000f903000102f2fffeff00fffd010003010100041df001ff01fb01ffef06000000fffe0dff01fffe01040000000200050009ff01ffff0201c2ff0207fff8ff00fffe0000f0ff050f01ff00fbf8fd0700020200f7ff01ff00ea0101f000fe02fffd0800ff0300001ad7fb0500f7fa01000c0100fe000000ff00ea00fdff01f3000000fb2504000202ffff01fe01000101fbff00fff9f2ff000101050a07ff02fb0bfc00000000ff0101fffa0101ff0013fffd00fffffcff01fb00fb00000100000b01ffff000101fe0600000904020001fffa00ff00000c00fb02ef050003f4ff000000fd0100010011fe010200f002000004011700ff01fefd06f2000003ffff00010003dbff00000000011404011600d7000000ff0000fff0ff00fffd00000004e803fa00090601ff0004ff01ffff070000fcfe00fe0001ff00000305ffff00000000fbfffaff02000000ff00e90904df00fe00ff0000fe00140101020000f4ff0000fe04ee07f906ff0100f600010000fdff010009ff001301fbf904ff0000f8fffd0e010000fef805ee0002fe00fffaf5001802fe020501000afeff00ffefffff0000ff0b0103fe0000fe0005fffe02000100ff0100330100f224f9fd000efef900fe01fffefe00010000ff0000ff0101fc00000004fe00feffffff00f00307dbff00f900000000000001ff0100ffff00e7fe00f90001000003ebff00000001fd0000010100050001e900fb0003000100fcfa0000fffe00fd0202f10000fd01000000060300000eff00ff0000fffc0010fd00030000fe00fc0906030000fd00000003ff00ff0000e10002ff0002010001000301fedae6010003ff00f601000800fe000000fffcfbff030001ff000500f600000100010702ff0000ff00df00130011ff000200ff01010100fb01fe00010011ffff00ff00f600f4ff01000004fefceb02000000ff00000004000001ff00010600040dfe01ff0aff01f51d00000000f000fcffff01f70100feff0000f500fff603f700ff020600f302001b14ff00fa00fd00ff0002000001fd00eb00fcff01fbef000600030002ff01fd00fa000001fdfcfdff0103ff00051111fdfefd0000ff00ff01ff"};
+            // Probability at or above which the model alone flags a file
+            const ML_THRESHOLD = 0.9;
+            const _mlWeightCache = new Map();
+
+            /**
+             * Probability (0..1) that a file is a webshell, per the ML model.
+             * @param {string} hex   ml_features bitmap from the server
+             * @param {Object} model defaults to ML_MODEL
+             * @return {number|null} null when there is nothing to score
+             */
+            function mlScore(hex, model) {
+                model = model || ML_MODEL;
+                if (!hex || !model.weights) return null;
+                let w = _mlWeightCache.get(model.weights);
+                if (!w) {
+                    w = new Int8Array(model.weights.length / 2);
+                    for (let i = 0; i < w.length; i++) w[i] = parseInt(model.weights.substr(i * 2, 2), 16);
+                    _mlWeightCache.clear();
+                    _mlWeightCache.set(model.weights, w);
+                }
+                let sum = 0;
+                for (let i = 0; i < hex.length; i++) {
+                    const nibble = parseInt(hex.charAt(i), 16);
+                    for (let b = 0; b < 4; b++) {
+                        if (nibble & (1 << b)) sum += w[i * 4 + b];
+                    }
+                }
+                return 1 / (1 + Math.exp(-(model.bias + sum * model.scale)));
+            }
+
             function medianOf(sorted) {
                 const m = sorted.length >> 1;
                 return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
@@ -1850,6 +1987,8 @@ if (isset($_POST['ajax_action'])) {
                             residual: 0,
                             rareOwner: false,
                             isAnomaly: true,
+                            mlScore: null,
+                            mlOnly: false,
                             threatScore: 0,
                             date: formatDate(d.mtime),
                             suspCount: 0
@@ -1897,7 +2036,7 @@ if (isset($_POST['ajax_action'])) {
                     //
                     // Entropy only matters on the high side; a near-empty stub
                     // isn't an outlier worth reviewing.
-                    const isAnomaly = (threatScore >= 8.0) ||
+                    const ruleAnomaly = (threatScore >= 8.0) ||
                         (zEntropy > threshold) ||
                         (Math.abs(zMtime) > threshold) ||
                         (Math.abs(zCtime) > threshold) ||
@@ -1905,6 +2044,12 @@ if (isset($_POST['ajax_action'])) {
                         (residual > 5) ||
                         d.is_blacklisted ||
                         d.mhr_hit === true;
+                    // The ML model is a second opinion: it can flag a file the
+                    // rules miss (mlOnly), never clear one they flag. It was
+                    // trained on PHP, so .htaccess files aren't scored.
+                    const ml = d.is_htaccess ? null : mlScore(d.ml_features);
+                    const mlOnly = !ruleAnomaly && ml !== null && ml >= ML_THRESHOLD;
+                    const isAnomaly = ruleAnomaly || mlOnly;
 
                     return {
                         ...d,
@@ -1912,6 +2057,8 @@ if (isset($_POST['ajax_action'])) {
                         residual: residual,
                         rareOwner: rareOwner,
                         isAnomaly: isAnomaly,
+                        mlScore: ml,
+                        mlOnly: mlOnly,
                         threatScore: threatScore,
                         date: d.mtime ? formatDate(d.mtime) : 'N/A',
                         suspCount: suspCount
@@ -2140,6 +2287,7 @@ if (isset($_POST['ajax_action'])) {
                 else if (currentSort === 'tokens') filtered.sort((a, b) => (b.total_tokens || 0) - (a.total_tokens || 0));
                 else if (currentSort === 'zSusp') filtered.sort((a, b) => Math.abs(b.zScores.susp) - Math.abs(a.zScores.susp));
                 else if (currentSort === 'residual') filtered.sort((a, b) => (b.residual || 0) - (a.residual || 0));
+                else if (currentSort === 'ml') filtered.sort((a, b) => (b.mlScore || 0) - (a.mlScore || 0));
 
                 let html = '';
                 if (filtered.length === 0) {
@@ -2168,6 +2316,8 @@ if (isset($_POST['ajax_action'])) {
                         } else if (d.threatScore >= 8.0) {
                             color = '#dddbdb';
                             badge = `<span style="background:#b37700;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HIGH RISK (${d.threatScore.toFixed(1)})</span> `;
+                        } else if (d.mlOnly) {
+                            badge = `<span style="background:#6a3d9a;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;" title="flagged by the ML model only">ML (${Math.round(d.mlScore * 100)}%)</span> `;
                         } else if (d.is_htaccess) {
                             color = '#66ccff';
                             badge = '<span style="background:#005580;color:#fff;padding:2px 6px;border-radius:3px;font-weight:bold;font-size:11px;">HTACCESS</span> ';
@@ -2190,7 +2340,7 @@ if (isset($_POST['ajax_action'])) {
                         } else {
                             const sizeKB = (d.size / 1024).toFixed(1);
                             const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
-                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
+                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' | ML: ' + Math.round(d.mlScore * 100) + '%' : ''} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
                         }
 
                         const fileLink = `<span class="file-link" data-copy="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>`;
@@ -2222,6 +2372,7 @@ if (isset($_POST['ajax_action'])) {
                         if (d.is_unreadable) line += ' (NOT_READABLE)';
                         else if (d.is_blacklisted) line += ' (BLACKLIST)';
                         else if (d.mhr_hit) line += ' (MHR HIT ' + d.mhr_detection_rate + '%)';
+                        else if (d.mlOnly) line += ' (ML ' + Math.round(d.mlScore * 100) + '%)';
                         else if (d.is_htaccess) line += ' (HTACCESS)';
                         else if (d.duplicate_of !== false) line += ' (' + d.duplicate_of + ')';
                         else if (d.matched_tokens && d.matched_tokens.length > 0) {
@@ -2229,7 +2380,7 @@ if (isset($_POST['ajax_action'])) {
                         }
                         if (!d.is_unreadable && d.size !== null) {
                             const sizeKB = (d.size / 1024).toFixed(1);
-                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
+                            line += ` | ${d.date} | Size: ${sizeKB} KB | ThreatScore: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' | ML: ' + Math.round(d.mlScore * 100) + '%' : ''} | Tokens: ${d.total_tokens} | Suspicious: ${d.suspCount} | Z-Susp: ${d.zScores.susp.toFixed(1)}`;
                             if (d.md5 && d.md5 !== 'N/A') line += ` | MD5: ${d.md5}`;
                         } else {
                             line += ` | ${d.date}`;
