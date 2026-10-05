@@ -16,7 +16,7 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
 * **Shannon entropy calculation** – per-file byte entropy detects heavily obfuscated or encoded content
-* **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser, that flags files the rules miss (cross-validated: 91% of test webshells at 0.1% false positives)
+* **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser, that flags files the rules miss. It is trained on 1,605 webshells and 184,589 files from 58 legitimate projects. In cross-validation it catches 88% of webshells on its own, at 0.06% false positives on projects it never saw.
 * **Client-side statistical analysis** – computes robust (median/MAD) Z-scores for size, mtime, tokens, suspicious token count, entropy and the ctime–mtime gap, plus residuals and file-owner rarity, to flag outliers
 * **Interactive web interface** with:
 
@@ -209,6 +209,7 @@ Structural signals appear among the matched tokens with an `@` prefix (no real P
 | Signal          | Meaning                                                  | Weight |
 | --------------- | -------------------------------------------------------- | -----: |
 | `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    | $10.0$ |
+| `@foreign_code` | ASP, JSP or Perl CGI code in a PHP-named file with no PHP | $10.0$ |
 | `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             | $10.0$ |
 | `` ` ``         | Backtick operator (shell execution)                      | $10.0$ |
 | `@concat_name`  | Function name hidden in a string (the name is added too) |  $5.0$ |
@@ -216,7 +217,7 @@ Structural signals appear among the matched tokens with an `@` prefix (no real P
 | `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |  $2.0$ |
 | `@long_line`    | A line over 5000 characters                              |  $2.0$ |
 
-`@input_call`, `@preg_e` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
+`@input_call`, `@preg_e`, `@foreign_code` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
 
 Additional multipliers are applied when combinations of suspicious behaviors are present.
 
@@ -356,23 +357,55 @@ $$
 P_{ML} = \sigma\left(b + s \sum_{i \in bits} w_i\right)
 $$
 
-A file with $P_{ML} \geq 0.9$ that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
+$P_{ML}$ is a ranking score from 0 to 1, not a calibrated probability. A file scoring 0.9 or more that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
 
-`node test/train-ml.js` trains the model on the test corpus and reports 5-fold cross-validated (held-out) rates. Byte-identical files always share a fold. Last run:
+#### Training data
 
-| Detector                        | Webshells detected | False positives |
-| ------------------------------- | -----------------: | --------------: |
-| Rules only (anomaly)            |      171/210 (81%) |   18/1927 (0.9%) |
-| ML alone, $P_{ML} \geq 0.9$     |      191/210 (91%) |    1/1927 (0.1%) |
-| Rules or ML                     |      203/210 (97%) |   19/1927 (1.0%) |
+`test/corpora.json` pins 97 public sources to exact commits. `node test/fetch-corpora.js` downloads them (about 5 GB) into the git-ignored `test/corpora/`:
 
-Many of the extra catches are ASP/JSP shells saved with a `.php` name. They contain no PHP tokens for the rules to match.
+* **Webshells:** 20 collections (BlackArch, tennc, xl7dev, tanjiti, bartblaze, JohnTroony, nikicat, webshellpub and others), plus well-known standalone shells such as b374k, p0wny and wwwolf.
+* **Legitimate code:** 77 checkouts from 58 project families. These cover current frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress, PrestaShop, MediaWiki, Nextcloud, TYPO3 and about 40 more) and old releases for legacy procedural code, such as WordPress 2.0/3.0, Drupal 6/7, phpBB 3.0, phpMyAdmin 2.11, Joomla 2.5 and CakePHP 1.3.
 
-The benign corpus is only WordPress and Laravel, so the model was also checked on about 54,000 files from projects it never saw: PHPMailer, Guzzle, Monolog, phpMyAdmin, Joomla, Drupal, Symfony and Magento 2. $P_{ML} \geq 0.9$ flagged 31 of them (0.06%; at most 0.1% per project, except 6 of PHPMailer's non-English language files). On the same projects the rules flag 0.4–7% of files.
+After cleaning, that is **1,605 unique webshells** (765 clusters of near-identical variants) and **184,589 unique legitimate files**. Cleaning means:
 
-* `--write` — retrain on the whole corpus and store the new weights in `main.php` (needed after changing `mlFeatures()` or `ML_BUCKETS`)
-* `--check DIR` — report how many files in a directory you trust (e.g. your own framework) the model would flag
-* `--list` — print held-out misses, ML-only catches and false positives
+* removing exact duplicates by MD5
+* removing `.htaccess` files
+* removing shell-collection files with no server code at all, such as README pages
+* removing the mislabels listed in `test/ml-exclude.txt`
+
+#### Accuracy
+
+`node test/train-ml.js` reports 5-fold cross-validated rates, so every file is scored by a model that never saw it:
+
+* Near-identical shells (feature-set Jaccard ≥ 0.8) share a fold, so a variant of a training shell can't count as a detection.
+* Whole project families share a fold, for example every WordPress version. So false positives are always measured on projects the model never trained on.
+
+Last run:
+
+| Detector                       | Webshells detected  | Shell clusters | False positives        |
+| ------------------------------ | ------------------: | -------------: | ---------------------: |
+| Rules only (anomaly)           | 1096/1605 (68.3%)   | 459/765        | 2599/184589 (1.4%)     |
+| ML alone, score ≥ 0.9          | 1419/1605 (88.4%)   | 647/765        | 115/184589 (0.06%)     |
+| Rules or ML                    | 1511/1605 (94.1%)   | 700/765        | 2693/184589 (1.5%)     |
+
+* **What ML adds on top of the rules:** 415 shells (244 clusters) at the cost of 94 extra false positives (0.05%).
+* **Worst families for ML false positives:** WordPress (1.4%, mostly the old releases) and Zen Cart (1.2%). Every other family is at or below 0.6%, and 45 of the 58 families get none.
+* **Use `--by-family`** to print the per-project table.
+
+Things to keep in mind:
+
+* The score ranks files; it isn't a calibrated probability. A low score does not mean a file is safe.
+* The weights are public in `main.php`, so a determined attacker can write a shell that scores low. The model is a second opinion beside the rules, not a replacement.
+* Every webshell comes from public collections, which lean towards older, well-known shells. There is no held-out set of new, unpublished shells.
+* ASP/JSP/CGI shells saved with a PHP name contain no PHP for either detector to read. The `@foreign_code` rule catches those instead.
+
+Options:
+
+* `--write`: retrain on all the data and store the new weights in `main.php`. This is needed after changing `mlFeatures()` or `ML_BUCKETS`.
+* `--check DIR`: report how many files in a directory you trust (for example your own codebase) the model would flag.
+* `--by-family`: print false positives per legitimate project family.
+* `--list`: print held-out misses and false positives.
+* `--cap N`: the maximum number of legitimate files per corpus used in training (default 2000, so huge projects don't drown out the rest).
 
 ### Benchmark
 

@@ -53,6 +53,9 @@ const cases = [
     ["<?php __halt_compiler();" + 'A'.repeat(2000), ['@halt_payload'], []],
     ["<?php $x = '" + 'A'.repeat(6000) + "';", ['@long_line'], []],
     ["<?if(1)shell_exec($_GET['c']);", ['shell_exec'], []], // short open tag, whatever this host's short_open_tag
+    ['<%@ Page Language="C#" %><% Response.Write(Request.Form["c"]); %>', ['@foreign_code'], []],
+    ['#!/usr/bin/perl\nuse CGI;\nprint `id`;', ['@foreign_code'], []],
+    ['<html><% if (x) { %>tpl<% } %></html><?php echo 1; ?>', [], ['@foreign_code']],
 ];
 fs.writeFileSync(path.join(work, 'cases.txt'), cases.map(c => c[0]).join('\0'));
 
