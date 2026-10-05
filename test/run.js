@@ -1,14 +1,14 @@
 // Unified test runner: detector self-checks + detection benchmark, on the local
-// PHP or on every PHTest version (plus a page/AJAX smoke test there).
+// PHP or on every test/PHTest version (plus a page/AJAX smoke test there).
 //
 // For each PHP it runs main.php's real feature extraction (via the SUSSY_LIB
-// include) over test/webshells (malicious) mixed with test/WordPress +
-// test/laravel (benign), then scores the rows with main.php's real client-side
+// include) over test/corpora/positive/blackarch-webshells (malicious) mixed with
+// test/corpora/noise/wordpress-7.2-alpha + test/corpora/noise/laravel-skeleton (benign), then scores the rows with main.php's real client-side
 // scoring block and prints detection/false-positive rates.
 //
 // Usage:
 //   node test/run.js                         local `php` only
-//   node test/run.js --php all               every version in PHTest/versions.list (docker)
+//   node test/run.js --php all               every version in test/PHTest/versions.list (docker)
 //   node test/run.js --php 4.3.11,8.5.6      just those versions
 //   extra: --list (misses/false positives), --tokens (per-token counts), --threshold 3.5,
 //          --no-ml (rules only), --dump rows.json (the extracted feature rows),
@@ -99,7 +99,7 @@ if (file_exists(${phpString(state + '/done')})) {
 }
 $rows = fopen(${phpString(state + '/rows')}, 'a');
 $done = fopen(${phpString(state + '/done')}, 'a');
-foreach (array('test/webshells', 'test/WordPress', 'test/laravel') as $corpus) {
+foreach (array('test/corpora/positive/blackarch-webshells', 'test/corpora/noise/wordpress-7.2-alpha', 'test/corpora/noise/laravel-skeleton') as $corpus) {
     $r = getSortedByPattern(${phpString(repo + '/')} . $corpus, $pattern);
     $seen = array();
     $new = array();
@@ -137,7 +137,7 @@ foreach ($GLOBALS['phpWarnings'] as $warning) {
 echo json_encode(array('php' => PHP_VERSION, 'weights' => $tokenNeedles, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned));
 `;
 
-// --- Targets: local php, or PHTest containers ---
+// --- Targets: local php, or test/PHTest containers ---
 const versionOk = v => { const [a, b] = v.split('.').map(Number); return a > 4 || (a === 4 && b >= 3); };
 let targets;
 const phpOpt = opt('--php');
@@ -152,7 +152,7 @@ if (!phpOpt) {
         read: file => { try { return fs.readFileSync(path.join(state, file), 'utf8'); } catch (e) { return ''; } },
     }];
 } else {
-    const known = fs.readFileSync(path.join(root, 'PHTest/versions.list'), 'utf8').split('\n')
+    const known = fs.readFileSync(path.join(root, 'test/PHTest/versions.list'), 'utf8').split('\n')
         .filter(l => l.trim() && !l.startsWith('#')).map(l => { const [v, type] = l.split('|'); return { v, type }; });
     const want = phpOpt === 'all' ? known : phpOpt.split(',').map(v => known.find(k => k.v === v) || { v, type: null });
     fs.writeFileSync(path.join(work, 'extract.php'), extractScript('/var/www/html', '/work', '/tmp'));
@@ -180,14 +180,14 @@ function webCheck(t) {
     const js = [...page.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n;\n');
     let jsOk = page.includes('</html>');
     try { new vm.Script(js); } catch (e) { jsOk = false; }
-    const scan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/var/www/html/test/webshells/php']));
+    const scan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/var/www/html/test/corpora/positive/blackarch-webshells/php']));
     // Must return (the FIFO can't hang it) and list the fixture's 8 names
     const fixtureScan = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture']));
     // Without the CSRF header every action is refused
     const noHeader = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture'], false));
     // Paths are rawurlencoded on the wire, then form-encoded; the Latin-1 name must round-trip
-    const micro = '/var/www/html/test/webshells/php/micro.php';
-    const microMd5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(root, 'test/webshells/php/micro.php'))).digest('hex');
+    const micro = '/var/www/html/test/corpora/positive/blackarch-webshells/php/micro.php';
+    const microMd5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(root, 'test/corpora/positive/blackarch-webshells/php/micro.php'))).digest('hex');
     const latin1 = '%2Fwork%2Ffixture%2Fcaf%E9.php';
     const wire = p => encodeURIComponent(encodeURIComponent(p));
     // comma-separated (%2C); a path that doesn't exist must come back as a warning, not vanish
@@ -218,7 +218,7 @@ targets.forEach(t => {
             execFileSync('docker', ['rm', '-f', t.container], { stdio: 'ignore' });
             execFileSync('docker', ['run', '-d', '--rm', '--name', t.container, '-p', t.port + ':80',
                 '-v', root + ':/var/www/html:ro', '-v', work + ':/work:ro',
-                '-v', path.join(root, 'PHTest/conf', t.v, 'php.ini') + ':' + ini + ':ro', image], { stdio: 'ignore' });
+                '-v', path.join(root, 'test/PHTest/conf', t.v, 'php.ini') + ':' + ini + ':ro', image], { stdio: 'ignore' });
             containers.push(t.container);
         } catch (e) {
             console.log(`\n== ${t.name}: container failed to start (image ${image} built?)`);
@@ -290,9 +290,9 @@ targets.forEach(t => {
     const rows = ctx.analyzeData(out.features, threshold);
     // A file in the shell corpus that can't run (a saved 404 page, a robots.txt) is a labelling
     // error, not a missed shell; test/train-ml.js drops the same files
-    const notCode = rows.filter(d => d.rel.startsWith('test/webshells/') && d.no_php && !d.foreign);
-    const isMal = d => d.rel.startsWith('test/webshells/') && !(d.no_php && !d.foreign);
-    const mal = rows.filter(isMal), ben = rows.filter(d => !d.rel.startsWith('test/webshells/'));
+    const notCode = rows.filter(d => d.rel.startsWith('test/corpora/positive/') && d.no_php && !d.foreign);
+    const isMal = d => d.rel.startsWith('test/corpora/positive/') && !(d.no_php && !d.foreign);
+    const mal = rows.filter(isMal), ben = rows.filter(d => !d.rel.startsWith('test/corpora/positive/'));
     if (notCode.length) console.log(`not counted     ${notCode.length} shell-corpus file(s) with no server code: ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
     const report = (label, hit) => {
         const tp = mal.filter(hit).length, fp = ben.filter(hit).length;

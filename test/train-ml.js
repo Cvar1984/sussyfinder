@@ -85,9 +85,10 @@ fs.writeFileSync(extractScript, extractCode);
 const featureHash = crypto.createHash('sha1').update(featureCode).update(extractCode).digest('hex').slice(0, 12);
 const run = (cmd, a) => new Promise((resolve, reject) => execFile(cmd, a, { maxBuffer: 1 << 30 }, (e, out) => e ? reject(e) : resolve(out)));
 
-// Sample corpora are the submodules carrying a "label" (shell or benign) in
-// .gitmodules; "family" groups corpora held out together, "subdir" narrows a
-// repo to the part that holds samples. Git ignores these extra keys.
+// Sample corpora are the submodules under test/corpora/positive (webshells)
+// and test/corpora/noise (legitimate code). In .gitmodules, "family" groups
+// corpora held out together and "subdir" narrows a repo to the part that
+// holds samples; git ignores these extra keys.
 function loadCorpora() {
     const subs = new Map();
     const cfg = execFileSync('git', ['config', '-f', path.join(root, '.gitmodules'), '--get-regexp', '^submodule\\.'], { encoding: 'utf8' });
@@ -99,8 +100,9 @@ function loadCorpora() {
     }
     const pinned = new Map(execFileSync('git', ['ls-files', '-s'], { cwd: root, encoding: 'utf8', maxBuffer: 1 << 26 })
         .split('\n').filter(l => l.startsWith('160000')).map(l => [l.split('\t')[1], l.split(' ')[1]]));
-    return [...subs.values()].filter(s => s.label).map(s => ({
-        name: path.basename(s.path), path: s.path, label: s.label,
+    const label = { positive: 'shell', noise: 'benign' };
+    return [...subs.values()].map(s => ({ s, m: /^test\/corpora\/(positive|noise)\//.exec(s.path) })).filter(x => x.m).map(({ s, m }) => ({
+        name: path.basename(s.path), path: s.path, label: label[m[1]],
         family: s.family || path.basename(s.path), subdir: s.subdir, commit: pinned.get(s.path),
     }));
 }

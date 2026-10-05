@@ -364,16 +364,27 @@ To turn the model off, set `define('_ML_', false);` near the top of `main.php`. 
 
 #### Training data
 
-Every test sample is a git submodule pinned to an exact commit: `test/webshells`, `test/WordPress` and `test/laravel`, plus 94 more under `test/corpora/`. In `.gitmodules`, each sample entry also carries `label` (`shell` or `benign`), `family` (corpora held out together in cross-validation) and, where needed, `subdir`. Git ignores these extra keys; `test/train-ml.js` reads them. The samples are:
+The test tree:
+
+| Path | Contents |
+| ---- | -------- |
+| `test/` | `run.js` (unit tests and benchmark), `ui.js` (browser tests), `train-ml.js` (ML training) |
+| `test/PHTest/` | Docker sandbox with every PHP version from 4.1 to 8.5 |
+| `test/corpora/positive/` | webshell collections (20 submodules) |
+| `test/corpora/noise/` | legitimate frameworks and CMSs across many releases (169 submodules) |
+
+Every sample is a git submodule pinned to an exact commit. Its folder sets its label: `positive` is a shell, `noise` is legitimate code. In `.gitmodules`, a sample entry can also carry `family` (corpora held out together in cross-validation, such as every WordPress release) and `subdir` (the part of a repository that holds samples). Git ignores these extra keys; `test/train-ml.js` reads them. The samples are:
 
 * **Webshells:** public webshell collections, plus well-known standalone shells.
-* **Legitimate code:** current frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and others), and old releases for legacy procedural code, such as WordPress 2.0/3.0, Drupal 6/7 and phpBB 3.0.
+* **Legitimate code:** frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and about 50 more), each across many releases, such as WordPress 1.5 to 7.2-alpha, Drupal 5 to 11 and Joomla 2.5 to 5.0.
 
 Submodules aren't downloaded by a normal clone. Fetch what you need:
 
 ```bash
-git submodule update --init test/webshells test/WordPress test/laravel   # benchmark set
-git submodule update --init test/                                         # everything, ~5 GB
+git submodule update --init test/corpora/positive/blackarch-webshells \
+    test/corpora/noise/wordpress-7.2-alpha test/corpora/noise/laravel-skeleton   # benchmark set
+git submodule update --init test/PHTest                                           # PHP version sandbox
+git submodule update --init test/corpora/                                         # every sample, over 10 GB
 ```
 
 Corpus submodules are marked `shallow`, so a corpus pinned to a branch tip downloads a single commit. Old releases pinned below the tip come with some history.
@@ -411,9 +422,9 @@ Options:
 
 ### Benchmark
 
-`node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. Files in the webshell corpus with no server code at all (a saved 404 page, a `robots.txt`) can't run, so they aren't counted as missed shells; the run lists them by name. It also runs structural-detector self-checks and fails if any of them break.
+`node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/corpora/positive/blackarch-webshells` mixed with `test/corpora/noise/wordpress-7.2-alpha` and `test/corpora/noise/laravel-skeleton`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. Files in the webshell corpus with no server code at all (a saved 404 page, a `robots.txt`) can't run, so they aren't counted as missed shells; the run lists them by name. It also runs structural-detector self-checks and fails if any of them break.
 
-`node test/run.js --php all` does the same on every PHP version in `PHTest/` (Docker, PHP 4.1–8.5), plus a page/AJAX smoke test per version, and lists files that match differently than on the newest PHP.
+`node test/run.js --php all` does the same on every PHP version in `test/PHTest/` (Docker, PHP 4.1–8.5), plus a page/AJAX smoke test per version, and lists files that match differently than on the newest PHP.
 
 * `--list`: print missed webshells and false positives
 * `--tokens`: print how often each token appears in webshells vs. benign files, for tuning weights

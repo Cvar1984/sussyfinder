@@ -3,8 +3,8 @@
 // protocol with real mouse and keyboard events.
 //
 // It builds a sandbox in a temp dir: a copy of main.php with the whitelist and
-// blacklist off (so nothing is ever deleted), copies of test/webshells/php and
-// test/WordPress/wp-includes with distinct dates, and a file named
+// blacklist off (so nothing is ever deleted), copies of test/corpora/positive/blackarch-webshells/php and
+// test/corpora/noise/wordpress-7.2-alpha/wp-includes with distinct dates, and a file named
 // a');alert(1);('.php. Then it serves it with `php -S` and scans it.
 //
 // Usage: node test/ui.js        (needs php and google-chrome or chromium)
@@ -32,10 +32,10 @@ fs.mkdirSync(path.join(box, 'www'));
 fs.writeFileSync(path.join(box, 'www', 'main.php'), fs.readFileSync(path.join(root, 'main.php'), 'utf8')
     .replace("define('_WHITELIST_', true);", "define('_WHITELIST_', false);")
     .replace("define('_BLACKLIST_', true);", "define('_BLACKLIST_', false);"));
-fs.cpSync(path.join(root, 'test/webshells/php'), path.join(DATA, 'shells'), { recursive: true });
+fs.cpSync(path.join(root, 'test/corpora/positive/blackarch-webshells/php'), path.join(DATA, 'shells'), { recursive: true });
 fs.mkdirSync(path.join(DATA, 'wp'));
-fs.readdirSync(path.join(root, 'test/WordPress/wp-includes')).filter(f => f.endsWith('.php'))
-    .forEach(f => fs.copyFileSync(path.join(root, 'test/WordPress/wp-includes', f), path.join(DATA, 'wp', f)));
+fs.readdirSync(path.join(root, 'test/corpora/noise/wordpress-7.2-alpha/wp-includes')).filter(f => f.endsWith('.php'))
+    .forEach(f => fs.copyFileSync(path.join(root, 'test/corpora/noise/wordpress-7.2-alpha/wp-includes', f), path.join(DATA, 'wp', f)));
 const xss = path.join(DATA, "a');alert(1);('.php");
 fs.writeFileSync(xss, '<?php eval($_GET[1]);');
 // distinct dates so the timeline has several buckets
