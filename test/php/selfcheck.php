@@ -9,7 +9,7 @@ include $SUSSY_MAIN;
 
 $cases = array();
 foreach (explode("\0", file_get_contents($SUSSY_CASES)) as $src) {
-    $cases[] = matchTokens(getFileTokens($src), $src, $tokenNeedles);
+    $cases[] = matchTokens($src, $tokenNeedles);
 }
 
 $GLOBALS['phpWarnings'] = array();

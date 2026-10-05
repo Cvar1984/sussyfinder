@@ -181,6 +181,21 @@ function jsTests() {
         assert(bench.some(c => c.label === 'shell') && bench.some(c => c.label === 'benign'), 'benchmark set has both labels');
     });
 
+    test('re-flagging at a new Z-threshold equals a full rescore', () => {
+        const ctx = lib.loadScoring();
+        const rows = Array.from({ length: 60 }, (_, i) => ({
+            path: '/x/' + i + '.php', size: 100 + i * 37 % 900, mtime: 1e9 + (i % 7) * 86400 * (i % 5 ? 1 : 400),
+            ctime: 1e9 + (i % 7) * 86400, owner: i % 19 ? 1 : 2, entropy: 4 + (i % 9) / 3, total_tokens: 20 + i,
+            matched_tokens: i % 4 ? ['substr'] : ['eval', '$_get'], ml_features: null, is_htaccess: false,
+            is_unreadable: i === 5, is_blacklisted: false, duplicate_of: false, md5: 'm' + i,
+        }));
+        const strip = list => JSON.stringify(list.map(d => [d.isAnomaly, d.mlOnly, d.threatScore]));
+        for (const t of [0.5, 2, 3.5, 8]) {
+            assert(strip(ctx.flagAnomalies(ctx.analyzeData(rows, 3.5), t)) === strip(ctx.analyzeData(rows, t)), 'threshold ' + t);
+        }
+        assert(new Set(ctx.analyzeData(rows, 0.5).map(d => d.isAnomaly)).size === 2, 'the sample has anomalies and normal rows');
+    });
+
     test('scoring block constants', () => {
         const ctx = lib.loadScoring({ weights: {} });
         ['Z_THRESHOLD', 'ANOMALY_SCORE', 'CRITICAL_SCORE', 'ML_THRESHOLD', 'ML_FLOOR'].forEach(n => assert(typeof lib.constant(ctx, n) === 'number', n));

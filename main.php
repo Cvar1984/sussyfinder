@@ -72,6 +72,7 @@ settingDefault('TIME_LIMIT', 3600);          // seconds a request may run
 settingDefault('HTTP_CONNECT_TIMEOUT', 10);  // seconds
 settingDefault('HTTP_TIMEOUT', 30);          // seconds
 settingDefault('MHR_BATCH', 1000);           // hashes per MHR request (the API's limit)
+settingDefault('LIST_CACHE_SECONDS', 900);   // a scan's requests share the downloaded hash lists this long (0: download each time)
 settingDefault('LONG_LINE_BYTES', 5000);     // a longer line is @long_line
 settingDefault('HALT_PAYLOAD_BYTES', 1024);  // more data after __halt_compiler() is @halt_payload
 
@@ -676,24 +677,36 @@ function memberTokenIds()
 }
 
 /**
- * The tokens that carry code, as array(id, text) pairs; a single-character
- * token gets id 0.
+ * One pass over a file's tokens for everything that reads them: the tokens
+ * that carry code, as array(id, text) pairs (a single-character token gets
+ * id 0), and where __halt_compiler() ends the code.
  *
  * @param array $tokens getFileTokens() output
- * @return array
+ * @return array 'sig' => code tokens; 'code' => how many of them come up to
+ *               and including __halt_compiler (all when there is none);
+ *               'haltBytes' => bytes after it (-1 when there is none)
  */
-function significantTokens($tokens)
+function codeTokens($tokens)
 {
     $skip = insignificantTokenIds();
     $sig = array();
+    $code = -1;
+    $haltBytes = -1;
     foreach ($tokens as $token) {
         if (!is_array($token)) {
-            $sig[] = array(0, $token);
-        } elseif (!isset($skip[$token[0]])) {
+            $token = array(0, $token);
+        }
+        if ($haltBytes >= 0) {
+            $haltBytes += strlen($token[1]);
+        } elseif (strlen($token[1]) == 15 && strtolower($token[1]) == '__halt_compiler') {
+            $haltBytes = 0;
+            $code = count($sig) + 1;
+        }
+        if (!isset($skip[$token[0]])) {
             $sig[] = $token;
         }
     }
-    return $sig;
+    return array('sig' => $sig, 'code' => $code < 0 ? count($sig) : $code, 'haltBytes' => $haltBytes);
 }
 
 /**
@@ -702,16 +715,16 @@ function significantTokens($tokens)
  * yield a lone "`"), as are member and declaration names (->exec(),
  * ::system(), function eval()), since those aren't the global functions.
  *
- * @param array $tokens getFileTokens() output
+ * @param array $sig codeTokens() 'sig'
  * @return array text => true
  */
-function tokenTextSet($tokens)
+function tokenTextSet($sig)
 {
     $content = array(T_ENCAPSED_AND_WHITESPACE => true, T_INLINE_HTML => true);
     $member = memberTokenIds();
     $set = array();
     $prev = 0;
-    foreach (significantTokens($tokens) as $token) {
+    foreach ($sig as $token) {
         if (!isset($content[$token[0]]) && !($token[0] == T_STRING && isset($member[$prev]))) {
             $set[ltrim(strtolower(trim($token[1])), '\\')] = true;
         }
@@ -742,17 +755,42 @@ function compareTokens($tokenNeedles, $tokenSet)
 /**
  * Everything a file matches: needles found as tokens plus structural signals.
  *
- * @param array $tokens getFileTokens() output
  * @param string $content
  * @param array $tokenNeedles
  * @return array
  */
-function matchTokens($tokens, $content, $tokenNeedles)
+function matchTokens($content, $tokenNeedles)
 {
-    return array_values(array_unique(array_merge(
-        compareTokens($tokenNeedles, tokenTextSet($tokens)),
-        findStructuralSignals($tokens, $content, $tokenNeedles)
-    )));
+    $analysis = analyzeContent($content, $tokenNeedles, false);
+    return $analysis['matched_tokens'];
+}
+
+/**
+ * Analyse a file's content: what it matches, its entropy, its distinct code
+ * token count and (with $withMl) its ML features. The tokens are read once
+ * and shared by every check.
+ *
+ * @param string $content
+ * @param array $tokenNeedles
+ * @param bool $withMl
+ * @return array the content fields of a feature row (see featureRow())
+ */
+function analyzeContent($content, $tokenNeedles, $withMl)
+{
+    $code = codeTokens(getFileTokens($content));
+    $textSet = tokenTextSet($code['sig']);
+    $maxLine = maxLineLength($content);
+    $entropy = shannonEntropy($content);
+    return array(
+        'entropy'        => $entropy,
+        'total_tokens'   => count($textSet),
+        'ml_features'    => $withMl ? mlFeatures($code['sig'], $maxLine, $entropy) : null,
+        'matched_tokens' => array_values(array_unique(array_merge(
+            compareTokens($tokenNeedles, $textSet),
+            findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
+        ))),
+        'has_php'        => hasPhpCode($content),
+    );
 }
 
 /**
@@ -798,7 +836,7 @@ function hasForeignServerCode($content)
  * Index of the variable an indexed call reads from: for "$a['x'][0](" with
  * $close at the last "]", walk back over each [...] to the token before it.
  *
- * @param array $sig significantTokens() output
+ * @param array $sig codeTokens() 'sig'
  * @param int $close index of the last "]"
  * @return int index of the token before the first "[" (-1 if none)
  */
@@ -825,36 +863,21 @@ function indexedBase($sig, $close)
  * collide with real ones) plus any needle function name that was hidden in
  * a string: 'ba'.'se64_decode', "\x73ystem", 'system'('id').
  *
- * @param array  $tokens       getFileTokens() output
+ * @param array  $code         codeTokens() output
  * @param string $content      raw file content
  * @param array  $tokenNeedles needle => weight
+ * @param int    $maxLine      maxLineLength($content)
  * @return array
  */
-function findStructuralSignals($tokens, $content, $tokenNeedles)
+function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
 {
     $needleSet = array_change_key_case($tokenNeedles, CASE_LOWER);
     $inputVars = array('$_get' => 1, '$_post' => 1, '$_request' => 1, '$_cookie' => 1, '$_server' => 1, '$_files' => 1);
 
     // Code up to __halt_compiler(); what follows it is data
-    $sig = array();
-    $haltBytes = -1;
-    $skip = insignificantTokenIds();
-    foreach ($tokens as $token) {
-        if (!is_array($token)) {
-            $token = array(0, $token);
-        }
-        if ($haltBytes >= 0) {
-            $haltBytes += strlen($token[1]);
-        } elseif (!isset($skip[$token[0]])) {
-            if (strtolower($token[1]) == '__halt_compiler') {
-                $haltBytes = 0;
-            }
-            $sig[] = $token;
-        }
-    }
-
+    $sig = $code['sig'];
+    $n = $code['code'];
     $found = array();
-    $n = count($sig);
     for ($i = 0; $i < $n; $i++) {
         $id = $sig[$i][0];
         $text = $sig[$i][1];
@@ -924,10 +947,10 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
         $found['@foreign_code'] = true;
     }
     // Packed payloads tend to sit on one huge line
-    if (maxLineLength($content) > LONG_LINE_BYTES) {
+    if ($maxLine > LONG_LINE_BYTES) {
         $found['@long_line'] = true;
     }
-    if ($haltBytes > HALT_PAYLOAD_BYTES) {
+    if ($code['haltBytes'] > HALT_PAYLOAD_BYTES) {
         $found['@halt_payload'] = true;
     }
 
@@ -941,18 +964,17 @@ function findStructuralSignals($tokens, $content, $tokenNeedles)
  * bucketed file statistic) hashed into a bucket with crc32. "& mask" keeps
  * the low bits the same on 32- and 64-bit PHP.
  *
- * @param array  $tokens  getFileTokens() output
- * @param string $content raw file content
- * @param float  $entropy shannonEntropy($content)
+ * @param array $sig     codeTokens() 'sig'
+ * @param int   $maxLine maxLineLength() of the content
+ * @param float $entropy shannonEntropy() of the content
  * @return string
  */
-function mlFeatures($tokens, $content, $entropy)
+function mlFeatures($sig, $maxLine, $entropy)
 {
+    static $names = array(); // token_name() cache
     $member = memberTokenIds();
     $member[T_NEW] = true;
-    $sig = significantTokens($tokens);
 
-    $names = array();
     $set = array();
     $prev = 'START';
     $n = count($sig);
@@ -991,7 +1013,7 @@ function mlFeatures($tokens, $content, $entropy)
     }
 
     // Bit lengths, i.e. log2 buckets, in integer math so no PHP build rounds differently
-    $set['f:line' . strlen(decbin(maxLineLength($content)))] = 1;
+    $set['f:line' . strlen(decbin($maxLine))] = 1;
     $set['f:tok' . strlen(decbin($n))] = 1;
     $set['f:ent' . (int) ($entropy * 4)] = 1;
 
@@ -1083,24 +1105,17 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
         } else {
             $localSeen[$md5] = $filePath;
         }
-        $tokens = getFileTokens($content);
-        $entropy = shannonEntropy($content);
-        $rows[] = featureRow($filePath, array(
-            'size'           => strlen($content),
-            'mtime'          => filemtime($filePath),
-            'ctime'          => filectime($filePath),
-            'owner'          => fileowner($filePath),
-            'entropy'        => $entropy,
-            'total_tokens'   => count(tokenTextSet($tokens)),
-            'ml_features'    => $withMl ? mlFeatures($tokens, $content, $entropy) : null,
-            'matched_tokens' => matchTokens($tokens, $content, $tokenNeedles),
-            'md5'            => $md5,
-            'is_blacklisted' => isset($blacklistMD5Sums[$md5]),
-            'is_htaccess'    => substr($filePath, -9) == '.htaccess', // PATHINFO_EXTENSION is PHP 5.2+
-            'has_php'        => hasPhpCode($content),
-            'duplicate_of'   => $duplicateOf,
-            'is_unreadable'  => false,
-        ));
+        $fields = analyzeContent($content, $tokenNeedles, $withMl);
+        $fields['size'] = strlen($content);
+        $fields['mtime'] = filemtime($filePath);
+        $fields['ctime'] = filectime($filePath);
+        $fields['owner'] = fileowner($filePath);
+        $fields['md5'] = $md5;
+        $fields['is_blacklisted'] = isset($blacklistMD5Sums[$md5]);
+        $fields['is_htaccess'] = substr($filePath, -9) == '.htaccess'; // PATHINFO_EXTENSION is PHP 5.2+
+        $fields['duplicate_of'] = $duplicateOf;
+        $fields['is_unreadable'] = false;
+        $rows[] = featureRow($filePath, $fields);
     }
     return $rows;
 }
@@ -1231,40 +1246,95 @@ function httpGet($url)
 }
 
 /**
- * A list of MD5 sums, one per line, as md5 => true; empty when the list is
- * switched off or can't be fetched (with a warning). Fetched once per request.
+ * Open this script's own PHP session (its own cookie name, so an application
+ * on the same host keeps its session untouched). Used only to share the hash
+ * lists between the requests of one scan; the lists stay on the server, so
+ * the browser can't substitute its own blacklist.
+ *
+ * @return bool whether $_SESSION can be used
+ */
+function listSessionStart()
+{
+    if (LIST_CACHE_SECONDS <= 0 || !functionAvailable('session_start') || headers_sent()) {
+        return false;
+    }
+    if (session_id() === '') {
+        session_name('SUSSYFINDER');
+    }
+    @session_start();
+    return isset($_SESSION) && is_array($_SESSION);
+}
+
+/**
+ * Download a list of MD5 sums, one per line.
  *
  * @param string $url
+ * @return array|false md5 => true, false when it can't be fetched (with a warning)
+ */
+function downloadHashList($url)
+{
+    $body = httpGet($url);
+    if ($body === false) {
+        return false;
+    }
+    $list = array();
+    foreach (explode("\n", $body) as $line) {
+        $line = strtolower(trim($line));
+        if ($line !== '') {
+            $list[$line] = true;
+        }
+    }
+    return $list;
+}
+
+/**
+ * A hash list as md5 => true; empty when it can't be fetched. Downloaded at
+ * most once per request, and kept in the session for LIST_CACHE_SECONDS so
+ * the batches of a scan reuse it.
+ *
+ * @param string $url
+ * @param bool $refresh download it again even when a copy is kept (a new scan)
  * @return array
  */
-function hashList($url)
+function hashList($url, $refresh = false)
 {
     static $lists = array();
-    if (!isset($lists[$url])) {
-        $lists[$url] = array();
-        $body = httpGet($url);
-        if ($body !== false) {
-            foreach (explode("\n", $body) as $line) {
-                $line = strtolower(trim($line));
-                if ($line !== '') {
-                    $lists[$url][$line] = true;
-                }
-            }
+    if (isset($lists[$url]) && !$refresh) {
+        return $lists[$url];
+    }
+    $session = listSessionStart();
+    $kept = $session && isset($_SESSION['sussy_lists'][$url]) ? $_SESSION['sussy_lists'][$url] : null;
+    if (!$refresh && is_array($kept) && time() - $kept['time'] < LIST_CACHE_SECONDS) {
+        $lists[$url] = $kept['md5s'];
+    } else {
+        $list = downloadHashList($url);
+        $lists[$url] = $list === false ? array() : $list;
+        if ($session && $list !== false) {
+            $_SESSION['sussy_lists'][$url] = array('time' => time(), 'md5s' => $list);
         }
+    }
+    if ($session) {
+        session_write_close(); // don't hold the session lock while the batch runs
     }
     return $lists[$url];
 }
 
-/** @return array the known-good list, md5 => true (empty when _WHITELIST_ is off) */
-function whitelist()
+/**
+ * @param bool $refresh see hashList()
+ * @return array the known-good list, md5 => true (empty when _WHITELIST_ is off)
+ */
+function whitelist($refresh = false)
 {
-    return _WHITELIST_ ? hashList(_WHITELIST_URL_) : array();
+    return _WHITELIST_ ? hashList(_WHITELIST_URL_, $refresh) : array();
 }
 
-/** @return array the known-bad list, md5 => true (empty when _BLACKLIST_ is off) */
-function blacklist()
+/**
+ * @param bool $refresh see hashList()
+ * @return array the known-bad list, md5 => true (empty when _BLACKLIST_ is off)
+ */
+function blacklist($refresh = false)
 {
-    return _BLACKLIST_ ? hashList(_BLACKLIST_URL_) : array();
+    return _BLACKLIST_ ? hashList(_BLACKLIST_URL_, $refresh) : array();
 }
 
 /**
@@ -1341,12 +1411,15 @@ function mhrCredentials()
 }
 
 /**
- * List the files to analyse (phase 1 of a scan).
+ * List the files to analyse (phase 1 of a scan), and fetch fresh hash lists
+ * for the batches that follow.
  *
  * @return array
  */
 function actionScan()
 {
+    whitelist(true);
+    blacklist(true);
     $result = getSortedByPattern(inputValue('dir', getcwd()), $GLOBALS['pattern']);
     return array(
         'readable'     => array_map('rawurlencode', $result['file_readable']),
@@ -2237,7 +2310,14 @@ if (isset($_POST['ajax_action'])) {
                 return `${day}/${month}/${year}, ${hours}:${minutes}:${seconds}`;
             }
 
+            // Score rows and flag the anomalies at a Z-threshold
             function analyzeData(rawData, threshold) {
+                return flagAnomalies(scoreRows(rawData), threshold);
+            }
+
+            // Everything about a row that doesn't depend on the Z-threshold (the
+            // expensive part); isAnomaly and mlOnly are set by flagAnomalies()
+            function scoreRows(rawData) {
                 const valid = rawData.filter(d => !d.is_unreadable);
                 const tokens = valid.map(d => d.total_tokens);
                 const susp = valid.map(d => d.matched_tokens ? d.matched_tokens.length : 0);
@@ -2272,7 +2352,7 @@ if (isset($_POST['ajax_action'])) {
                             zScores: { size: 0, mtime: 0, tokens: 0, susp: 0, entropy: 0, ctime: 0 },
                             residual: 0,
                             rareOwner: false,
-                            isAnomaly: true,
+                            isAnomaly: false,
                             mlScore: null,
                             mlPoints: 0,
                             mlOnly: false,
@@ -2310,6 +2390,28 @@ if (isset($_POST['ajax_action'])) {
                     const expectedSusp = d.total_tokens * avgSuspPerToken;
                     const residual = suspCount - expectedSusp;
 
+                    return {
+                        ...d,
+                        zScores: { size: zSize, mtime: zMtime, tokens: zTokens, susp: zSusp, entropy: zEntropy, ctime: zCtime },
+                        residual: residual,
+                        rareOwner: rareOwner,
+                        isAnomaly: false,
+                        mlScore: ml,
+                        mlPoints: mlPts,
+                        mlOnly: false,
+                        ruleScore: ruleScore,
+                        threatScore: threatScore,
+                        date: d.mtime ? formatDate(d.mtime) : 'N/A',
+                        suspCount: suspCount
+                    };
+                });
+            }
+
+            // Which scored rows are anomalies at a Z-threshold: cheap, so moving the
+            // threshold control reruns only this
+            function flagAnomalies(rows, threshold) {
+                return rows.map(d => {
+                    if (d.is_unreadable) return { ...d, isAnomaly: true, mlOnly: false };
                     // is_htaccess and duplicate_of are informational categories (still
                     // shown via their own badges/stat cards) but aren't content signals
                     // by themselves — an .htaccess file or a byte-identical duplicate
@@ -2332,32 +2434,18 @@ if (isset($_POST['ajax_action'])) {
                     //
                     // Entropy only matters on the high side; a near-empty stub
                     // isn't an outlier worth reviewing.
-                    const otherTriggers = (zEntropy > threshold) ||
-                        (Math.abs(zMtime) > threshold) ||
-                        (Math.abs(zCtime) > threshold) ||
-                        rareOwner ||
+                    const otherTriggers = (d.zScores.entropy > threshold) ||
+                        (Math.abs(d.zScores.mtime) > threshold) ||
+                        (Math.abs(d.zScores.ctime) > threshold) ||
+                        d.rareOwner ||
                         d.is_blacklisted ||
                         d.mhr_hit === true;
                     // ML points can lift a file over the bar, never pull one under it;
                     // mlOnly marks files flagged only because of them
-                    const ruleAnomaly = ruleScore >= ANOMALY_SCORE || otherTriggers;
-                    const isAnomaly = threatScore >= ANOMALY_SCORE || otherTriggers;
+                    const ruleAnomaly = d.ruleScore >= ANOMALY_SCORE || otherTriggers;
+                    const isAnomaly = d.threatScore >= ANOMALY_SCORE || otherTriggers;
                     const mlOnly = isAnomaly && !ruleAnomaly;
-
-                    return {
-                        ...d,
-                        zScores: { size: zSize, mtime: zMtime, tokens: zTokens, susp: zSusp, entropy: zEntropy, ctime: zCtime },
-                        residual: residual,
-                        rareOwner: rareOwner,
-                        isAnomaly: isAnomaly,
-                        mlScore: ml,
-                        mlPoints: mlPts,
-                        mlOnly: mlOnly,
-                        ruleScore: ruleScore,
-                        threatScore: threatScore,
-                        date: d.mtime ? formatDate(d.mtime) : 'N/A',
-                        suspCount: suspCount
-                    };
+                    return { ...d, isAnomaly: isAnomaly, mlOnly: mlOnly };
                 });
             }
 
@@ -2468,28 +2556,31 @@ if (isset($_POST['ajax_action'])) {
                 return (!_chartSelection || _chartSelection.has(d.path)) && passesTableFilters(d);
             }
 
+            // The search term lowercased, '' for none; worked out once per change, not per row
+            let _searchKey = null, _searchLower = '';
+            function searchTerm() {
+                if (currentSearch !== _searchKey) {
+                    _searchKey = currentSearch;
+                    _searchLower = currentSearch.trim() ? currentSearch.toLowerCase() : '';
+                }
+                return _searchLower;
+            }
+
             function passesTableFilters(d) {
                 if (currentSearch === '__BLACKLIST__') return d.is_blacklisted === true;
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && !isCritical(d)) return false;
                 if (currentFilterMode === 'obfuscated' && (d.entropy <= HIGH_ENTROPY || d.is_unreadable)) return false;
 
-                if (!currentSearch.trim()) return true;
-
-                const searchLower = currentSearch.toLowerCase();
-                const pathMatch = d.path.toLowerCase().includes(searchLower);
-                if (searchTokensOnly) {
-                    if (d.matched_tokens && d.matched_tokens.length) {
-                        return d.matched_tokens.some(t => t.toLowerCase().includes(searchLower));
-                    }
-                    return false;
-                } else {
-                    if (pathMatch) return true;
-                    if (d.matched_tokens && d.matched_tokens.length) {
-                        return d.matched_tokens.some(t => t.toLowerCase().includes(searchLower));
-                    }
-                    return false;
+                const term = searchTerm();
+                if (!term) return true;
+                // Lowercased once per row (rows are rebuilt whenever they are rescored)
+                if (d._pathLower === undefined) {
+                    d._pathLower = d.path.toLowerCase();
+                    d._tokensLower = (d.matched_tokens || []).map(t => t.toLowerCase());
                 }
+                if (!searchTokensOnly && d._pathLower.includes(term)) return true;
+                return d._tokensLower.some(t => t.includes(term));
             }
 
             // ── Unified warning panel ──────────────────────────────────────────
@@ -2513,7 +2604,14 @@ if (isset($_POST['ajax_action'])) {
             }
 
             function logWarning(message, level) {
-                _eventLog.push({ message: message, level: level || 'warning', time: new Date() });
+                logWarnings([message], level);
+            }
+
+            // Several messages, one render
+            function logWarnings(messages, level) {
+                if (!messages.length) return;
+                var time = new Date();
+                messages.forEach(function (m) { _eventLog.push({ message: m, level: level || 'warning', time: time }); });
                 renderWarningPanel(_lastRenderedData);
                 var banner = document.getElementById('warningBanner');
                 if (banner) { banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
@@ -2525,12 +2623,17 @@ if (isset($_POST['ajax_action'])) {
             // the JSON response they'd be riding along in.
             function reportServerWarnings(data) {
                 if (data && Array.isArray(data.warnings)) {
-                    data.warnings.forEach(function (w) { logWarning(w, 'warning'); });
+                    logWarnings(data.warnings, 'warning');
                 }
             }
 
+            var _renderedEventCount = -1;
             function renderWarningPanel(data) {
-                _lastRenderedData = data || _lastRenderedData;
+                data = data || _lastRenderedData;
+                // Sorting and filtering re-render the table, not this
+                if (data === _lastRenderedData && _eventLog.length === _renderedEventCount) return;
+                _lastRenderedData = data;
+                _renderedEventCount = _eventLog.length;
                 var banner = document.getElementById('warningBanner');
                 if (!banner) return;
 
@@ -2603,9 +2706,19 @@ if (isset($_POST['ajax_action'])) {
             }
             // ────────────────────────────────────────────────────────────────
 
+            // The rows the table shows, for the charts (a Set lookup per dot rather
+            // than the filters), and a counter that changes with every render
+            let _shown = new Set();
+            let _shownVersion = 0;
+            function isShown(d) {
+                return _shown.has(d);
+            }
+
             function renderTable(data) {
                 renderWarningPanel(data);
                 let filtered = data.filter(d => shouldShowFile(d));
+                _shown = new Set(filtered);
+                _shownVersion++;
 
                 if (currentSort === 'threat') filtered.sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0));
                 else if (currentSort === 'mtime') filtered.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
@@ -2741,7 +2854,7 @@ if (isset($_POST['ajax_action'])) {
                 if (!isNaN(val) && val >= 0) {
                     currentThreshold = val;
                     if (typeof rawFileData !== 'undefined') {
-                        analyzedData = analyzeData(rawFileData, currentThreshold);
+                        analyzedData = flagAnomalies(analyzedData, currentThreshold);
                         renderTable(analyzedData);
                         if (insightsVisible) renderInsights(analyzedData);
                     }
@@ -2950,7 +3063,6 @@ if (isset($_POST['ajax_action'])) {
             let _charts = [];
             let _chartsData = null;          // the dataset the charts were built from
             let _chartDrag = null;
-            let _chartRedrawQueued = false;
             let _rowByPath = new Map();
             let _linkedRow = null;
             const CHART_HEIGHT = 300;
@@ -2990,11 +3102,16 @@ if (isset($_POST['ajax_action'])) {
             }
 
             function requestChartRedraw() {
-                if (_chartRedrawQueued) return;
-                _chartRedrawQueued = true;
+                _charts.forEach(requestDraw);
+            }
+
+            // Redraw one chart at the next frame, however many events ask for it
+            function requestDraw(c) {
+                if (c.queued) return;
+                c.queued = true;
                 requestAnimationFrame(function () {
-                    _chartRedrawQueued = false;
-                    _charts.forEach(c => c.draw());
+                    c.queued = false;
+                    c.draw();
                 });
             }
 
@@ -3095,7 +3212,7 @@ if (isset($_POST['ajax_action'])) {
                         e.preventDefault();
                         const p = chartPoint(c, e);
                         c.zoom(p.x, p.y, e.deltaY > 0 ? 1.08 : 0.925);
-                        c.draw();
+                        requestDraw(c);
                     }, { passive: false });
                 }
                 if (c.reset) {
@@ -3111,7 +3228,7 @@ if (isset($_POST['ajax_action'])) {
                 if (g.pan) g.c.pan(p.x - g.x, p.y - g.y);
                 g.x = p.x;
                 g.y = p.y;
-                g.c.draw();
+                requestDraw(g.c);
             });
             document.addEventListener('mouseup', function () {
                 const g = _chartDrag;
@@ -3176,7 +3293,7 @@ if (isset($_POST['ajax_action'])) {
             function drawDots(c, dots, radius) {
                 const ctx = c.ctx;
                 const faded = [], shown = [];
-                dots.forEach(p => (shouldShowFile(p.d) ? shown : faded).push(p));
+                dots.forEach(p => (isShown(p.d) ? shown : faded).push(p));
                 const paint = p => { ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, radius, 0, Math.PI * 2); ctx.fill(); };
                 ctx.globalAlpha = 0.15;
                 faded.forEach(paint);
@@ -3363,7 +3480,7 @@ if (isset($_POST['ajax_action'])) {
                                 drawAxes(ctx, b.left, b.top, b.right, b.bottom);
                                 buckets.forEach((k, i) => {
                                     const x = b.left + i * slot + 1, w = Math.max(1, slot - 3);
-                                    const shown = k.files.filter(d => shouldShowFile(d));
+                                    const shown = k.files.filter(isShown);
                                     const hAll = (k.files.length / maxCount) * H, hShown = (shown.length / maxCount) * H;
                                     ctx.fillStyle = '#3a3a3a';
                                     ctx.fillRect(x, b.bottom - hAll, w, hAll);
@@ -3412,11 +3529,15 @@ if (isset($_POST['ajax_action'])) {
                 // through; bars outside the chart selection are faded
                 {
                     const area = c => ({ left: 200, top: 20, right: c.w - 30, bottom: c.h - 20 });
+                    let topFor = -1, top = [];
                     makeChart(grid, 'Top Composite Threat Scores', {
                         draw: function (c) {
                             const ctx = c.ctx, b = area(c);
-                            const top = valid.filter(d => passesTableFilters(d))
-                                .sort((a, z) => (z.threatScore || 0) - (a.threatScore || 0)).slice(0, 12);
+                            if (topFor !== _shownVersion) { // a hover redraw reuses it
+                                topFor = _shownVersion;
+                                top = valid.filter(d => passesTableFilters(d))
+                                    .sort((a, z) => (z.threatScore || 0) - (a.threatScore || 0)).slice(0, 12);
+                            }
                             if (!top.length) {
                                 drawLabel(ctx, 'No files match the current filters.', c.w / 2, c.h / 2, 'center', '#888');
                                 return;

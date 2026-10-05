@@ -487,6 +487,7 @@ define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
 | `TIME_LIMIT` | `3600` | seconds a request may run |
 | `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |
 | `MHR_BATCH` | `1000` | hashes per MHR request |
+| `LIST_CACHE_SECONDS` | `900` | how long the requests of a scan share the downloaded hash lists (`0`: download for every request) |
 | `LONG_LINE_BYTES`, `HALT_PAYLOAD_BYTES` | `5000`, `1024` | thresholds of the `@long_line` and `@halt_payload` signals |
 
 Which files are scanned (`$pattern`), the needles and their weights (`$tokenTiers`), and how they combine in the threat score (`$tokenRoles`) follow the settings. The page's scoring reads the weights and roles from the server, so they are defined in one place.
@@ -503,7 +504,7 @@ By default, both lists are fetched from:
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt`
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt`
 
-You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). The lists are fetched only by the requests that use them, once per request. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
+You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Each scan downloads them once when it starts and keeps them in its own PHP session (cookie `SUSSYFINDER`) for `LIST_CACHE_SECONDS`, so the batches that follow reuse them. They stay on the server, so the browser can't substitute its own blacklist; without a session the batches download them again. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
 
 > **Note:** The provided whitelist is harvested from common frameworks and libraries. It is up to you to trust or modify it. For blacklist contributions, please provide source files when creating a pull request.
 

@@ -29,7 +29,12 @@ const children = [];
 async function finish(code) {
     children.forEach(c => c.kill());
     await Promise.all(children.map(c => c.exitCode !== null || c.signalCode ? null : new Promise(r => c.once('exit', r))));
-    fs.rmSync(box, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    // Its helper processes can still be writing for a moment after that
+    try {
+        fs.rmSync(box, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch (e) {
+        console.log(`warning: could not remove ${box}: ${e.message}`);
+    }
     process.exit(code);
 }
 process.on('SIGINT', () => finish(130));
@@ -165,6 +170,11 @@ async function testFilters() {
     check('timeline coloured bars count what the table shows', await js('_charts[1].marks.reduce((s, m) => s + m.shown, 0)') === visible, visible + ' visible');
     check('top-scores chart only lists files passing the filter', await js('_charts[2].marks.every(m => passesTableFilters(m.d))'));
     await js('clearFilters(); true'); await sleep(200);
+    await js('document.getElementById("zThreshold").value = "1.5"; applyThreshold(); true'); await sleep(300);
+    check('threshold control re-flags like a full rescore',
+        await js('JSON.stringify(analyzedData.map(d => d.isAnomaly)) === JSON.stringify(analyzeData(rawFileData, 1.5).map(d => d.isAnomaly))'),
+        await js('analyzedData.filter(d => d.isAnomaly).length') + ' anomalies at 1.5');
+    await js('document.getElementById("zThreshold").value = String(Z_THRESHOLD); applyThreshold(); true'); await sleep(300);
 }
 
 async function testZoomAndResize() {
