@@ -20,7 +20,8 @@ const lib = require('./lib');
 const unit = require('./unit');
 
 const args = lib.cli({
-    php: { type: 'string', arg: 'all|4.3.11,8.5.6', help: 'run on test/PHTest versions (Docker) instead of the local php' },
+    php: { type: 'string', arg: 'all|5.6,8.5.6', help: 'run in Docker instead of the local php: "all" (test/PHTest/versions.list) or versions (any official php:<v>-apache tag)' },
+    profile: { type: 'string', arg: 'default,hardened,minimal', help: 'php.ini environment(s) for --php, each version runs under each (default: default)' },
     list: { type: 'boolean', help: 'missed webshells, false positives, per-version differences' },
     tokens: { type: 'boolean', help: 'how often each token appears in webshells vs. benign files' },
     threshold: { type: 'string', arg: 'z', help: "Z-score threshold (default: main.php's Z_THRESHOLD)" },
@@ -61,34 +62,60 @@ function localTarget() {
         php, read: file => { try { return fs.readFileSync(path.join(state, file), 'utf8'); } catch (e) { return ''; } },
     };
 }
-function containerTargets(spec) {
+// php.ini environments for --php, layered over each version's own php.ini (conf.d):
+// how the scanner copes with typical shared hosting, and with functions missing
+// that its compatibility layer has to provide itself.
+const PROFILES = {
+    default: { about: "the image's own php.ini", ini: '' },
+    hardened: {
+        about: 'shared-hosting style: no exec family, no cURL, no remote fopen',
+        ini: 'disable_functions = exec,shell_exec,system,passthru,proc_open,popen,pcntl_exec,curl_init,curl_exec,curl_multi_exec,fsockopen,pfsockopen\nallow_url_fopen = Off\n',
+    },
+    minimal: {
+        about: 'json_encode and cURL missing (as on PHP < 5.2 or a stripped build); PHP 8+ only, older PHP cannot polyfill a disabled built-in',
+        ini: 'disable_functions = json_encode,curl_init,curl_exec,curl_setopt,curl_error\n', minMajor: 8,
+    },
+};
+
+function containerTargets(spec, profileSpec) {
     const known = fs.readFileSync(path.join(PHTEST, 'versions.list'), 'utf8').split('\n')
         .filter(l => l.trim() && !l.startsWith('#')).map(l => { const [v, type] = l.split('|'); return { v, type }; });
-    const want = spec === 'all' ? known : spec.split(',').map(v => known.find(k => k.v === v) || { v, type: null });
+    const want = spec === 'all' ? known : spec.split(',').map(v => known.find(k => k.v === v) || { v, type: 'official' });
+    const profiles = (profileSpec || 'default').split(',');
+    profiles.filter(p => !PROFILES[p]).forEach(p => { console.error(`unknown profile ${p} (have: ${Object.keys(PROFILES).join(', ')})`); process.exit(2); });
     const supported = v => { const [a, b] = v.split('.').map(Number); return a > 4 || (a === 4 && b >= 3); };
-    return want.map(({ v, type }, i) => {
-        const container = 'sf-test-' + v, legacy = type === 'legacy';
+    const targets = [];
+    for (const { v, type } of want) for (const profile of profiles) {
+        const legacy = type === 'legacy', major = parseInt(v, 10);
+        if (profile !== 'default' && (legacy || major < (PROFILES[profile].minMajor || 0))) continue; // see PROFILES
+        const container = `sf-test-${v}-${profile}`;
         const exec = (cmd, opts = {}) => lib.execAsync('docker', ['exec', container].concat(cmd), Object.assign({ stdio: ['ignore', 'pipe', 'ignore'] }, opts));
-        return {
-            name: 'PHP ' + v, v, legacy, supported: supported(v), container, port: 18100 + i,
+        targets.push({
+            name: `PHP ${v}` + (profile === 'default' ? '' : ` (${profile})`), v, profile, legacy, supported: supported(v), container, port: 18100 + targets.length,
             repo: '/var/www/html', work: '/work', state: '/tmp',
             php: file => exec((legacy ? ['php-cgi', '-q'] : ['php']).concat(file)),
             read: file => { try { return execFileSync('docker', ['exec', container, 'cat', '/tmp/' + file], { maxBuffer: lib.MAX_BUFFER, stdio: ['ignore', 'pipe', 'ignore'] }).toString(); } catch (e) { return ''; } },
-        };
-    });
+        });
+    }
+    return targets;
 }
 
 async function startContainer(t) {
-    const ini = t.legacy ? '/usr/local/lib/php.ini' : '/usr/local/etc/php/php.ini';
     const image = t.legacy ? 'phtest-php:' + t.v : `php:${t.v}-apache`;
+    const mounts = ['-v', lib.ROOT + ':/var/www/html:ro', '-v', work + ':/work:ro'];
+    const conf = path.join(PHTEST, 'conf', t.v, 'php.ini');
+    if (fs.existsSync(conf)) mounts.push('-v', conf + ':' + (t.legacy ? '/usr/local/lib/php.ini' : '/usr/local/etc/php/php.ini') + ':ro');
+    if (!t.legacy) {
+        const profileIni = path.join(work, `profile-${t.profile}.ini`);
+        fs.writeFileSync(profileIni, `; test/run.js profile "${t.profile}": ${PROFILES[t.profile].about}\n` + PROFILES[t.profile].ini);
+        mounts.push('-v', profileIni + ':/usr/local/etc/php/conf.d/zz-sussy-profile.ini:ro');
+    }
     try {
         execFileSync('docker', ['rm', '-f', t.container], { stdio: 'ignore' });
-        execFileSync('docker', ['run', '-d', '--rm', '--name', t.container, '-p', t.port + ':80',
-            '-v', lib.ROOT + ':/var/www/html:ro', '-v', work + ':/work:ro',
-            '-v', path.join(PHTEST, 'conf', t.v, 'php.ini') + ':' + ini + ':ro', image], { stdio: 'ignore' });
+        execFileSync('docker', ['run', '-d', '--rm', '--name', t.container, '-p', t.port + ':80'].concat(mounts, [image]), { stdio: 'ignore' });
         containers.push(t.container);
     } catch (e) {
-        return `container failed to start (image ${image} built?)`;
+        return `container failed to start (image ${image} built or pulled?)`;
     }
     for (let i = 0; i < 40; i++) {
         try { execFileSync('curl', ['-s', '-o', '/dev/null', `http://127.0.0.1:${t.port}/`]); break; } catch (e) { await sleep(250); }
@@ -100,7 +127,7 @@ async function startContainer(t) {
 const inTarget = (t, hostPath) => path.join(t.work, path.relative(work, hostPath));
 
 async function runUnitChecks(t) {
-    const job = lib.phpJob(path.join(work, `selfcheck-${t.v || 'local'}.php`), path.join(t.repo, 'test/php/selfcheck.php'),
+    const job = lib.phpJob(path.join(work, `selfcheck-${t.container || 'local'}.php`), path.join(t.repo, 'test/php/selfcheck.php'),
         selfcheck.vars(path.join(t.repo, 'main.php'), t.work));
     try {
         const raw = String(await t.php(inTarget(t, job)));
@@ -111,7 +138,7 @@ async function runUnitChecks(t) {
 }
 
 async function extractBenchmark(t) {
-    const job = lib.phpJob(path.join(work, `extract-${t.v || 'local'}.php`), path.join(t.repo, 'test/php/extract.php'), {
+    const job = lib.phpJob(path.join(work, `extract-${t.container || 'local'}.php`), path.join(t.repo, 'test/php/extract.php'), {
         SUSSY_MAIN: path.join(t.repo, 'main.php'), SUSSY_STATE: t.state,
         SUSSY_DIRS: bench.map(c => path.join(t.repo, path.relative(lib.ROOT, c.dir))), SUSSY_SKIP: inTarget(t, path.join(work, 'skip.txt')),
     });
@@ -224,8 +251,8 @@ function printSummary(results, ref) {
     results.forEach(r => { r.diff = r.scored ? r.scored.filter(d => signature(refByRel.get(d.rel) || { matched_tokens: [] }) !== signature(d)) : []; });
     if (results.length < 2) return refByRel;
     console.log(`\n== Summary (matches compared with ${ref.t.name})`);
-    console.log('PHP        unit checks  anomaly detected / FP      web  files matching differently');
-    results.forEach(r => console.log((r.t.v || r.t.name).padEnd(10) + ' ' +
+    console.log('PHP                    unit checks  anomaly detected / FP      web  files matching differently');
+    results.forEach(r => console.log((r.t.v ? r.t.v + (r.t.profile !== 'default' ? ' ' + r.t.profile : '') : r.t.name).padEnd(22) + ' ' +
         (r.unitFailures ? (r.unitFailures.length ? r.unitFailures.length + ' FAILED' : 'OK') : '-').padEnd(12) + ' ' +
         (r.anomaly ? `${r.anomaly.tp} / ${r.anomaly.fp}` : (r.t.supported ? 'FAIL' : 'n/a (below 4.3)')).padEnd(26) + ' ' +
         (r.web ? (r.web.ok ? 'OK' : 'FAIL') : '-').padEnd(4) + ' ' +
@@ -255,7 +282,7 @@ function printLists(results, ref, refByRel) {
 }
 
 (async () => {
-    const targets = args.php ? containerTargets(args.php) : [localTarget()];
+    const targets = args.php ? containerTargets(args.php, args.profile) : [localTarget()];
     const results = [];
     for (const t of targets) results.push(await runTarget(t));
     const withRows = results.filter(r => r.scored);
