@@ -1898,6 +1898,12 @@ if (isset($_POST['ajax_action'])) {
             // score from training, not a calibrated probability)
             const ML_THRESHOLD = 0.9;
             const _mlWeightCache = new Map();
+            // Hex digit -> value by char code: parseInt() per digit was 36x slower
+            const _mlNibble = new Uint8Array(128);
+            '0123456789abcdef'.split('').forEach(function (c, i) {
+                _mlNibble[c.charCodeAt(0)] = i;
+                _mlNibble[c.toUpperCase().charCodeAt(0)] = i;
+            });
 
             /**
              * ML webshell score (0..1, higher = more shell-like).
@@ -1915,12 +1921,16 @@ if (isset($_POST['ajax_action'])) {
                     _mlWeightCache.clear();
                     _mlWeightCache.set(model.weights, w);
                 }
+                // A bitmap from a different ML_BUCKETS than the model was trained with
+                if (hex.length * 4 !== w.length) return null;
                 let sum = 0;
-                for (let i = 0; i < hex.length; i++) {
-                    const nibble = parseInt(hex.charAt(i), 16);
-                    for (let b = 0; b < 4; b++) {
-                        if (nibble & (1 << b)) sum += w[i * 4 + b];
-                    }
+                for (let i = 0, k = 0; i < hex.length; i++, k += 4) {
+                    const nibble = _mlNibble[hex.charCodeAt(i) & 127];
+                    if (nibble === 0) continue;
+                    if (nibble & 1) sum += w[k];
+                    if (nibble & 2) sum += w[k + 1];
+                    if (nibble & 4) sum += w[k + 2];
+                    if (nibble & 8) sum += w[k + 3];
                 }
                 return 1 / (1 + Math.exp(-(model.bias + sum * model.scale)));
             }
