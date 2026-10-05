@@ -16,6 +16,7 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
 * **Shannon entropy calculation** – per-file byte entropy detects heavily obfuscated or encoded content
+* **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser, that flags files the rules miss (cross-validated: 91% of test webshells at 0.1% false positives)
 * **Client-side statistical analysis** – computes robust (median/MAD) Z-scores for size, mtime, tokens, suspicious token count, entropy and the ctime–mtime gap, plus residuals and file-owner rarity, to flag outliers
 * **Interactive web interface** with:
 
@@ -306,11 +307,14 @@ Z_{entropy} > T
 RareOwner
 \lor
 Residual > 5
+\lor
+P_{ML} \geq 0.9
 $$
 
 Where:
 
 * $T$ = configured Z-score threshold
+* $P_{ML}$ = the ML model's webshell probability (see below)
 * $\lor$ = logical OR
 
 SussyFinder additionally treats the following as anomalies:
@@ -335,6 +339,41 @@ own. Only content/threat-based signals decide anomaly status.
 
 This means the statistical analysis is used alongside deterministic security indicators rather than as the sole detection mechanism.
 
+### ML Model
+
+A tiny machine-learning model gives a second opinion. It is a logistic regression with 2048 int8 weights (a 4 KB hex string in `main.php`). Like the rest of the scoring it runs in plain JavaScript in the browser, with no WebAssembly, library or download needed.
+
+For each file, PHP's `mlFeatures()` turns the token stream into a set of short feature strings:
+
+* token-type bigrams (`T_VARIABLE (`, `T_EVAL (`, …)
+* names of called functions and of variables
+* the shape of string literals: length bucket, base64-looking, `\x..` escapes
+* bucketed longest-line length, token count and entropy
+
+Each string is hashed into one of 2048 buckets with `crc32`, and the bucket set is sent as a 512-character hex bitmap (`ml_features`). The browser adds up the weights of the set bits:
+
+$$
+P_{ML} = \sigma\left(b + s \sum_{i \in bits} w_i\right)
+$$
+
+A file with $P_{ML} \geq 0.9$ that no rule flagged gets an **ML** badge and counts as an anomaly. The model can only add flags; it never clears a file that the rules flag. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
+
+`node test/train-ml.js` trains the model on the test corpus and reports 5-fold cross-validated (held-out) rates. Byte-identical files always share a fold. Last run:
+
+| Detector                        | Webshells detected | False positives |
+| ------------------------------- | -----------------: | --------------: |
+| Rules only (anomaly)            |      171/210 (81%) |   18/1927 (0.9%) |
+| ML alone, $P_{ML} \geq 0.9$     |      191/210 (91%) |    1/1927 (0.1%) |
+| Rules or ML                     |      203/210 (97%) |   19/1927 (1.0%) |
+
+Many of the extra catches are ASP/JSP shells saved with a `.php` name. They contain no PHP tokens for the rules to match.
+
+The benign corpus is only WordPress and Laravel, so the model was also checked on about 54,000 files from projects it never saw: PHPMailer, Guzzle, Monolog, phpMyAdmin, Joomla, Drupal, Symfony and Magento 2. $P_{ML} \geq 0.9$ flagged 31 of them (0.06%; at most 0.1% per project, except 6 of PHPMailer's non-English language files). On the same projects the rules flag 0.4–7% of files.
+
+* `--write` — retrain on the whole corpus and store the new weights in `main.php` (needed after changing `mlFeatures()` or `ML_BUCKETS`)
+* `--check DIR` — report how many files in a directory you trust (e.g. your own framework) the model would flag
+* `--list` — print held-out misses, ML-only catches and false positives
+
 ### Benchmark
 
 `node test/run.js` runs the real PHP feature extraction and the real client-side scoring from `main.php` over `test/webshells` mixed with `test/WordPress` and `test/laravel`, and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. It also runs structural-detector self-checks and fails if any of them break.
@@ -345,6 +384,9 @@ This means the statistical analysis is used alongside deterministic security ind
 * `--tokens` — print how often each token appears in webshells vs. benign files, for tuning weights
 * `--threshold 3.5` — Z-score threshold to evaluate
 * `--php all` or `--php 4.3.11,8.5.6` — run on PHTest versions instead of the local `php`
+* `--dump rows.json` — save the extracted feature rows (`test/train-ml.js --rows` reuses them)
+
+Its `ml only` line scores the shipped model on the corpus it was trained on, so that number is optimistic. Use `test/train-ml.js` for held-out rates.
 
 ## Requirements
 
