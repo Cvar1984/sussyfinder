@@ -581,3 +581,555 @@
 	shallow = true
 	label = benign
 	family = dokuwiki
+[submodule "test/corpora/cakephp-2.0.0"]
+	path = test/corpora/cakephp-2.0.0
+	url = https://github.com/cakephp/cakephp.git
+	shallow = true
+	label = benign
+	family = cakephp
+[submodule "test/corpora/cakephp-2.10.0"]
+	path = test/corpora/cakephp-2.10.0
+	url = https://github.com/cakephp/cakephp.git
+	shallow = true
+	label = benign
+	family = cakephp
+[submodule "test/corpora/cakephp-3.0.0"]
+	path = test/corpora/cakephp-3.0.0
+	url = https://github.com/cakephp/cakephp.git
+	shallow = true
+	label = benign
+	family = cakephp
+[submodule "test/corpora/cakephp-3.8.0"]
+	path = test/corpora/cakephp-3.8.0
+	url = https://github.com/cakephp/cakephp.git
+	shallow = true
+	label = benign
+	family = cakephp
+[submodule "test/corpora/cakephp-4.0.0"]
+	path = test/corpora/cakephp-4.0.0
+	url = https://github.com/cakephp/cakephp.git
+	shallow = true
+	label = benign
+	family = cakephp
+[submodule "test/corpora/codeigniter-2.2.6"]
+	path = test/corpora/codeigniter-2.2.6
+	url = https://github.com/bcit-ci/CodeIgniter.git
+	shallow = true
+	label = benign
+	family = codeigniter
+[submodule "test/corpora/codeigniter-3.0.0"]
+	path = test/corpora/codeigniter-3.0.0
+	url = https://github.com/bcit-ci/CodeIgniter.git
+	shallow = true
+	label = benign
+	family = codeigniter
+[submodule "test/corpora/codeigniter-3.1.0"]
+	path = test/corpora/codeigniter-3.1.0
+	url = https://github.com/bcit-ci/CodeIgniter.git
+	shallow = true
+	label = benign
+	family = codeigniter
+[submodule "test/corpora/codeigniter4-v4.3.0"]
+	path = test/corpora/codeigniter4-v4.3.0
+	url = https://github.com/codeigniter4/CodeIgniter4.git
+	shallow = true
+	label = benign
+	family = codeigniter
+[submodule "test/corpora/dolibarr-10.0.0"]
+	path = test/corpora/dolibarr-10.0.0
+	url = https://github.com/Dolibarr/dolibarr.git
+	shallow = true
+	label = benign
+	family = dolibarr
+[submodule "test/corpora/dolibarr-3.5.0"]
+	path = test/corpora/dolibarr-3.5.0
+	url = https://github.com/Dolibarr/dolibarr.git
+	shallow = true
+	label = benign
+	family = dolibarr
+[submodule "test/corpora/drupal-10.0.0"]
+	path = test/corpora/drupal-10.0.0
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/drupal-11.0.0"]
+	path = test/corpora/drupal-11.0.0
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/drupal-5.23"]
+	path = test/corpora/drupal-5.23
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/drupal-8.0.0"]
+	path = test/corpora/drupal-8.0.0
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/drupal-8.9.0"]
+	path = test/corpora/drupal-8.9.0
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/drupal-9.0.0"]
+	path = test/corpora/drupal-9.0.0
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/drupal-9.5.0"]
+	path = test/corpora/drupal-9.5.0
+	url = https://github.com/drupal/drupal.git
+	shallow = true
+	label = benign
+	family = drupal
+[submodule "test/corpora/e107-v2.0.0"]
+	path = test/corpora/e107-v2.0.0
+	url = https://github.com/e107inc/e107.git
+	shallow = true
+	label = benign
+	family = e107
+[submodule "test/corpora/framework-v10.0.0"]
+	path = test/corpora/framework-v10.0.0
+	url = https://github.com/laravel/framework.git
+	shallow = true
+	label = benign
+	family = laravel
+[submodule "test/corpora/framework-v5.0.0"]
+	path = test/corpora/framework-v5.0.0
+	url = https://github.com/laravel/framework.git
+	shallow = true
+	label = benign
+	family = laravel
+[submodule "test/corpora/framework-v5.5.0"]
+	path = test/corpora/framework-v5.5.0
+	url = https://github.com/laravel/framework.git
+	shallow = true
+	label = benign
+	family = laravel
+[submodule "test/corpora/framework-v6.0.0"]
+	path = test/corpora/framework-v6.0.0
+	url = https://github.com/laravel/framework.git
+	shallow = true
+	label = benign
+	family = laravel
+[submodule "test/corpora/framework-v8.0.0"]
+	path = test/corpora/framework-v8.0.0
+	url = https://github.com/laravel/framework.git
+	shallow = true
+	label = benign
+	family = laravel
+[submodule "test/corpora/glpi-9.1"]
+	path = test/corpora/glpi-9.1
+	url = https://github.com/glpi-project/glpi.git
+	shallow = true
+	label = benign
+	family = glpi
+[submodule "test/corpora/glpi-9.5.0"]
+	path = test/corpora/glpi-9.5.0
+	url = https://github.com/glpi-project/glpi.git
+	shallow = true
+	label = benign
+	family = glpi
+[submodule "test/corpora/joomla-cms-3.0.0"]
+	path = test/corpora/joomla-cms-3.0.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/joomla-cms-3.10.0"]
+	path = test/corpora/joomla-cms-3.10.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/joomla-cms-3.5.0"]
+	path = test/corpora/joomla-cms-3.5.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/joomla-cms-3.9.0"]
+	path = test/corpora/joomla-cms-3.9.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/joomla-cms-4.0.0"]
+	path = test/corpora/joomla-cms-4.0.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/joomla-cms-4.4.0"]
+	path = test/corpora/joomla-cms-4.4.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/joomla-cms-5.0.0"]
+	path = test/corpora/joomla-cms-5.0.0
+	url = https://github.com/joomla/joomla-cms.git
+	shallow = true
+	label = benign
+	family = joomla
+[submodule "test/corpora/magento2-2.2.0"]
+	path = test/corpora/magento2-2.2.0
+	url = https://github.com/magento/magento2.git
+	shallow = true
+	label = benign
+	family = magento
+[submodule "test/corpora/magento2-2.4.0"]
+	path = test/corpora/magento2-2.4.0
+	url = https://github.com/magento/magento2.git
+	shallow = true
+	label = benign
+	family = magento
+[submodule "test/corpora/matomo-2.0"]
+	path = test/corpora/matomo-2.0
+	url = https://github.com/matomo-org/matomo.git
+	shallow = true
+	label = benign
+	family = matomo
+[submodule "test/corpora/matomo-3.0.0"]
+	path = test/corpora/matomo-3.0.0
+	url = https://github.com/matomo-org/matomo.git
+	shallow = true
+	label = benign
+	family = matomo
+[submodule "test/corpora/matomo-4.0.0"]
+	path = test/corpora/matomo-4.0.0
+	url = https://github.com/matomo-org/matomo.git
+	shallow = true
+	label = benign
+	family = matomo
+[submodule "test/corpora/mediawiki-1.23.0"]
+	path = test/corpora/mediawiki-1.23.0
+	url = https://github.com/wikimedia/mediawiki.git
+	shallow = true
+	label = benign
+	family = mediawiki
+[submodule "test/corpora/mediawiki-1.27.0"]
+	path = test/corpora/mediawiki-1.27.0
+	url = https://github.com/wikimedia/mediawiki.git
+	shallow = true
+	label = benign
+	family = mediawiki
+[submodule "test/corpora/mediawiki-1.31.0"]
+	path = test/corpora/mediawiki-1.31.0
+	url = https://github.com/wikimedia/mediawiki.git
+	shallow = true
+	label = benign
+	family = mediawiki
+[submodule "test/corpora/mediawiki-1.35.0"]
+	path = test/corpora/mediawiki-1.35.0
+	url = https://github.com/wikimedia/mediawiki.git
+	shallow = true
+	label = benign
+	family = mediawiki
+[submodule "test/corpora/mediawiki-1.39.0"]
+	path = test/corpora/mediawiki-1.39.0
+	url = https://github.com/wikimedia/mediawiki.git
+	shallow = true
+	label = benign
+	family = mediawiki
+[submodule "test/corpora/mybb-mybb-1800"]
+	path = test/corpora/mybb-mybb-1800
+	url = https://github.com/mybb/mybb.git
+	shallow = true
+	label = benign
+	family = mybb
+[submodule "test/corpora/mybb-mybb-1820"]
+	path = test/corpora/mybb-mybb-1820
+	url = https://github.com/mybb/mybb.git
+	shallow = true
+	label = benign
+	family = mybb
+[submodule "test/corpora/opencart-1.5.6.4"]
+	path = test/corpora/opencart-1.5.6.4
+	url = https://github.com/opencart/opencart.git
+	shallow = true
+	label = benign
+	family = opencart
+[submodule "test/corpora/opencart-2.0.0.0"]
+	path = test/corpora/opencart-2.0.0.0
+	url = https://github.com/opencart/opencart.git
+	shallow = true
+	label = benign
+	family = opencart
+[submodule "test/corpora/opencart-3.0.0.0"]
+	path = test/corpora/opencart-3.0.0.0
+	url = https://github.com/opencart/opencart.git
+	shallow = true
+	label = benign
+	family = opencart
+[submodule "test/corpora/opencart-4.0.0.0"]
+	path = test/corpora/opencart-4.0.0.0
+	url = https://github.com/opencart/opencart.git
+	shallow = true
+	label = benign
+	family = opencart
+[submodule "test/corpora/phpbb-3.1.0"]
+	path = test/corpora/phpbb-3.1.0
+	url = https://github.com/phpbb/phpbb.git
+	shallow = true
+	label = benign
+	family = phpbb
+[submodule "test/corpora/phpbb-3.2.0"]
+	path = test/corpora/phpbb-3.2.0
+	url = https://github.com/phpbb/phpbb.git
+	shallow = true
+	label = benign
+	family = phpbb
+[submodule "test/corpora/phpbb-3.3.0"]
+	path = test/corpora/phpbb-3.3.0
+	url = https://github.com/phpbb/phpbb.git
+	shallow = true
+	label = benign
+	family = phpbb
+[submodule "test/corpora/phpmyadmin-3-5-0"]
+	path = test/corpora/phpmyadmin-3-5-0
+	url = https://github.com/phpmyadmin/phpmyadmin.git
+	shallow = true
+	label = benign
+	family = phpmyadmin
+[submodule "test/corpora/phpmyadmin-4-0-0"]
+	path = test/corpora/phpmyadmin-4-0-0
+	url = https://github.com/phpmyadmin/phpmyadmin.git
+	shallow = true
+	label = benign
+	family = phpmyadmin
+[submodule "test/corpora/phpmyadmin-4-9-0"]
+	path = test/corpora/phpmyadmin-4-9-0
+	url = https://github.com/phpmyadmin/phpmyadmin.git
+	shallow = true
+	label = benign
+	family = phpmyadmin
+[submodule "test/corpora/phpmyadmin-5-0-0"]
+	path = test/corpora/phpmyadmin-5-0-0
+	url = https://github.com/phpmyadmin/phpmyadmin.git
+	shallow = true
+	label = benign
+	family = phpmyadmin
+[submodule "test/corpora/prestashop-1.5.0.0"]
+	path = test/corpora/prestashop-1.5.0.0
+	url = https://github.com/PrestaShop/PrestaShop.git
+	shallow = true
+	label = benign
+	family = prestashop
+[submodule "test/corpora/prestashop-1.7.0.0"]
+	path = test/corpora/prestashop-1.7.0.0
+	url = https://github.com/PrestaShop/PrestaShop.git
+	shallow = true
+	label = benign
+	family = prestashop
+[submodule "test/corpora/prestashop-8.0.0"]
+	path = test/corpora/prestashop-8.0.0
+	url = https://github.com/PrestaShop/PrestaShop.git
+	shallow = true
+	label = benign
+	family = prestashop
+[submodule "test/corpora/roundcubemail-1.0.0"]
+	path = test/corpora/roundcubemail-1.0.0
+	url = https://github.com/roundcube/roundcubemail.git
+	shallow = true
+	label = benign
+	family = roundcube
+[submodule "test/corpora/roundcubemail-1.4.0"]
+	path = test/corpora/roundcubemail-1.4.0
+	url = https://github.com/roundcube/roundcubemail.git
+	shallow = true
+	label = benign
+	family = roundcube
+[submodule "test/corpora/server-v20.0.0"]
+	path = test/corpora/server-v20.0.0
+	url = https://github.com/nextcloud/server.git
+	shallow = true
+	label = benign
+	family = nextcloud
+[submodule "test/corpora/symfony-v2.8.0"]
+	path = test/corpora/symfony-v2.8.0
+	url = https://github.com/symfony/symfony.git
+	shallow = true
+	label = benign
+	family = symfony
+[submodule "test/corpora/symfony-v3.4.0"]
+	path = test/corpora/symfony-v3.4.0
+	url = https://github.com/symfony/symfony.git
+	shallow = true
+	label = benign
+	family = symfony
+[submodule "test/corpora/symfony-v4.4.0"]
+	path = test/corpora/symfony-v4.4.0
+	url = https://github.com/symfony/symfony.git
+	shallow = true
+	label = benign
+	family = symfony
+[submodule "test/corpora/symfony-v5.4.0"]
+	path = test/corpora/symfony-v5.4.0
+	url = https://github.com/symfony/symfony.git
+	shallow = true
+	label = benign
+	family = symfony
+[submodule "test/corpora/symfony-v6.4.0"]
+	path = test/corpora/symfony-v6.4.0
+	url = https://github.com/symfony/symfony.git
+	shallow = true
+	label = benign
+	family = symfony
+[submodule "test/corpora/twig-v1.0.0"]
+	path = test/corpora/twig-v1.0.0
+	url = https://github.com/twigphp/Twig.git
+	shallow = true
+	label = benign
+	family = twig
+[submodule "test/corpora/twig-v2.0.0"]
+	path = test/corpora/twig-v2.0.0
+	url = https://github.com/twigphp/Twig.git
+	shallow = true
+	label = benign
+	family = twig
+[submodule "test/corpora/typo3-v10.4.0"]
+	path = test/corpora/typo3-v10.4.0
+	url = https://github.com/TYPO3/typo3.git
+	shallow = true
+	label = benign
+	family = typo3
+[submodule "test/corpora/woocommerce-2.0.0"]
+	path = test/corpora/woocommerce-2.0.0
+	url = https://github.com/woocommerce/woocommerce.git
+	shallow = true
+	label = benign
+	family = woocommerce
+[submodule "test/corpora/woocommerce-3.0.0"]
+	path = test/corpora/woocommerce-3.0.0
+	url = https://github.com/woocommerce/woocommerce.git
+	shallow = true
+	label = benign
+	family = woocommerce
+[submodule "test/corpora/woocommerce-5.0.0"]
+	path = test/corpora/woocommerce-5.0.0
+	url = https://github.com/woocommerce/woocommerce.git
+	shallow = true
+	label = benign
+	family = woocommerce
+[submodule "test/corpora/wordpress-1.5"]
+	path = test/corpora/wordpress-1.5
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-2.5"]
+	path = test/corpora/wordpress-2.5
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-2.9"]
+	path = test/corpora/wordpress-2.9
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-3.5"]
+	path = test/corpora/wordpress-3.5
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-3.9"]
+	path = test/corpora/wordpress-3.9
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-4.5"]
+	path = test/corpora/wordpress-4.5
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-4.9"]
+	path = test/corpora/wordpress-4.9
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-5.0"]
+	path = test/corpora/wordpress-5.0
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-5.5"]
+	path = test/corpora/wordpress-5.5
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-5.9"]
+	path = test/corpora/wordpress-5.9
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-6.0"]
+	path = test/corpora/wordpress-6.0
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-6.3"]
+	path = test/corpora/wordpress-6.3
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/wordpress-6.6"]
+	path = test/corpora/wordpress-6.6
+	url = https://github.com/WordPress/WordPress.git
+	shallow = true
+	label = benign
+	family = wordpress
+[submodule "test/corpora/yii-1.1.14"]
+	path = test/corpora/yii-1.1.14
+	url = https://github.com/yiisoft/yii.git
+	shallow = true
+	label = benign
+	family = yii
+[submodule "test/corpora/yii-1.1.25"]
+	path = test/corpora/yii-1.1.25
+	url = https://github.com/yiisoft/yii.git
+	shallow = true
+	label = benign
+	family = yii
+[submodule "test/corpora/yii2-2.0.0"]
+	path = test/corpora/yii2-2.0.0
+	url = https://github.com/yiisoft/yii2.git
+	shallow = true
+	label = benign
+	family = yii
+[submodule "test/corpora/yii2-2.0.15"]
+	path = test/corpora/yii2-2.0.15
+	url = https://github.com/yiisoft/yii2.git
+	shallow = true
+	label = benign
+	family = yii
+[submodule "test/corpora/zencart-v1.5.5"]
+	path = test/corpora/zencart-v1.5.5
+	url = https://github.com/zencart/zencart.git
+	shallow = true
+	label = benign
+	family = zencart
+[submodule "test/corpora/zencart-v1.5.7"]
+	path = test/corpora/zencart-v1.5.7
+	url = https://github.com/zencart/zencart.git
+	shallow = true
+	label = benign
+	family = zencart
