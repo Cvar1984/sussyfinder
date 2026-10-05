@@ -15,22 +15,22 @@ one self-contained file, no dependencies. `README.md` documents the maths
 | `main.php` | The scanner. The only file under active development. |
 | `main-cli.php` | Old CLI variant. **Parked**, see rules. |
 | `whitelist.txt` / `blacklist.txt` | MD5 lists, fetched from GitHub raw at runtime. `push.sh` dedupes and publishes them. |
-| `test/run.js` | The test suite: detector self-checks + detection benchmark on the local PHP, or with `--php all` on every PHTest version plus a page/AJAX smoke test. |
-| `test/ui.js` | Browser test of the page (charts, selection, hover linking, file-name escaping) in headless Chrome, on a temp copy of the corpus with both lists off. |
-| `test/webshells`, `test/WordPress`, `test/laravel` | Test corpora: malicious vs benign. Their working trees are dirty on purpose; never commit or "clean" them. |
-| `PHTest/` | Separate git repo: Docker images for PHP 4.1.2 … 8.5.6. See `PHTest/README.md`. |
+| `test/run` | The one entry point for tests, benchmark and ML training (`test/run` lists the commands; `test/README.md` maps the tree). |
+| `test/corpora/positive/`, `test/corpora/noise/` | Sample submodules: webshells vs legitimate code. Never commit changes inside them. |
+| `test/PHTest/` | Submodule: Docker builds of legacy PHP versions. See `test/PHTest/README.md`. |
 
 ## Hard rules
 
 1. **PHP4 syntax in all PHP.** `array(...)` never `[...]`; no closures, `fn`,
    `??`, `?:`, `?->`, namespaces, type hints, etc. Plain `cond ? a : b` is
    fine. Ignore IDE hints suggesting modern syntax.
-2. **Runtime floor is PHP 4.3** (4.1/4.2 lack `token_get_all`). Any function
-   newer than 4.3 must be guarded (`function_exists` / `isWorking()`) or given
-   a fallback, e.g. the `json_encode` fallback near the top of `main.php`.
-   Hosts often set `disable_functions`, so call risky builtins through
-   `isWorking()`. Tokenizer constants newer than PHP 4 (`T_DOC_COMMENT`,
-   `T_NULLSAFE_OBJECT_OPERATOR`) are only used via `defined()` + `constant()`.
+2. **Runtime floor is PHP 4.3** (4.1/4.2 lack `token_get_all`). Version and
+   host differences are settled once, in `main.php`'s compatibility section:
+   check a builtin with `functionAvailable()` (it honours `disable_functions`)
+   or call it through `callIfAvailable()`; write JSON with `jsonEncode()`
+   (never define `json_encode`: PHP 5/7 can't redefine a disabled builtin);
+   token constants a PHP lacks are defined there as negative sentinels, and
+   `getFileTokens()` turns PHP 8's new tokens back into PHP 7's.
 3. **No backward-compat shims.** When a field, format or signature changes,
    change every reader and writer in the same edit. Never accept "old or new".
    Client JS and server PHP ship together in one file, so there is no one to
@@ -39,10 +39,11 @@ one self-contained file, no dependencies. `README.md` documents the maths
    add cross-file sync checks unless the maintainer revives it.
 5. **Never let the scanner delete test data.** A blacklist hit `unlink()`s the
    file. Run the web UI / AJAX against the corpora only with the repo mounted
-   read-only (as `test/run.js --php` does). Never run `main-cli.php` on `test/`.
+   read-only (as `test/run matrix` does) or on a copy with the lists off (as
+   `test/run ui` does). Never run `main-cli.php` on `test/`.
 6. **Measure detection changes.** Any change to needles, weights, signals or
-   anomaly rules gets a before/after `node test/run.js` run, reported in
-   the summary; touching the tokenizer helpers also gets `--php all`. Don't
+   anomaly rules gets a before/after `test/run bench` run, reported in the
+   summary; touching the tokenizer helpers also gets `test/run matrix`. Don't
    claim numbers you didn't run.
 7. **Git:** commit only when asked, on `main` (the maintainer's workflow).
    Stage specific files; never `git add -A` (it would sweep in the corpora).
@@ -62,25 +63,31 @@ one self-contained file, no dependencies. `README.md` documents the maths
   (ignores string/HTML/comment content and method names after `->` / `::` /
   `function`; strips a leading `\`), `compareTokens` (isset lookups against the
   `$tokenNeedles` weight map), `findStructuralSignals` (pseudo-tokens, below),
-  `shannonEntropy` (whole-file bytes).
+  `shannonEntropy` (whole-file bytes). `codeTokens()` walks the tokens once
+  and `analyzeContent()` hands the result to all of them.
 - **Pseudo-tokens** are prefixed `@`, which no real PHP token can match:
   `@input_call` `$_GET['a']()`, `@preg_e`, `@concat_name` (name hidden in a
   string; the recovered name is added too), `@halt_payload`, `@dyn_call`,
   `@long_line`. Their weights live in `$tokenNeedles` next to real tokens.
 - **Client** scoring lives between `// --- Client-side threat scoring` and
-  `// --- End client-side threat scoring ---`. `test/run.js` executes exactly
-  that slice, so keep it self-contained (no DOM) and keep the markers.
+  `// --- End client-side threat scoring ---`. The tests (`test/lib/scanner.js`)
+  execute exactly that slice, so keep it self-contained (no DOM) and keep the
+  markers. Needle weights and roles come from PHP (`$tokenTiers`,
+  `$tokenRoles`); never copy needle lists into the JS.
   `HIGH_ENTROPY` there is the single entropy threshold used everywhere.
-- **`define('SUSSY_LIB', true); include 'main.php';`** stops right after
-  `$tokenNeedles` (before list downloads, AJAX and HTML). The tests rely on it.
+- **`define('SUSSY_LIB', true); include 'main.php';`** stops at the bootstrap
+  (before AJAX and HTML), after configuration, compatibility, engine, network
+  and actions are defined. The tests rely on it. Settings are constants made
+  with `settingDefault()`, so defining one first overrides it.
 - **Access:** there is deliberately no login or access key (the maintainer
   doesn't want one). Every AJAX request must carry the
   `X-Sussy-Request` header (the CSRF check); the page sends all of them
   through `postAction()`. Read request values with `inputValue()` /
   `postList()`, which undo magic quotes; never `$_POST` directly.
 - **AJAX:** POST `ajax_action` = `scan` | `process` | `mhr_check` | `mhr_unlink`.
-  Paths travel **`rawurlencode()`d in both directions** (`path`,
-  `duplicate_of`, `new_hashes`, scan lists, `mhr_unlink` results), so names
+  Paths travel **`rawurlencode()`d in both directions** (`path`, scan lists,
+  `mhr_unlink` results; the page works out `duplicate_of` from each row's md5),
+  so names
   that aren't valid UTF-8 survive JSON. The page decodes them for display
   (`decodePath()`) and sends back `pathRaw`. Lists go as **comma-separated
   strings** (`postList()`), not arrays or JSON: one field stays under
@@ -88,8 +95,8 @@ one self-contained file, no dependencies. `README.md` documents the maths
   as a separator in a request: hardened hosts (Suhosin's default
   `disallow_nul`, some WAFs) strip or drop such values, which silently emptied
   every scan on a real host. Responses go
-  through `ajaxRespond()`, which folds in captured PHP warnings and falls back
-  to `utf8Safe()` so the body is never empty.
+  through `ajaxRespond()`, which folds in captured PHP warnings and encodes
+  with `jsonEncode()` (UTF-8-safe), so the body is never empty.
 - **`mhr_unlink`** deletes only files whose *current* md5 MHR confirms in that
   same request. Never make it trust the browser's path list.
 - **Listing** (`getSortedByPattern` → `recursiveScan`): `$pattern` is one
@@ -110,9 +117,10 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `escapeHtml()` for HTML, and never put data inside inline `onclick="f('…')"`:
   use a `data-` attribute (the document click listener handles `data-copy`,
   `data-vt`, `data-filter-path`).
-- **Downloads** (`urlFileArray`, `mhrSubmitHashes`) use verified TLS (the
-  blacklist deletes files) and try cURL, then `file_get_contents`, then `file()`. Treat anything but a non-empty
-  string/array as failure: PHP 4.3's `file_get_contents` returns NULL, not false.
+- **Downloads** all go through `httpRequest()`: verified TLS (the blacklist
+  deletes files), a fresh cURL handle per request, else PHP streams; it
+  returns the status and body. Hash lists are kept in the scan's own session
+  (`hashList()`), never taken from the browser.
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it
   returns a clear error. A `json_decode` fallback was deliberately not added:
   legacy builds have no HTTPS, so it could never run.
@@ -121,22 +129,26 @@ one self-contained file, no dependencies. `README.md` documents the maths
 ## Testing
 
 ```sh
-php -l main.php                       # syntax (also run with a PHP 4 binary via PHTest if you touched PHP)
-node test/run.js                      # local php: detector self-checks + detection rates; exits 1 on failure
-node test/run.js --list               # + missed webshells and false positives
-node test/run.js --tokens             # + per-token webshell vs benign counts, for tuning weights
-node test/run.js --php all            # every PHTest version (docker + built images, ~5 min) + page/AJAX smoke test
-node test/run.js --php 4.3.11,8.5.6   # just those versions
-node test/ui.js                       # the page in headless Chrome: charts, selection, hover, escaping (~10 s)
+php -l main.php           # syntax
+test/run                  # the commands; test/README.md maps the tree
+test/run unit             # PHP self-check + JS unit tests (seconds)
+test/run bench --list     # detection rates on the local php, with misses and false positives
+test/run bench --tokens   # + per-token webshell vs benign counts, for tuning weights
+test/run matrix           # every PHP version x php.ini profile in Docker + page/AJAX check
+test/run ui               # the page in headless Chrome (CHROME_BIN)
+test/run all              # unit + bench + ui
 ```
 
-Baseline (threshold 3.5, local PHP and every container alike): **anomaly
-171/211 detected, 18/1927 false positives; score ≥ 8: 161/211, 10 FP;
-score ≥ 15: 151/211, 1 FP.** (211 since `$pattern` also matches `*.php.txt`.)
+Baseline (threshold 3.5, local PHP and every container of `test/run matrix`
+alike, PHP 5.6 to 8.5 under the default, hardened and minimal profiles):
+**anomaly 207/207 detected, 11/1928 false positives; score ≥ 8: 207/207,
+10 FP; score ≥ 15: 184/207, 1 FP.** (3 shell-corpus files with no server
+code are not counted.) On 5.6 to 7.2, one WordPress file
+(`class-wp-script-modules.php`) loses `implode` (a tokenizer change in 7.3).
 Each run also checks the listing fixture (FIFO, symlink to `/`, symlinked
 file, double extensions, `.user.ini`, a Latin-1 and a quoted name) and, per
 container, that a request without the CSRF header is refused.
-Expected `--php all` result: 4.1.2/4.2.3 fail (below the floor, reported as
+Expected `test/run matrix --php all` result (PHTest's legacy builds): 4.1.2/4.2.3 fail (below the floor, reported as
 n/a, not a failure). 4.3.0 through 8.5.6 pass all self-checks and the web
 check. Known, accepted differences:
 - PHP 4.3.0's tokenizer segfaults on ~94 modern WordPress files. The runner
@@ -147,7 +159,7 @@ check. Known, accepted differences:
   run on those hosts anyway.
 - `total_tokens` differs slightly on old PHP (tokenizer differences).
 
-`run.js` zeroes mtime/ctime because the corpora were copied at different
+The benchmark zeroes mtime/ctime because the corpora were copied at different
 times (the webshells keep 2024 mtimes) and would otherwise be "detected" for
 free. So the ctime-gap, mtime and rare-owner signals are **not** measured by
 the bench, and neither is the `uploads/` rule (no corpus file lives there).
@@ -181,10 +193,10 @@ the bench, and neither is the `uploads/` rule (no corpus file lives there).
   `<?=`, `<?php` and `<?xml` are left alone.
 - The ML score is part of the threat score (`mlPoints()`: 0 at or below
   `ML_FLOOR` 0.6, 8 at `ML_THRESHOLD` 0.9, 10 at 1.0), not a separate flag.
-  `ruleScore` keeps the rules-only part. Floor sweep on `node test/run.js`:
+  `ruleScore` keeps the rules-only part. Floor sweep on `test/run bench`:
   0.5 and lower add false positives, 0.7 and higher lose catches; 0.6 keeps
   207/211 and 18 FP while HIGH RISK goes 179 → 207 and CRITICAL 151 → 173.
-  That benchmark is in-sample for the model; `node test/train-ml.js` repeats
+  That benchmark is in-sample for the model; `test/run train` repeats
   the sweep on held-out scores and needs the corpora (fetch them outside any
   web root: `/home/http` is served by Apache).
 - About 15 of the remaining misses are ASP/JSP/Perl shells saved as `.php`;

@@ -1,5 +1,5 @@
-// The ML pipeline as plain functions, used by test/train-ml.js (the CLI) and
-// tested by test/unit.js: feature extraction with a per-corpus cache, sample
+// The ML pipeline as plain functions, used by `test/run train` and tested by
+// `test/run unit`: feature extraction with a per-corpus cache, sample
 // building (labels, de-duplication), shell clustering, stable folds and caps,
 // logistic-regression training on packed features (in worker threads), int8
 // quantization and the scorer that mirrors main.php's mlScore().
@@ -7,10 +7,13 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
-const lib = require('./lib');
+const { MAIN, PHP_JOBS, ROW_CACHE: CACHE_DIR } = require('./paths');
+const { phpJob, runResumable, execAsync, parseRows } = require('./php');
+const { isRunnable, contentOnly } = require('./corpora');
+const { constant, extractorSource } = require('./scanner');
+const { sha1, groupBy } = require('./util');
 
-const EXTRACT_PHP = path.join(__dirname, 'php', 'extract.php');
-const CACHE_DIR = path.join(__dirname, 'corpora', '.rows');
+const EXTRACT_PHP = path.join(PHP_JOBS, 'extract.php');
 
 // --- Features ---
 
@@ -18,7 +21,7 @@ const CACHE_DIR = path.join(__dirname, 'corpora', '.rows');
  * Cache key: main.php's extractor and test/php/extract.php. Not the checkout
  * path, so a clone elsewhere reuses the same cache.
  */
-const featureKey = () => lib.sha1(lib.extractorSource() + fs.readFileSync(EXTRACT_PHP, 'utf8')).slice(0, 12);
+const featureKey = () => sha1(extractorSource() + fs.readFileSync(EXTRACT_PHP, 'utf8')).slice(0, 12);
 const cacheFile = (c, key) => path.join(CACHE_DIR, `${c.name}-${(c.commit || 'local').slice(0, 10)}-${key}.jsonl`);
 
 /**
@@ -29,11 +32,11 @@ const cacheFile = (c, key) => path.join(CACHE_DIR, `${c.name}-${(c.commit || 'lo
 async function extractTo(dir, outFile) {
     const state = fs.mkdtempSync(path.join(os.tmpdir(), 'sussy-ml-'));
     try {
-        const job = lib.phpJob(path.join(state, 'job.php'), EXTRACT_PHP, {
-            SUSSY_MAIN: lib.MAIN, SUSSY_STATE: state, SUSSY_DIRS: [dir], SUSSY_SKIP: path.join(state, 'skip'), SUSSY_RELATIVE: '1',
+        const job = phpJob(path.join(state, 'job.php'), EXTRACT_PHP, {
+            SUSSY_MAIN: MAIN, SUSSY_STATE: state, SUSSY_DIRS: [dir], SUSSY_SKIP: path.join(state, 'skip'), SUSSY_RELATIVE: '1',
         });
         const read = name => { try { return fs.readFileSync(path.join(state, name), 'utf8'); } catch (e) { return ''; } };
-        const { summary, crashed } = await lib.runResumable({ run: () => lib.execAsync('php', [job]), read, skipFile: path.join(state, 'skip') });
+        const { summary, crashed } = await runResumable({ run: () => execAsync('php', [job]), read, skipFile: path.join(state, 'skip') });
         if (!summary) throw new Error('feature extraction failed for ' + dir);
         crashed.forEach(f => process.stderr.write(`PHP crashed on ${f}, skipped\n`));
         fs.copyFileSync(path.join(state, 'rows'), outFile + '.tmp');
@@ -81,7 +84,7 @@ function decodeBits(hex) {
 /**
  * Labelled, de-duplicated samples from the cached rows of each corpus.
  * Each corpus is rule-scored on its own (as a scan of it would be). Dropped:
- * .htaccess files, shell-collection files that can't run (lib.isRunnable),
+ * .htaccess files, shell-collection files that can't run (isRunnable),
  * and exact copies (by MD5); a file that also ships in a benign project is
  * benign. Keeps `hex` for the first `keepHex` samples (scorer parity checks).
  */
@@ -89,12 +92,12 @@ function buildSamples(corpora, ctx, { keepHex = 500 } = {}) {
     const all = [];
     const dropped = { htaccess: 0, notCode: 0, conflicts: 0 };
     for (const c of corpora) {
-        const raw = lib.contentOnly(lib.parseRows(fs.readFileSync(c.cache, 'utf8')));
-        const scored = ctx.analyzeData(raw, lib.constant(ctx, 'Z_THRESHOLD'));
+        const raw = contentOnly(parseRows(fs.readFileSync(c.cache, 'utf8')));
+        const scored = ctx.analyzeData(raw, constant(ctx, 'Z_THRESHOLD'));
         raw.forEach((d, i) => {
             if (!d.ml_features) return;
             if (d.is_htaccess) { dropped.htaccess++; return; }
-            if (c.label === 'shell' && !lib.isRunnable(d)) { dropped.notCode++; return; }
+            if (c.label === 'shell' && !isRunnable(d)) { dropped.notCode++; return; }
             all.push({
                 id: c.name + '/' + d.path, corpus: c.name, family: c.family, label: c.label === 'shell' ? 1 : 0, md5: d.md5,
                 foreign: !d.has_php, bits: decodeBits(d.ml_features), hex: all.length < keepHex ? d.ml_features : null,
@@ -150,8 +153,8 @@ function assignGroups(samples, buckets, similar) {
  */
 function assignFolds(samples, folds) {
     for (const label of [1, 0]) {
-        const groups = [...lib.groupBy(samples.filter(d => d.label === label), d => d.group)]
-            .map(([key, members]) => ({ members, tie: lib.sha1(key) }))
+        const groups = [...groupBy(samples.filter(d => d.label === label), d => d.group)]
+            .map(([key, members]) => ({ members, tie: sha1(key) }))
             .sort((a, b) => b.members.length - a.members.length || (a.tie < b.tie ? -1 : 1));
         const sizes = new Array(folds).fill(0);
         for (const g of groups) {
@@ -168,8 +171,8 @@ function assignFolds(samples, folds) {
  */
 function capPerCorpus(benign, cap) {
     const out = [];
-    for (const list of lib.groupBy(benign, d => d.corpus).values()) {
-        out.push(...list.map(d => ({ d, h: lib.sha1(d.md5) })).sort((a, b) => (a.h < b.h ? -1 : 1)).slice(0, cap).map(x => x.d));
+    for (const list of groupBy(benign, d => d.corpus).values()) {
+        out.push(...list.map(d => ({ d, h: sha1(d.md5) })).sort((a, b) => (a.h < b.h ? -1 : 1)).slice(0, cap).map(x => x.d));
     }
     return out;
 }
@@ -255,7 +258,7 @@ function quantize(model) {
     return { scale: +scale.toPrecision(6), bias: +model.b.toPrecision(6), weights: hex };
 }
 
-/** main.php's mlScore() arithmetic on decoded bits (test/unit.js checks they agree) */
+/** main.php's mlScore() arithmetic on decoded bits (test/run unit checks they agree) */
 function scorer(model) {
     const w = new Int8Array(model.weights.length / 2);
     for (let i = 0; i < w.length; i++) w[i] = parseInt(model.weights.substr(i * 2, 2), 16);

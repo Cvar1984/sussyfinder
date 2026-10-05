@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+// SussyFinder's tests, benchmark and ML training: the one entry point.
+//
+//   test/run                     the commands, and where everything is
+//   test/run <command> --help    a command's options
+//   test/run all                 unit tests, benchmark and browser test
+require('./lib/cli').main(process.argv.slice(2)).then(code => process.exit(code));

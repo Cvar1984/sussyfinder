@@ -2121,7 +2121,7 @@ if (isset($_POST['ajax_action'])) {
             // --- Client-side threat scoring (offloaded from PHP) ---
 
             // Default robust Z-score above which a statistic is an outlier
-            // (the Z-threshold control; test/run.js and test/train-ml.js use it too)
+            // (the Z-threshold control; test/run bench and train use it too)
             const Z_THRESHOLD = 3.5;
             // Threat score at which a file is an anomaly (HIGH RISK), and CRITICAL
             const ANOMALY_SCORE = 8;
@@ -2129,7 +2129,7 @@ if (isset($_POST['ajax_action'])) {
 
             // Whole-file Shannon entropy (bits/byte, computed server-side) above
             // this means packed/encoded content: 98/202 test webshells vs 1/1927
-            // benign files (node test/run.js).
+            // benign files (test/run bench).
             const HIGH_ENTROPY = 5.5;
 
             // Needles by role ($tokenRoles in PHP: critical, obfuscation, upload,
@@ -2213,7 +2213,7 @@ if (isset($_POST['ajax_action'])) {
 
             // Tiny ML model: logistic regression over the hashed token features
             // from mlFeatures() in PHP (one bit per bucket), int8 weights as hex.
-            // Trained and cross-validated by node test/train-ml.js --write, which
+            // Trained and cross-validated by test/run train --write, which
             // writes ml-model.json; the server embeds it in the page as ML_MODEL
             // (null when unavailable or disabled).
             // Score at or above which the model alone flags a file (a ranking
@@ -2221,11 +2221,11 @@ if (isset($_POST['ajax_action'])) {
             const ML_THRESHOLD = 0.9;
             // The ML score adds threat points: none at or below ML_FLOOR, rising
             // linearly to 8 (the anomaly / HIGH RISK bar) at ML_THRESHOLD and 10 at 1.0.
-            // 0.6 on node test/run.js: lower adds false positives, higher loses catches
-            // (node test/train-ml.js reports the same sweep on held-out scores)
+            // 0.6 on test/run bench: lower adds false positives, higher loses catches
+            // (test/run train reports the same sweep on held-out scores)
             const ML_FLOOR = 0.6;
 
-            // floor: ML_FLOOR unless given (test/train-ml.js sweeps it)
+            // floor: ML_FLOOR unless given (test/run train sweeps it)
             function mlPoints(ml, floor) {
                 if (floor === undefined) floor = ML_FLOOR;
                 if (ml === null || ml <= floor) return 0;
@@ -2426,7 +2426,7 @@ if (isset($_POST['ajax_action'])) {
                     // while being the single largest false-positive source — plain file
                     // size just isn't a meaningful malice signal on its own. zSusp
                     // dropped out for the same reason (0 unique catches, 5 false
-                    // positives in node test/run.js): the weighted threatScore
+                    // positives in test/run bench): the weighted threatScore
                     // already covers "many suspicious tokens". The residual (more
                     // matched tokens than the file's size predicts) dropped out once
                     // the recon bonus scored what it was catching: its only unique

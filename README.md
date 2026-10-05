@@ -364,17 +364,9 @@ To turn the model off, set `_ML_` to `false` (see [Configuration](#configuration
 
 #### Training data
 
-The test tree:
+The samples live in `test/corpora/`: webshell collections in `positive/` (20 submodules) and legitimate frameworks and CMSs across many releases in `noise/` (169 submodules). [`test/README.md`](test/README.md) maps the whole test tree.
 
-| Path | Contents |
-| ---- | -------- |
-| `test/` | `unit.js` (unit tests), `run.js` (benchmark, per PHP version), `ui.js` (browser tests), `train-ml.js` (ML training); `lib.js` and `ml.js` hold what they share |
-| `test/php/` | the PHP jobs they run: `extract.php` (feature extraction) and `selfcheck.php` (PHP-side unit checks), kept PHP 4.3-safe |
-| `test/PHTest/` | Docker sandbox with every PHP version from 4.1 to 8.5 |
-| `test/corpora/positive/` | webshell collections (20 submodules) |
-| `test/corpora/noise/` | legitimate frameworks and CMSs across many releases (169 submodules) |
-
-Every sample is a git submodule pinned to an exact commit. Its folder sets its label: `positive` is a shell, `noise` is legitimate code. In `.gitmodules`, a sample entry can also carry `family` (corpora held out together in cross-validation, such as every WordPress release), `subdir` (the part of a repository that holds samples) and `benchmark = true` (part of `test/run.js`'s quick benchmark set). Git ignores these extra keys; `test/train-ml.js` reads them. The samples are:
+Every sample is a git submodule pinned to an exact commit. Its folder sets its label: `positive` is a shell, `noise` is legitimate code. In `.gitmodules`, a sample entry can also carry `family` (corpora held out together in cross-validation, such as every WordPress release), `subdir` (the part of a repository that holds samples) and `benchmark = true` (part of the quick benchmark set). Git ignores these extra keys; the test tooling reads them. The samples are:
 
 * **Webshells:** public webshell collections, plus well-known standalone shells.
 * **Legitimate code:** frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and about 50 more), each across many releases, such as WordPress 1.5 to 7.2-alpha, Drupal 5 to 11 and Joomla 2.5 to 5.0.
@@ -382,10 +374,9 @@ Every sample is a git submodule pinned to an exact commit. Its folder sets its l
 Submodules aren't downloaded by a normal clone. Fetch what you need:
 
 ```bash
-git submodule update --init test/corpora/positive/blackarch-webshells \
-    test/corpora/noise/wordpress-7.2-alpha test/corpora/noise/laravel-skeleton   # benchmark set
-git submodule update --init test/PHTest                                           # PHP version sandbox
-git submodule update --init test/corpora/                                         # every sample, over 10 GB
+test/run setup            # the benchmark set
+test/run setup --phtest   # the legacy PHP builds
+test/run setup --all      # every sample, over 10 GB
 ```
 
 Corpus submodules are marked `shallow`, so a corpus pinned to a branch tip downloads a single commit. Old releases pinned below the tip come with some history.
@@ -396,11 +387,11 @@ Before training, the data is cleaned by:
 
 * removing exact duplicates by MD5
 * removing `.htaccess` files
-* removing shell-collection files with no server code at all, such as README pages. A file counts as server code when it holds PHP or `main.php`'s `@foreign_code` rule sees ASP, JSP or Perl CGI in it; `test/run.js` uses the same test
+* removing shell-collection files with no server code at all, such as README pages. A file counts as server code when it holds PHP or `main.php`'s `@foreign_code` rule sees ASP, JSP or Perl CGI in it; the benchmark uses the same test
 
 #### Accuracy
 
-`node test/train-ml.js` reports 5-fold cross-validated rates, so every file is scored by a model that never saw it. Run it for current figures:
+`test/run train` reports 5-fold cross-validated rates, so every file is scored by a model that never saw it. Run it for current figures:
 
 * Near-identical shells (feature-set Jaccard ≥ 0.8) share a fold, so a variant of a training shell can't count as a detection.
 * Whole project families share a fold, for example every WordPress version. So false positives are always measured on projects the model never trained on.
@@ -423,29 +414,31 @@ Options:
 * `--list`: print held-out misses and false positives.
 * `--cap N`: the maximum number of legitimate files per corpus used in training (default 2000, so huge projects don't drown out the rest).
 
-### Benchmark
+### Testing
 
-`node test/unit.js` runs the unit tests in a few seconds, without any samples or Docker:
+Every test runs through one command, `test/run`; [`test/README.md`](test/README.md) explains the layout.
 
-* in PHP: the structural detectors on small snippets (calls through variables, names hidden in strings, `preg_replace` with `/e`, ASP/JSP/Perl in PHP-named files, ...), which names the directory listing returns (a FIFO, a symlink leading outside, a non-UTF-8 name), and which `ml-model.json` files `main.php` accepts;
-* in JS: labelling, feature decoding, fold and cap stability, training (separates a separable set; worker threads give identical weights), and that the trainer's scorer equals `main.php`'s `mlScore()`.
+```bash
+test/run                  # the commands
+test/run setup            # fetch the benchmark samples (once)
+test/run all              # unit + bench + ui, with a summary: run before a commit
+```
 
-`node test/run.js` runs the PHP unit checks, then the real PHP feature extraction and the real client-side scoring from `main.php` over the benchmark samples (`benchmark = true` in `.gitmodules`: `blackarch-webshells` mixed with `wordpress-7.2-alpha` and `laravel-skeleton`), and prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured there. Files in the webshell corpus with no server code at all (a saved 404 page, a `robots.txt`) can't run, so they aren't counted as missed shells; the run lists them by name. It fails if a unit check fails.
+* `test/run unit`: unit tests in a few seconds, with no samples and no Docker. In PHP, it checks the structural detectors on snippets (calls through variables, names hidden in strings, `preg_replace` with `/e`, ASP/JSP/Perl in PHP-named files and more). It also checks which names the directory listing returns (a FIFO, a symlink leading outside, a non-UTF-8 name) and which `ml-model.json` files `main.php` accepts. In JS, it checks labelling, feature decoding, fold and cap stability, training, that the trainer's scorer equals `main.php`'s `mlScore()`, and that moving the Z-threshold re-flags exactly like a full rescore.
+* `test/run bench`: the PHP self-check, then the real feature extraction and the real client-side scoring from `main.php` over the benchmark samples (`blackarch-webshells` mixed with `wordpress-7.2-alpha` and `laravel-skeleton`). It prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured. Files in the webshell corpus with no server code at all aren't counted as missed shells; the run lists them by name. Its `ml only` line is in-sample for the model, so use `test/run train` for held-out rates. Options:
+  * `--list`: print missed webshells and false positives
+  * `--tokens`: print per-token webshell vs. benign counts, for tuning weights
+  * `--threshold 3.5`: the Z-score threshold to evaluate (default: `main.php`'s `Z_THRESHOLD`)
+  * `--no-ml`: score with the rules alone
+  * `--dump rows.json`: save every scored row, for analysis
+* `test/run matrix`: the same on every PHP version (5.6 to 8.5 by default, `--php all` for the PHTest builds back to 4.1) under each php.ini profile, in Docker:
+  * `default`: the image's own php.ini
+  * `hardened`: shared-hosting style, with no exec family, no cURL and no remote fopen
+  * `minimal`: no `json_encode` and no cURL
 
-`node test/run.js --php all` does the same on every PHP version in `test/PHTest/` (Docker, PHP 4.1–8.5), plus a page/AJAX smoke test per version, and lists files that match differently than on the newest PHP.
-
-* `--list`: print missed webshells and false positives
-* `--tokens`: print how often each token appears in webshells vs. benign files, for tuning weights
-* `--threshold 3.5`: Z-score threshold to evaluate (default: `main.php`'s `Z_THRESHOLD`)
-* `--php all` or `--php 4.3.11,8.5.6`: run on PHTest versions instead of the local `php`
-* `--no-ml`: score with the rules alone
-* `--dump rows.json`: save every row after scoring (features, Z-scores, threat score, ML points), for analysis
-
-Its `ml only` line scores the shipped model on the corpus it was trained on, so that number is optimistic. Use `test/train-ml.js` for held-out rates.
-
-`node test/ui.js` drives the page in headless Chrome with real mouse and keyboard events: chart selection, hover linking, filters, zoom, HiDPI sizing and resizing, and that a file named `a');alert(1);('.php` runs no script. It scans a temporary copy of the corpus with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips (exit 0) when there is none; `--require-browser` makes that a failure instead.
-
-All four scripts reject unknown options, so a misspelt flag is an error rather than silently ignored.
+  Each also gets a page/AJAX check. It ends with a table and lists files that match differently than on the newest PHP. `test/run setup --docker` pulls the images.
+* `test/run ui`: drives the page in headless Chrome with real mouse and keyboard events. It covers chart selection, hover linking, filters, the threshold control, zoom, HiDPI sizing and resizing, and checks that a file named `a');alert(1);('.php` runs no script. It scans a temporary copy of the samples with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips when there is none (`--require-browser` makes that a failure).
+* `test/run train`: see [Accuracy](#accuracy).
 
 ## Requirements
 

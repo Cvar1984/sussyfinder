@@ -1,62 +1,44 @@
-// Browser test for the page's interactive parts (charts, selection, hover
-// linking, file-name escaping), driven in headless Chrome over the DevTools
-// protocol with real mouse and keyboard events.
+// `test/run ui`: the page's interactive parts in headless Chrome, with real
+// mouse and keyboard events: charts, selection, hover linking, filters, the
+// threshold control, zoom, HiDPI sizing, and file-name escaping.
 //
 // It builds a sandbox in a temp dir: a copy of main.php with the whitelist and
 // blacklist off (so nothing is ever deleted), copies of the benchmark webshells
 // and of WordPress's wp-includes with distinct dates, and a file named
 // a');alert(1);('.php. Then it serves it with `php -S` and scans it.
-//
-// Usage: node test/ui.js     (needs php and Chrome/Chromium: on PATH as
-//        google-chrome or chromium, or set CHROME_BIN; exits 0 with SKIP
-//        when there is none, or fails instead with --require-browser)
-const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
-const lib = require('./lib');
+const { MAIN } = require('../lib/paths');
+const { loadCorpora, corpus } = require('../lib/corpora');
+const { tempDir } = require('../lib/cleanup');
+const { sleep } = require('../lib/util');
+const { findChrome, spawnManaged, openPage } = require('../lib/browser');
 
-const args = lib.cli({
-    'require-browser': { type: 'boolean', help: 'fail instead of skipping when no browser is found' },
-}, 'Usage: node test/ui.js [options]');
 const VIEWPORT = { width: 1400, height: 1000 }, DPR = 2;
-const box = fs.mkdtempSync(path.join(os.tmpdir(), 'sussy-ui-'));
-const DATA = path.join(box, 'data');
-const PORT = 18000 + Math.floor(Math.random() * 1000), CDP = PORT + 1000;
-const URL = `http://127.0.0.1:${PORT}/main.php`;
-const children = [];
-// Chrome keeps writing its profile until it has exited, so wait for that before removing the sandbox
-async function finish(code) {
-    children.forEach(c => c.kill());
-    await Promise.all(children.map(c => c.exitCode !== null || c.signalCode ? null : new Promise(r => c.once('exit', r))));
-    // Its helper processes can still be writing for a moment after that
-    try {
-        fs.rmSync(box, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
-    } catch (e) {
-        console.log(`warning: could not remove ${box}: ${e.message}`);
-    }
-    process.exit(code);
-}
-process.on('SIGINT', () => finish(130));
+let DATA;
+// The open page's helpers, set by run()
+let send, js, waitFor, mouse, click, pressEscape, setViewport, dialogs, errors;
 
-/** Chrome from CHROME_BIN or PATH; as root it only starts with --no-sandbox */
-function findChrome() {
-    const bin = process.env.CHROME_BIN || ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].find(b => {
-        try { execFileSync('which', [b], { stdio: 'ignore' }); return true; } catch (e) { return false; }
-    });
-    return bin && { bin, flags: process.getuid && process.getuid() === 0 ? ['--no-sandbox'] : [] };
-}
+let fails = 0;
+const check = (name, ok, info = '') => { console.log((ok ? 'PASS ' : 'FAIL ') + name + (info ? '  (' + info + ')' : '')); if (!ok) fails++; };
+/** Scroll chart i into view; resolves to its on-screen rectangle */
+const focusChart = async i => {
+    await js(`_charts[${i}].canvas.scrollIntoView({block: "center"}); true`); await sleep(200);
+    return js(`(() => { const r = _charts[${i}].canvas.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; })()`);
+};
+const selectionSize = () => js('_chartSelection ? _chartSelection.size : 0');
+const tableRows = () => js('document.querySelectorAll("#result tr[data-path]").length');
 
-function buildSandbox() {
+function buildSandbox(box) {
     fs.mkdirSync(path.join(box, 'www'));
-    let page = fs.readFileSync(lib.MAIN, 'utf8');
+    let page = fs.readFileSync(MAIN, 'utf8');
     // No hash lists (the sandbox may be offline), set the way main.php's settings are overridden
     if (!page.startsWith('<?php')) throw new Error('main.php no longer starts with <?php');
     page = "<?php define('_WHITELIST_', false); define('_BLACKLIST_', false);" + page.slice('<?php'.length);
     fs.writeFileSync(path.join(box, 'www', 'main.php'), page);
-    const corpora = lib.loadCorpora();
-    fs.cpSync(path.join(lib.corpus('blackarch-webshells', corpora).dir, 'php'), path.join(DATA, 'shells'), { recursive: true });
-    const wp = path.join(lib.corpus('wordpress-7.2-alpha', corpora).dir, 'wp-includes');
+    const corpora = loadCorpora();
+    fs.cpSync(path.join(corpus('blackarch-webshells', corpora).dir, 'php'), path.join(DATA, 'shells'), { recursive: true });
+    const wp = path.join(corpus('wordpress-7.2-alpha', corpora).dir, 'wp-includes');
     fs.mkdirSync(path.join(DATA, 'wp'));
     fs.readdirSync(wp).filter(f => f.endsWith('.php')).forEach(f => fs.copyFileSync(path.join(wp, f), path.join(DATA, 'wp', f)));
     const xss = path.join(DATA, "a');alert(1);('.php");
@@ -66,49 +48,6 @@ function buildSandbox() {
     stamp(path.join(DATA, 'shells'), new Date('2024-03-01T10:00:00Z'));
     stamp(path.join(DATA, 'wp'), new Date('2025-06-15T12:00:00Z'));
     fs.utimesSync(xss, new Date('2026-01-10T09:00:00Z'), new Date('2026-01-10T09:00:00Z'));
-}
-
-// --- DevTools protocol plumbing ---
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-let ws, seq = 0; const pending = new Map(); const errors = []; let dialogs = 0;
-const send = (method, params = {}) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
-const js = async expr => {
-    const r = await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
-    if (r.exceptionDetails) throw new Error(expr + ' -> ' + JSON.stringify(r.exceptionDetails).slice(0, 300));
-    return r.result.value;
-};
-const waitFor = async (expr, ms = 60000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await js(expr)) return true; await sleep(200); } return false; };
-const mouse = (type, x, y, extra = {}) => send('Input.dispatchMouseEvent', Object.assign({ type, x, y, button: 'left', clickCount: 1 }, extra));
-const click = async (x, y, modifiers = 0) => { await mouse('mousePressed', x, y, { modifiers }); await mouse('mouseReleased', x, y, { modifiers }); await sleep(300); };
-const pressEscape = async () => { await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }); await sleep(200); };
-const setViewport = width => send('Emulation.setDeviceMetricsOverride', { width, height: VIEWPORT.height, deviceScaleFactor: DPR, mobile: false });
-/** Scroll chart i into view; resolves to its on-screen rectangle */
-const focusChart = async i => {
-    await js(`_charts[${i}].canvas.scrollIntoView({block: "center"}); true`); await sleep(200);
-    return js(`(() => { const r = _charts[${i}].canvas.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height }; })()`);
-};
-const selectionSize = () => js('_chartSelection ? _chartSelection.size : 0');
-const tableRows = () => js('document.querySelectorAll("#result tr[data-path]").length');
-let fails = 0;
-const check = (name, ok, info = '') => { console.log((ok ? 'PASS ' : 'FAIL ') + name + (info ? '  (' + info + ')' : '')); if (!ok) fails++; };
-
-async function connect(chrome) {
-    children.push(spawn(chrome.bin, chrome.flags.concat(['--headless=new', '--remote-debugging-port=' + CDP, '--user-data-dir=' + path.join(box, 'chrome'),
-        '--force-device-scale-factor=' + DPR, `--window-size=${VIEWPORT.width},${VIEWPORT.height}`, 'about:blank']), { stdio: 'ignore' }));
-    let target;
-    for (let i = 0; i < 100 && !target; i++) { try { target = await (await fetch(`http://127.0.0.1:${CDP}/json/new?` + URL, { method: 'PUT' })).json(); } catch (e) { await sleep(200); } }
-    if (!target) throw new Error(`${chrome.bin} did not start (see --no-sandbox, CHROME_BIN)`);
-    ws = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise(r => ws.onopen = r);
-    ws.onmessage = m => {
-        const d = JSON.parse(m.data);
-        if (d.id && pending.has(d.id)) { const p = pending.get(d.id); pending.delete(d.id); d.error ? p.rej(new Error(JSON.stringify(d.error))) : p.res(d.result); }
-        if (d.method === 'Runtime.exceptionThrown') errors.push(d.params.exceptionDetails.exception ? d.params.exceptionDetails.exception.description : d.params.exceptionDetails.text);
-        if (d.method === 'Page.javascriptDialogOpening') { dialogs++; send('Page.handleJavaScriptDialog', { accept: true }); }
-    };
-    await send('Runtime.enable'); await send('Page.enable');
-    await setViewport(VIEWPORT.width);
-    await send('Page.navigate', { url: URL }); await waitFor('document.readyState === "complete"');
 }
 
 // --- Scenarios ---
@@ -191,26 +130,48 @@ async function testHostileFileName() {
     await js(`(() => { document.getElementById('searchInput').value = 'alert'; applySearch(); return true; })()`); await sleep(200);
     const link = await js(`(() => { const el = document.querySelector('#result .file-link'); if (!el) return null; el.scrollIntoView({block: 'center'}); const r = el.getBoundingClientRect(); return { x: r.left + 5, y: r.top + 5, text: el.textContent }; })()`);
     if (link) await click(link.x, link.y);
-    check("clicking the file named a');alert(1);('.php runs no script", !!link && dialogs === 0, link ? link.text.split('/').pop() : 'row not found');
+    check("clicking the file named a');alert(1);('.php runs no script", !!link && dialogs() === 0, link ? link.text.split('/').pop() : 'row not found');
 }
 
-(async () => {
-    const chrome = findChrome();
-    if (!chrome) {
-        console.log('SKIP: no Chrome/Chromium found (put it on PATH or set CHROME_BIN)');
-        return finish(args['require-browser'] ? 1 : 0);
-    }
-    buildSandbox();
-    children.push(spawn('php', ['-d', 'error_log=' + path.join(box, 'php-errors.log'), '-S', '127.0.0.1:' + PORT, '-t', path.join(box, 'www')], { stdio: 'ignore' }));
-    await connect(chrome);
-    await testScanAndCharts();
-    await testBrushSelection(await tableRows());
-    await testTimeline();
-    await testHoverLinking();
-    await testFilters();
-    await testZoomAndResize();
-    await testHostileFileName();
-    check('no JavaScript errors on the page', errors.length === 0, errors.join(' | ').slice(0, 300));
-    console.log(fails ? fails + ' FAILED' : 'all passed');
-    await finish(fails ? 1 : 0);
-})().catch(e => { console.log('ERROR', e.message); finish(1); });
+module.exports = {
+    name: 'ui',
+    summary: 'the page in headless Chrome: charts, selection, hover, filters, escaping (~30 s)',
+    about: `
+Scans a sandbox copy of the benchmark webshells and some WordPress files
+(whitelist and blacklist off, so nothing is deleted) through the real page,
+served by php -S, and drives it with real mouse and keyboard events.
+
+Needs php and Chrome or Chromium: on PATH (google-chrome, chromium) or named
+by CHROME_BIN. Without a browser it prints SKIP and passes, unless
+--require-browser.`,
+    options: {
+        'require-browser': { type: 'boolean', help: 'fail instead of skipping when no browser is found' },
+    },
+    examples: ['CHROME_BIN=/usr/bin/chromium test/run ui'],
+    async run(args) {
+        const chrome = findChrome();
+        if (!chrome) {
+            console.log('SKIP: no Chrome/Chromium found (put it on PATH or set CHROME_BIN)');
+            return args['require-browser'] ? 1 : 0;
+        }
+        fails = 0;
+        const box = tempDir('ui');
+        DATA = path.join(box, 'data');
+        buildSandbox(box);
+        const port = 18000 + Math.floor(Math.random() * 1000);
+        spawnManaged('php', ['-d', 'error_log=' + path.join(box, 'php-errors.log'), '-S', '127.0.0.1:' + port, '-t', path.join(box, 'www')]);
+        const page = await openPage({ chrome, url: `http://127.0.0.1:${port}/main.php`, profileDir: path.join(box, 'chrome'), viewport: VIEWPORT, dpr: DPR, port: port + 1000 });
+        ({ send, js, waitFor, mouse, click, pressEscape, setViewport, dialogs, errors } = page);
+
+        await testScanAndCharts();
+        await testBrushSelection(await tableRows());
+        await testTimeline();
+        await testHoverLinking();
+        await testFilters();
+        await testZoomAndResize();
+        await testHostileFileName();
+        check('no JavaScript errors on the page', errors.length === 0, errors.join(' | ').slice(0, 300));
+        console.log(fails ? fails + ' FAILED' : 'all passed');
+        return fails ? 1 : 0;
+    },
+};

@@ -1,8 +1,9 @@
 <?php
-// Unit checks run inside PHP for test/unit.js (and per PHP version by
-// test/run.js): structural signals for each snippet in $SUSSY_CASES, the
+// Unit checks run inside PHP for `test/run unit` (and per PHP version by
+// `test/run matrix`; test/lib/selfcheck.js writes the inputs and judges the
+// output): structural signals for each snippet in $SUSSY_CASES, the
 // listing of the fixture directory $SUSSY_FIXTURE, and ml-model.json
-// validation. Set by the prelude (test/lib.js phpJob): $SUSSY_MAIN,
+// validation. Set by the prelude (test/lib/php.js phpJob): $SUSSY_MAIN,
 // $SUSSY_CASES, $SUSSY_FIXTURE, $SUSSY_MODELS. Must stay PHP 4.3-safe.
 define('SUSSY_LIB', true);
 include $SUSSY_MAIN;

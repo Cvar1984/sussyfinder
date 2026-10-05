@@ -1,11 +1,11 @@
 <?php
-// Feature extraction job for test/run.js and test/train-ml.js: runs main.php's
-// real scanner over $SUSSY_DIRS and appends one JSON row per file to
-// $SUSSY_STATE/rows. Set by the prelude that includes this file (test/lib.js
-// phpJob): $SUSSY_MAIN, $SUSSY_STATE, $SUSSY_DIRS, $SUSSY_SKIP, and
+// Feature extraction job for `test/run bench`, `matrix` and `train`: runs
+// main.php's real scanner over $SUSSY_DIRS and appends one JSON row per file
+// to $SUSSY_STATE/rows. Set by the prelude that includes this file
+// (test/lib/php.js phpJob): $SUSSY_MAIN, $SUSSY_STATE, $SUSSY_DIRS, $SUSSY_SKIP, and
 // optionally $SUSSY_RELATIVE ('1': row paths relative to the scanned dir).
 //
-// Must stay PHP 4.3-safe: test/run.js runs it on every PHTest version.
+// Must stay PHP 4.3-safe: `test/run matrix` runs it on every PHP version.
 // PHP itself can crash on a file (4.3.0's tokenizer segfaults on some modern
 // code), so finished paths go to $SUSSY_STATE/done and the current one to
 // $SUSSY_STATE/progress; the runner adds a crashing path to $SUSSY_SKIP and
