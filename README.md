@@ -79,9 +79,9 @@ $$
 Mean and standard deviation are pulled toward the very outliers being hunted (and toward huge vendor files), which lets them hide. SussyFinder uses the median and the median absolute deviation (MAD) instead:
 
 $$
-\tilde{x} = \operatorname{median}(x_1, \dots, x_n)
+\tilde{x} = \mathrm{median}(x_1, \dots, x_n)
 \qquad
-\mathrm{MAD} = \operatorname{median}(|x_i - \tilde{x}|)
+\mathrm{MAD} = \mathrm{median}(|x_i - \tilde{x}|)
 $$
 
 The spread is scaled so it matches a standard deviation on normally distributed data:
@@ -291,11 +291,11 @@ $$
 Last, the ML model's score $P_{\mathrm{ML}}$ (see [ML Model](#ml-model)) adds points. They are added after the multipliers above, so they are never multiplied:
 
 $$
-\text{Score}' = \text{Score} + \begin{cases}
+\text{Score}' = \text{Score} + \left\{ \begin{array}{ll}
 0 & P_{\mathrm{ML}} \leq 0.6 \\
-8 \cdot \dfrac{P_{\mathrm{ML}} - 0.6}{0.9 - 0.6} & 0.6 < P_{\mathrm{ML}} < 0.9 \\
-8 + 2 \cdot \dfrac{P_{\mathrm{ML}} - 0.9}{1 - 0.9} & P_{\mathrm{ML}} \geq 0.9
-\end{cases}
+8 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.6}{0.9 - 0.6} & 0.6 < P_{\mathrm{ML}} < 0.9 \\
+8 + 2 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.9}{1 - 0.9} & P_{\mathrm{ML}} \geq 0.9
+\end{array} \right.
 $$
 
 A file the model scores 0.9 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
@@ -309,11 +309,13 @@ A file is considered anomalous when one or more statistical or security conditio
 Conceptually:
 
 $$
-\text{anomaly} = \text{Score} \geq 8
-\lor Z_{\mathrm{entropy}} > T
-\lor \lvert Z_{\mathrm{mtime}} \rvert > T
-\lor \lvert Z_{\mathrm{gap}} \rvert > T
-\lor \text{rare owner}
+\begin{array}{rl}
+\text{anomaly} = & \text{Score} \geq 8 \\
+& \lor \; Z_{\mathrm{entropy}} > T \\
+& \lor \; |Z_{\mathrm{mtime}}| > T \\
+& \lor \; |Z_{\mathrm{gap}}| > T \\
+& \lor \; \text{rare owner}
+\end{array}
 $$
 
 Where:
