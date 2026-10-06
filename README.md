@@ -332,6 +332,21 @@ File size (`Z_size`), the suspicious-token count Z-score (`Z_suspicious`) and th
 
 `.htaccess` files and byte-identical duplicates get their own badges and counters, but neither is flagged as an anomaly for that alone. A shared Apache config file or a stock duplicate (e.g. WordPress's many identical "Silence is golden" `index.php` stubs) isn't suspicious by itself. Only content and threat signals decide anomaly status.
 
+### Threat Matrix
+
+The first chart plots the two parts of the threat score against each other. Its y-axis is the rule score on a log scale, because it runs from 0 to the thousands and the anomaly bar at 8 must stay visible. Its x-axis is the ML score. The dashed lines are the scanner's own bars (`ANOMALY_SCORE` 8 and `ML_THRESHOLD` 0.9), so each quadrant says which detector flags a file. Each dot is coloured by the file's verdict, as in the table: critical, anomaly or not flagged. Without a model, the x-axis shows the share of a file's tokens that are needles.
+
+On held-out data (`test/run train`, every sample, ML scores from models that never saw the file), the quadrants split as follows:
+
+| Quadrant | Shells | Legitimate files |
+| -------- | ------ | ---------------- |
+| Rules + ML | 63.4% | 49 files (0.01%) |
+| Rules only | 5.3% | 2.6% |
+| ML only | 25.7% | 0.1% |
+| Neither | 5.6% | 97.3% |
+
+A file in the top right is almost certainly a shell. Most of the rules' false positives sit in the top left, so a file there is worth reading before acting on it.
+
 ### ML Model
 
 A tiny machine-learning model gives a second opinion. It is a logistic regression with 2048 int8 weights, stored as a 4 KB file, `ml-model.json`, in this repository. Like the rest of the scoring it runs in plain JavaScript in the browser, with no WebAssembly or library needed.

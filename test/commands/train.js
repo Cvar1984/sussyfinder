@@ -65,6 +65,13 @@ function printReport(mal, ben, clusters, ctx) {
         line(`  anomaly, floor ${f}${f === floor ? ' *' : ''}`, d => d.ruleAnomaly || combined(d) >= anomalyScore);
         line(`  score >= ${criticalScore}, floor ${f}`, d => combined(d) >= criticalScore);
     });
+    // The page's Threat Matrix: rule score against the ML score, split at the same bars
+    console.log(`\nThreat Matrix quadrants (rule score >= ${anomalyScore} vs held-out ML >= ${threshold}):`);
+    [['rules + ML', true, true], ['rules only', true, false], ['ML only', false, true], ['neither', false, false]].forEach(([label, rules, model]) => {
+        const inQ = d => (d.ruleScore >= anomalyScore) === rules && (d.cvScore >= threshold) === model;
+        const r = rates(mal, ben, inQ);
+        console.log(`  ${label.padEnd(12)} shells ${String(r.tp).padStart(5)} (${pct(r.tp, r.nMal).padStart(6)})   benign ${String(r.fp).padStart(6)} (${pct(r.fp, r.nBen).padStart(6)})`);
+    });
     const php = mal.filter(d => !d.foreign);
     console.log(`\nPHP files only (ASP/JSP/CGI in PHP-named files left out):`);
     [['rules only', d => d.ruleAnomaly], [`rules or ml >= ${threshold}`, d => d.ruleAnomaly || d.cvScore >= threshold]].forEach(([label, hit]) => {

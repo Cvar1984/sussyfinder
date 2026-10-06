@@ -3344,68 +3344,88 @@ if (isset($_POST['ajax_action'])) {
                     return;
                 }
 
-                // 1. THREAT MATRIX: suspicious-token ratio vs composite threat score
+                // 1. THREAT MATRIX: the threat score's two parts against each other.
+                // Up: the rule score (log scale: it runs from 0 to the thousands, and
+                // the anomaly bar at 8 must stay visible). Right: the ML score. The
+                // dividers are the scanner's own bars (ANOMALY_SCORE, ML_THRESHOLD), so
+                // the quadrants say which detector flags a file; each dot is coloured
+                // by the file's verdict, as in the table. Without a model the x axis
+                // falls back to the share of a file's tokens that are needles.
                 {
-                    const X_SPLIT = 0.15, Y_SPLIT = 8.0;
-                    const pts = valid.map(d => ({ d: d, ratio: d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0, score: d.threatScore || 0 }));
-                    let maxRatio = 0.01, maxScore = 1;
-                    pts.forEach(p => { if (p.ratio > maxRatio) maxRatio = p.ratio; if (p.score > maxScore) maxScore = p.score; });
-                    const fit = () => ({ xLo: 0, xHi: maxRatio * 1.15 + 0.001, yLo: 0, yHi: maxScore * 1.12 + 0.5 });
+                    const withMl = valid.some(d => d.mlScore !== null);
+                    const xOf = withMl ? (d => d.mlScore || 0) : (d => d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0);
+                    const toY = v => Math.log10(1 + Math.max(0, v));   // rule score -> axis units
+                    const pts = valid.map(d => ({ d: d, x: xOf(d), y: toY(d.ruleScore || 0) }));
+                    const maxX = withMl ? 1 : Math.max(0.01, ...pts.map(p => p.x)) * 1.1;
+                    const maxY = Math.max(toY(CRITICAL_SCORE) * 1.3, ...pts.map(p => p.y)) * 1.08;
+                    const fit = () => ({ xLo: 0, xHi: maxX, yLo: 0, yHi: maxY });
                     let view = fit();
                     const area = c => ({ left: 70, top: 30, right: c.w - 30, bottom: c.h - 45 });
-                    const ratioOf = d => d.total_tokens > 0 ? (d.suspCount || 0) / d.total_tokens : 0;
+                    const verdictColor = d => isCritical(d) ? '#ff4444' : (d.isAnomaly ? '#ffaa00' : '#5a6b7a');
 
-                    makeChart(grid, 'Threat Matrix: Token Suspicion Ratio vs Threat Score', {
+                    makeChart(grid, withMl ? 'Threat Matrix: Rule Score vs ML Score' : 'Threat Matrix: Rule Score vs Suspicious Token Ratio', {
                         brush: 'xy',
                         draw: function (c) {
                             const ctx = c.ctx, b = area(c), W = b.right - b.left, H = b.bottom - b.top;
                             const xR = view.xHi - view.xLo || 1, yR = view.yHi - view.yLo || 1;
                             const sx = v => b.left + ((v - view.xLo) / xR) * W;
-                            const sy = v => b.bottom - ((v - view.yLo) / yR) * H;
+                            const sy = t => b.bottom - ((t - view.yLo) / yR) * H;
                             drawAxes(ctx, b.left, b.top, b.right, b.bottom);
 
-                            // quadrant dividers and labels
-                            const qx = sx(X_SPLIT), qy = sy(Y_SPLIT);
-                            ctx.save(); ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+                            // dividers at the scanner's own bars
+                            const qy = sy(toY(ANOMALY_SCORE)), qx = withMl ? sx(ML_THRESHOLD) : null;
+                            ctx.save(); ctx.strokeStyle = '#666'; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
                             ctx.beginPath();
-                            if (qx > b.left && qx < b.right) { ctx.moveTo(qx, b.top); ctx.lineTo(qx, b.bottom); }
                             if (qy > b.top && qy < b.bottom) { ctx.moveTo(b.left, qy); ctx.lineTo(b.right, qy); }
+                            if (qx !== null && qx > b.left && qx < b.right) { ctx.moveTo(qx, b.top); ctx.lineTo(qx, b.bottom); }
                             ctx.stroke(); ctx.restore();
-                            ctx.font = '10px Ubuntu Mono, monospace';
-                            ctx.textAlign = 'right'; ctx.fillStyle = '#ff4444'; ctx.fillText('OBFUSCATED WEBSHELL', b.right - 4, b.top + 14);
-                            ctx.textAlign = 'left';  ctx.fillStyle = '#ffaa00'; ctx.fillText('RCE SCRIPT', b.left + 4, b.top + 14);
-                            ctx.textAlign = 'right'; ctx.fillStyle = '#4a8bc2'; ctx.fillText('DENSE NORMAL', b.right - 4, b.bottom - 6);
-                            ctx.textAlign = 'left';  ctx.fillStyle = '#777';    ctx.fillText('BENIGN', b.left + 4, b.bottom - 6);
-
-                            // ticks
-                            ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace';
-                            for (let t = 0; t <= 5; t++) {
-                                const vy = view.yLo + (yR * t) / 5, vx = view.xLo + (xR * t) / 5;
-                                ctx.textAlign = 'right';  ctx.fillText(vy.toFixed(1), b.left - 4, sy(vy) + 4);
-                                ctx.textAlign = 'center'; ctx.fillText((vx * 100).toFixed(1) + '%', sx(vx), b.bottom + 14);
+                            ctx.font = '10px Ubuntu Mono, monospace'; ctx.fillStyle = '#999';
+                            if (withMl) {
+                                ctx.textAlign = 'right'; ctx.fillText('RULES + ML', b.right - 4, b.top + 14);
+                                ctx.textAlign = 'left';  ctx.fillText('RULES ONLY', b.left + 4, b.top + 14);
+                                ctx.textAlign = 'right'; ctx.fillText('ML ONLY', b.right - 4, b.bottom - 6);
+                                ctx.textAlign = 'left';  ctx.fillText('NEITHER', b.left + 4, b.bottom - 6);
+                            } else {
+                                ctx.textAlign = 'left'; ctx.fillText('RULES FLAG', b.left + 4, b.top + 14);
+                                ctx.fillText('BELOW THE RULES BAR', b.left + 4, b.bottom - 6);
                             }
 
-                            // axis labels
+                            // y ticks at round scores (log axis); x ticks evenly
+                            ctx.fillStyle = '#888'; ctx.font = '10px Ubuntu Mono, monospace'; ctx.textAlign = 'right';
+                            [0, 1, 3, ANOMALY_SCORE, CRITICAL_SCORE, 30, 100, 300, 1000, 3000, 10000].forEach(v => {
+                                const y = sy(toY(v));
+                                if (y >= b.top - 1 && y <= b.bottom + 1) ctx.fillText(String(v), b.left - 4, y + 4);
+                            });
+                            ctx.textAlign = 'center';
+                            for (let t = 0; t <= 5; t++) {
+                                const vx = view.xLo + (xR * t) / 5;
+                                ctx.fillText(withMl ? vx.toFixed(2) : (vx * 100).toFixed(1) + '%', sx(vx), b.bottom + 14);
+                            }
+
+                            // axis labels and colour key
                             ctx.fillStyle = '#aaa'; ctx.font = '11px Ubuntu Mono, monospace'; ctx.textAlign = 'center';
-                            ctx.fillText('Suspicious Token Ratio (wheel: zoom · Shift+drag: pan · double-click: reset)', b.left + W / 2, b.bottom + 30);
+                            ctx.fillText((withMl ? 'ML Score' : 'Suspicious Token Ratio') + ' (wheel: zoom · Shift+drag: pan · double-click: reset)', b.left + W / 2, b.bottom + 30);
                             ctx.save(); ctx.translate(14, b.top + H / 2); ctx.rotate(-Math.PI / 2);
-                            ctx.fillText('Threat Score', 0, 0); ctx.restore();
+                            ctx.fillText('Rule Score (log)', 0, 0); ctx.restore();
+                            let lx = b.left + W / 2 - 150;
+                            [['#ff4444', 'critical'], ['#ffaa00', 'anomaly'], ['#5a6b7a', 'not flagged']].forEach(([color, label]) => {
+                                ctx.fillStyle = color; ctx.beginPath(); ctx.arc(lx, b.top - 12, 4, 0, Math.PI * 2); ctx.fill();
+                                ctx.fillStyle = '#aaa'; ctx.textAlign = 'left'; ctx.fillText(label, lx + 8, b.top - 8);
+                                lx += ctx.measureText(label).width + 30;
+                            });
 
                             const dots = [];
                             pts.forEach(p => {
-                                const x = sx(p.ratio), y = sy(p.score);
+                                const x = sx(p.x), y = sy(p.y);
                                 if (x < b.left || x > b.right || y < b.top || y > b.bottom) return;
-                                let color = '#555';
-                                if (p.score >= Y_SPLIT && p.ratio >= X_SPLIT) color = '#ff4444';
-                                else if (p.score >= Y_SPLIT) color = '#ffaa00';
-                                else if (p.ratio >= X_SPLIT) color = '#4a8bc2';
-                                dots.push({ x: x, y: y, d: p.d, color: color });
+                                dots.push({ x: x, y: y, d: p.d, color: verdictColor(p.d) });
                             });
                             drawDots(c, dots, 3.5);
                         },
                         hit: (c, x, y) => fileHit(dotAt(c, x, y), d => [
-                            ['Token Ratio', (ratioOf(d) * 100).toFixed(1) + '%'],
-                            ['Matched / Total', (d.suspCount || 0) + ' / ' + d.total_tokens],
+                            ['Rule Score', (d.ruleScore || 0).toFixed(1)],
+                            ['ML Score', d.mlScore === null ? 'n/a' : d.mlScore.toFixed(3) + ' (+' + d.mlPoints.toFixed(1) + ' points)'],
+                            ['Verdict', isCritical(d) ? 'critical' : (d.isAnomaly ? 'anomaly' : 'not flagged')],
                         ]),
                         pathsIn: dotsIn,
                         zoom: function (c, x, y, f) {
@@ -3553,7 +3573,11 @@ if (isset($_POST['ajax_action'])) {
                                 ctx.fillRect(b.left, y, w, h);
                                 const name = String(d.path || '').split('/').pop() || d.path;
                                 drawLabel(ctx, name.length > 26 ? name.slice(0, 23) + '...' : name, b.left - 8, y + h / 2 + 4, 'right');
-                                drawLabel(ctx, score.toFixed(1), Math.min(b.right - 4, b.left + w + 6), y + h / 2 + 4, 'left');
+                                // The value goes after the bar, or inside its end when there's no room
+                                const text = score.toFixed(1);
+                                ctx.font = '12px Ubuntu Mono, monospace';
+                                if (b.left + w + 6 + ctx.measureText(text).width <= c.w - 4) drawLabel(ctx, text, b.left + w + 6, y + h / 2 + 4, 'left');
+                                else drawLabel(ctx, text, b.left + w - 6, y + h / 2 + 4, 'right', '#fff');
                                 ctx.globalAlpha = 1;
                                 if (d.path === _chartHover) {
                                     ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;

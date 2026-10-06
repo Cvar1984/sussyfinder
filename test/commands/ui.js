@@ -65,7 +65,7 @@ async function testScanAndCharts() {
 }
 
 async function testBrushSelection(total) {
-    const r = await focusChart(0); // brush the high-score half of the Threat Matrix
+    const r = await focusChart(0); // brush the high-rule-score band of the Threat Matrix
     await mouse('mousePressed', r.x + 72, r.y + 31); await mouse('mouseMoved', r.x + r.w - 31, r.y + 120); await mouse('mouseReleased', r.x + r.w - 31, r.y + 120);
     await sleep(300);
     const sel = await selectionSize(), rows = await tableRows();
@@ -73,6 +73,12 @@ async function testBrushSelection(total) {
     check('table shows only the selection', rows === sel, rows + ' rows');
     check('selection bar visible', await js('document.getElementById("chartSelectionBar").style.display === "block"'));
     check('selected files are the high scorers', await js('analyzedData.filter(d => _chartSelection.has(d.path)).every(d => d.threatScore > 0)'));
+    check('Threat Matrix colours every dot by its file\'s verdict', await js(`_charts[0].marks.every(m =>
+        m.color === (isCritical(m.d) ? '#ff4444' : m.d.isAnomaly ? '#ffaa00' : '#5a6b7a'))`), await js('_charts[0].marks.length') + ' dots');
+    check('Threat Matrix puts files over the rule bar above the files under it', await js(`(() => {
+        const m = _charts[0].marks, over = m.filter(p => p.d.ruleScore >= ANOMALY_SCORE), under = m.filter(p => p.d.ruleScore < ANOMALY_SCORE);
+        return over.length > 0 && under.length > 0 && Math.max(...over.map(p => p.y)) < Math.min(...under.map(p => p.y));
+    })()`));
     await pressEscape();
     check('Escape clears selection', await js('_chartSelection === null') && await tableRows() === total);
 }
@@ -133,6 +139,21 @@ async function testHostileFileName() {
     check("clicking the file named a');alert(1);('.php runs no script", !!link && dialogs() === 0, link ? link.text.split('/').pop() : 'row not found');
 }
 
+/** PNGs of the page's parts, for looking at a change: charts.png, matrix.png, table.png */
+async function screenshots(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    const shot = async (file, selector) => {
+        await js(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block: "start"}); true`); await sleep(400);
+        const r = await js(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { x: r.left + scrollX, y: r.top + scrollY, width: r.width, height: Math.min(r.height, 4000) }; })()`);
+        const png = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: Object.assign({ scale: 1 }, r) });
+        fs.writeFileSync(path.join(dir, file), Buffer.from(png.data, 'base64'));
+        console.log('saved ' + path.join(dir, file));
+    };
+    await shot('charts.png', '#chartsGrid');
+    await shot('matrix.png', '#chartsGrid .chart-box');
+    await shot('table.png', '#result');
+}
+
 module.exports = {
     name: 'ui',
     summary: 'the page in headless Chrome: charts, selection, hover, filters, escaping (~30 s)',
@@ -146,6 +167,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
 --require-browser.`,
     options: {
         'require-browser': { type: 'boolean', help: 'fail instead of skipping when no browser is found' },
+        screenshot: { type: 'string', arg: 'dir', help: 'save PNGs of the results table and the charts after the scan' },
     },
     examples: ['CHROME_BIN=/usr/bin/chromium test/run ui'],
     async run(args) {
@@ -164,6 +186,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
         ({ send, js, waitFor, mouse, click, pressEscape, setViewport, dialogs, errors } = page);
 
         await testScanAndCharts();
+        if (args.screenshot) await screenshots(args.screenshot);
         await testBrushSelection(await tableRows());
         await testTimeline();
         await testHoverLinking();
