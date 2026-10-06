@@ -139,45 +139,51 @@ test/run ui               # the page in headless Chrome (CHROME_BIN)
 test/run all              # unit + bench + ui
 ```
 
-Baseline (threshold 3.5, local PHP and every container of `test/run matrix`
-alike, PHP 5.6 to 8.5 under the default, hardened and minimal profiles):
-**anomaly 207/207 detected, 11/1928 false positives; score ≥ 8: 207/207,
-10 FP; score ≥ 15: 184/207, 1 FP.** (3 shell-corpus files with no server
-code are not counted.) On 5.6 to 7.2, one WordPress file
-(`class-wp-script-modules.php`) loses `implode` (a tokenizer change in 7.3).
-Each run also checks the listing fixture (FIFO, symlink to `/`, symlinked
-file, double extensions, `.user.ini`, a Latin-1 and a quoted name) and, per
-container, that a request without the CSRF header is refused.
-Expected `test/run matrix --php all` result (PHTest's legacy builds): 4.1.2/4.2.3 fail (below the floor, reported as
-n/a, not a failure). 4.3.0 through 8.5.6 pass all self-checks and the web
-check. Known, accepted differences:
-- PHP 4.3.0's tokenizer segfaults on ~94 modern WordPress files. The runner
-  skips them and resumes, like the UI's one-by-one retry. 4.3.0 also labels
-  AJAX replies text/html (a bug in that PHP build), which is harmless.
-- On 4.3.x/5.0.x, 5 WordPress files gain `@dyn_call`: they contain nowdocs
-  (`<<<'EOT'`, PHP 5.3+), which old tokenizers can't parse. Such files can't
-  run on those hosts anyway.
+The baseline is whatever `test/run bench` prints on the current commit: run
+it before and after a change and compare, rather than quoting old numbers.
+`test/run matrix` must match the local php on every container, except for the
+known tokenizer differences below; its summary table lists any file that
+matches differently than on the newest PHP. Each run also checks the listing
+fixture (FIFO, symlink to `/`, symlinked file, double extensions, `.user.ini`,
+a Latin-1 and a quoted name) and, per container, that a request without the
+CSRF header is refused.
+
+Known, accepted differences between PHP versions:
+- PHP 5.6 to 7.2 tokenize some modern code differently (a 7.3 tokenizer
+  change), so a few files match a token less.
+- With PHTest's legacy builds (`test/run matrix --php all`): 4.1/4.2 fail
+  (below the floor, reported as n/a, not a failure). PHP 4.3.0's tokenizer
+  segfaults on some modern WordPress files; the runner skips them and
+  resumes, like the UI's one-by-one retry. 4.3.0 also labels AJAX replies
+  text/html (a bug in that PHP build), which is harmless. On 4.3.x/5.0.x,
+  files with nowdocs (`<<<'EOT'`, PHP 5.3+) gain `@dyn_call`: old tokenizers
+  can't parse them, and such files can't run on those hosts anyway.
 - `total_tokens` differs slightly on old PHP (tokenizer differences).
 
 The benchmark zeroes mtime/ctime because the corpora were copied at different
-times (the webshells keep 2024 mtimes) and would otherwise be "detected" for
-free. So the ctime-gap, mtime and rare-owner signals are **not** measured by
-the bench, and neither is the `uploads/` rule (no corpus file lives there).
+times and would otherwise be "detected" for free. So the ctime-gap, mtime and
+rare-owner signals are **not** measured by the bench, and neither is the
+`uploads/` rule (no corpus file lives there).
 
-## Decisions already made (with evidence), so don't redo them
+## Decisions already made, so don't redo them
 
-- Entropy is whole-file bytes, threshold 5.5: 98/202 webshells vs 1/1927
-  benign. "Longest string literal" entropy was tried and was worse at useful
-  thresholds.
+Each was measured with the benchmark when it was made; re-measure with
+`test/run bench` (`--tokens` for per-token counts) or `test/run train` before
+revisiting one.
+
+- Entropy is whole-file bytes, threshold 5.5: about half the webshells are
+  above it and almost no benign files. "Longest string literal" entropy was
+  tried and was worse at useful thresholds.
 - Z-scores are median/MAD (Iglewicz & Hoaglin), with a mean-absolute-deviation
   fallback when MAD = 0. The ctime−mtime gap has a 1-day scale floor. Entropy
   z is one-sided (high side only).
 - `zSize` and `zSusp` are computed and shown but **not** anomaly triggers: each
-  caught 0 unique webshells and added false positives.
-- Removed signal `@string_heavy` (23 webshells vs 99 benign).
+  caught no webshell the other signals missed and added false positives.
+- Removed signal `@string_heavy`: it fired on far more benign files than
+  webshells.
 - `preg_replace`, `call_user_func(_array)`, `register_shutdown/tick_function`
-  are weight 0.1: 0 webshells vs 90+ benign files; the dangerous `/e` form is
-  scored as `@preg_e`.
+  are weight 0.1: they appear in many benign files and add nothing on their
+  own; the dangerous `/e` form is scored as `@preg_e`.
 - "User input + `@dyn_call`" is **not** treated as code execution: WordPress
   uses `$callback(...)` identically. Only the direct `$_GET[...](...)` shape
   (`@input_call`) is critical. Real taint tracking would be the next step:
@@ -185,22 +191,21 @@ the bench, and neither is the `uploads/` rule (no corpus file lives there).
   measure it with the bench.
 - An AST parser (npm `php-parser`, nikic/PHP-Parser) was rejected: it would
   force shipping full file sources to the browser or require PHP 7+, would
-  fail on malformed/legacy malware, and would recover only ~1–3 of the
-  current misses.
+  fail on malformed/legacy malware, and would recover only a handful of the
+  misses.
 - Short open tags (`<?if(...)`) are rewritten to `<?php ` before tokenizing,
-  so detection doesn't depend on the scanning host's `short_open_tag` (it did:
-  a local run missed `shell_exec` in NCC-Shell.php that a container caught).
-  `<?=`, `<?php` and `<?xml` are left alone.
+  and `<?xml` stops being one, so detection doesn't depend on the scanning
+  host's `short_open_tag` (it did: a local run missed `shell_exec` in a shell
+  that a container caught). `<?=` and `<?php` are left alone. PHP 8's new
+  tokens are turned back into PHP 7's for the same reason.
 - The ML score is part of the threat score (`mlPoints()`: 0 at or below
   `ML_FLOOR` 0.6, 8 at `ML_THRESHOLD` 0.9, 10 at 1.0), not a separate flag.
-  `ruleScore` keeps the rules-only part. Floor sweep on `test/run bench`:
-  0.5 and lower add false positives, 0.7 and higher lose catches; 0.6 keeps
-  207/211 and 18 FP while HIGH RISK goes 179 → 207 and CRITICAL 151 → 173.
-  That benchmark is in-sample for the model; `test/run train` repeats
-  the sweep on held-out scores and needs the corpora (fetch them outside any
-  web root: `/home/http` is served by Apache).
-- About 15 of the remaining misses are ASP/JSP/Perl shells saved as `.php`;
-  PHP tokenization can't see them.
+  `ruleScore` keeps the rules-only part. `ML_FLOOR` 0.6 came from a floor
+  sweep: lower adds false positives, higher loses catches. `test/run train`
+  prints that sweep on held-out scores; it needs every sample (fetch them
+  outside any web root, they are live shells).
+- ASP/JSP/Perl shells saved as `.php` hold no PHP for the tokenizer to read;
+  `@foreign_code` catches them instead.
 - After making important decision dump it here
 
 ## Style

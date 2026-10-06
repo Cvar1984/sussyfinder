@@ -338,16 +338,7 @@ File size (`Z_size`), the suspicious-token count Z-score (`Z_suspicious`) and th
 
 The first chart plots the two parts of the threat score against each other. Its y-axis is the rule score on a log scale, because it runs from 0 to the thousands and the anomaly bar at 8 must stay visible. Its x-axis is the ML score. The dashed lines are the scanner's own bars (`ANOMALY_SCORE` 8 and `ML_THRESHOLD` 0.9), so each quadrant says which detector flags a file. Each dot is coloured by the file's verdict, as in the table: critical, anomaly or not flagged. Without a model, the x-axis shows the share of a file's tokens that are needles.
 
-On held-out data (`test/run train`, every sample, ML scores from models that never saw the file), the quadrants split as follows:
-
-| Quadrant | Shells | Legitimate files |
-| -------- | ------ | ---------------- |
-| Rules + ML | 63.4% | 49 files (0.01%) |
-| Rules only | 5.3% | 2.6% |
-| ML only | 25.7% | 0.1% |
-| Neither | 5.6% | 97.3% |
-
-A file in the top right is almost certainly a shell. Most of the rules' false positives sit in the top left, so a file there is worth reading before acting on it.
+On held-out data, most shells land in the top right, where both detectors agree, and almost no legitimate files do. Most of the rules' false positives sit in the top left, so a file there is worth reading before acting on it. `test/run train` prints the current split of shells and legitimate files per quadrant, scored by models that never saw the file.
 
 ### ML Model
 
@@ -377,23 +368,23 @@ Like the whitelist and blacklist, the model isn't built into `main.php`. When th
 * **Failure:** if the download fails, the file is malformed or the versions differ, the page shows a warning and ML is off for that scan. The server also skips ML feature extraction for that scan.
 * **Self-hosting:** to pin a model or work offline, set `_ML_MODEL_URL_` to another URL or to a local file path.
 
-To turn the model off, set `_ML_` to `false` (see [Configuration](#configuration)). The server then skips `mlFeatures()`, which saves about 40% of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
+To turn the model off, set `_ML_` to `false` (see [Configuration](#configuration)). The server then skips `mlFeatures()`, which saves a large share of the per-file analysis time and 512 bytes of JSON per file. The page shows no ML scores, badges or sort option, and detection falls back to the rules alone.
 
 #### Training data
 
-The samples live in `test/corpora/`: webshell collections in `positive/` (20 submodules) and legitimate frameworks and CMSs across many releases in `noise/` (186 submodules). [`test/README.md`](test/README.md) maps the whole test tree.
+The samples live in `test/corpora/`: webshell collections in `positive/` and legitimate frameworks and CMSs across many releases in `noise/`, one submodule each; `.gitmodules` lists them all. [`test/README.md`](test/README.md) maps the whole test tree.
 
 Every sample is a git submodule pinned to an exact commit. Its folder sets its label: `positive` is a shell, `noise` is legitimate code. In `.gitmodules`, a sample entry can also carry `family` (corpora held out together in cross-validation, such as every WordPress release), `subdir` (the part of a repository that holds samples) and `benchmark = true` (part of the quick benchmark set). Git ignores these extra keys; the test tooling reads them. The samples are:
 
 * **Webshells:** public webshell collections, plus well-known standalone shells.
-* **Legitimate code:** frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and about 50 more), each across many releases, such as WordPress 1.5 to 7.2-alpha, Drupal 5 to 11, Joomla 2.5 to 5.0 and Open Journal Systems 2.2 to 3.6 (with the matching `pkp-lib` core, which OJS keeps in a nested submodule).
+* **Legitimate code:** frameworks and CMSs such as Laravel, Symfony, Drupal, Joomla, Magento, WordPress and Open Journal Systems, each across many releases from old to current. A project that keeps its core in a nested submodule (OJS and its `pkp-lib`) has that core added as a sample of its own, since samples are checked out without nested submodules.
 
 Submodules aren't downloaded by a normal clone. Fetch what you need:
 
 ```bash
 test/run setup            # the benchmark set
 test/run setup --phtest   # the legacy PHP builds
-test/run setup --all      # every sample, over 10 GB
+test/run setup --all      # every sample (many GB)
 ```
 
 Corpus submodules are marked `shallow`, so a corpus pinned to a branch tip downloads a single commit. Old releases pinned below the tip come with some history.
@@ -442,13 +433,13 @@ test/run all              # unit + bench + ui, with a summary: run before a comm
 ```
 
 * `test/run unit`: unit tests in a few seconds, with no samples and no Docker. In PHP, it checks the structural detectors on snippets (calls through variables, names hidden in strings, `preg_replace` with `/e`, ASP/JSP/Perl in PHP-named files and more). It also checks which names the directory listing returns (a FIFO, a symlink leading outside, a non-UTF-8 name) and which `ml-model.json` files `main.php` accepts. In JS, it checks labelling, feature decoding, fold and cap stability, training, that the trainer's scorer equals `main.php`'s `mlScore()`, and that moving the Z-threshold re-flags exactly like a full rescore.
-* `test/run bench`: the PHP self-check, then the real feature extraction and the real client-side scoring from `main.php` over the benchmark samples (`blackarch-webshells` mixed with `wordpress-7.2-alpha` and `laravel-skeleton`). It prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured. Files in the webshell corpus with no server code at all aren't counted as missed shells; the run lists them by name. Its `ml only` line is in-sample for the model, so use `test/run train` for held-out rates. Options:
+* `test/run bench`: the PHP self-check, then the real feature extraction and the real client-side scoring from `main.php` over the benchmark set (the samples marked `benchmark = true` in `.gitmodules`: webshells mixed with legitimate code). It prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured. Files in the webshell corpus with no server code at all aren't counted as missed shells; the run lists them by name. Its `ml only` line is in-sample for the model, so use `test/run train` for held-out rates. Options:
   * `--list`: print missed webshells and false positives
   * `--tokens`: print per-token webshell vs. benign counts, for tuning weights
   * `--threshold 3.5`: the Z-score threshold to evaluate (default: `main.php`'s `Z_THRESHOLD`)
   * `--no-ml`: score with the rules alone
   * `--dump rows.json`: save every scored row, for analysis
-* `test/run matrix`: the same on every PHP version (5.6 to 8.5 by default, `--php all` for the PHTest builds back to 4.1) under each php.ini profile, in Docker:
+* `test/run matrix`: the same on every PHP version (`test/run matrix --help` lists the defaults; `--php all` adds PHTest's legacy builds) under each php.ini profile, in Docker:
   * `default`: the image's own php.ini
   * `hardened`: shared-hosting style, with no exec family, no cURL and no remote fopen
   * `minimal`: no `json_encode` and no cURL
