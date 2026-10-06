@@ -950,3 +950,88 @@
 	url = https://github.com/zencart/zencart.git
 	shallow = true
 	family = zencart
+[submodule "test/corpora/noise/ojs-2.2"]
+	path = test/corpora/noise/ojs-2.2
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-2.3"]
+	path = test/corpora/noise/ojs-2.3
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-2.3"]
+	path = test/corpora/noise/pkp-lib-2.3
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-2.4"]
+	path = test/corpora/noise/ojs-2.4
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-2.4"]
+	path = test/corpora/noise/pkp-lib-2.4
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-3.0"]
+	path = test/corpora/noise/ojs-3.0
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-3.0"]
+	path = test/corpora/noise/pkp-lib-3.0
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-3.1"]
+	path = test/corpora/noise/ojs-3.1
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-3.1"]
+	path = test/corpora/noise/pkp-lib-3.1
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-3.2"]
+	path = test/corpora/noise/ojs-3.2
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-3.2"]
+	path = test/corpora/noise/pkp-lib-3.2
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-3.3"]
+	path = test/corpora/noise/ojs-3.3
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-3.3"]
+	path = test/corpora/noise/pkp-lib-3.3
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-3.4"]
+	path = test/corpora/noise/ojs-3.4
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-3.4"]
+	path = test/corpora/noise/pkp-lib-3.4
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/ojs-3.5"]
+	path = test/corpora/noise/ojs-3.5
+	url = https://github.com/pkp/ojs.git
+	shallow = true
+	family = ojs
+[submodule "test/corpora/noise/pkp-lib-3.5"]
+	path = test/corpora/noise/pkp-lib-3.5
+	url = https://github.com/pkp/pkp-lib.git
+	shallow = true
+	family = ojs

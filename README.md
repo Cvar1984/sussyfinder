@@ -364,12 +364,12 @@ To turn the model off, set `_ML_` to `false` (see [Configuration](#configuration
 
 #### Training data
 
-The samples live in `test/corpora/`: webshell collections in `positive/` (20 submodules) and legitimate frameworks and CMSs across many releases in `noise/` (169 submodules). [`test/README.md`](test/README.md) maps the whole test tree.
+The samples live in `test/corpora/`: webshell collections in `positive/` (20 submodules) and legitimate frameworks and CMSs across many releases in `noise/` (186 submodules). [`test/README.md`](test/README.md) maps the whole test tree.
 
 Every sample is a git submodule pinned to an exact commit. Its folder sets its label: `positive` is a shell, `noise` is legitimate code. In `.gitmodules`, a sample entry can also carry `family` (corpora held out together in cross-validation, such as every WordPress release), `subdir` (the part of a repository that holds samples) and `benchmark = true` (part of the quick benchmark set). Git ignores these extra keys; the test tooling reads them. The samples are:
 
 * **Webshells:** public webshell collections, plus well-known standalone shells.
-* **Legitimate code:** frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and about 50 more), each across many releases, such as WordPress 1.5 to 7.2-alpha, Drupal 5 to 11 and Joomla 2.5 to 5.0.
+* **Legitimate code:** frameworks and CMSs (Laravel, Symfony, Drupal, Joomla, Magento, WordPress and about 50 more), each across many releases, such as WordPress 1.5 to 7.2-alpha, Drupal 5 to 11, Joomla 2.5 to 5.0 and Open Journal Systems 2.2 to 3.6 (with the matching `pkp-lib` core, which OJS keeps in a nested submodule).
 
 Submodules aren't downloaded by a normal clone. Fetch what you need:
 
