@@ -291,7 +291,7 @@ $$
 Last, the ML model's score $P_{\mathrm{ML}}$ (see [ML Model](#ml-model)) adds points. They are added after the multipliers above, so they are never multiplied:
 
 $$
-\text{Score}' = \text{Score} + \left\{ \begin{array}{ll}
+\text{Score}' = \text{Score} + \left\lbrace \begin{array}{ll}
 0 & P_{\mathrm{ML}} \leq 0.6 \\
 8 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.6}{0.9 - 0.6} & 0.6 < P_{\mathrm{ML}} < 0.9 \\
 8 + 2 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.9}{1 - 0.9} & P_{\mathrm{ML}} \geq 0.9
@@ -311,10 +311,10 @@ Conceptually:
 $$
 \begin{array}{rl}
 \text{anomaly} = & \text{Score} \geq 8 \\
-& \lor \; Z_{\mathrm{entropy}} > T \\
-& \lor \; |Z_{\mathrm{mtime}}| > T \\
-& \lor \; |Z_{\mathrm{gap}}| > T \\
-& \lor \; \text{rare owner}
+& \lor \enspace Z_{\mathrm{entropy}} > T \\
+& \lor \enspace |Z_{\mathrm{mtime}}| > T \\
+& \lor \enspace |Z_{\mathrm{gap}}| > T \\
+& \lor \enspace \text{rare owner}
 \end{array}
 $$
 
