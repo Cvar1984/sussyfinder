@@ -1,0 +1,29 @@
+# Files in the webshell collections that are not webshells: libraries, empty files,
+# configuration, phpinfo pages, include stubs and toolkit pages with no capability of
+# their own. Training and the benchmark leave them out (every copy, by MD5). One per
+# line: md5, the sample it was found as, and why.
+47276f6d9ed0c4b8277e4910ad910651  b374k/base/jsPacker.php  # PHP port of the Dean Edwards JavaScript packer (a library)
+29f61d48b3be6cc37dc4aeeb0d60f781  tanjiti-webshell-sample/php/29f61d48b3be6cc37dc4aeeb0d60f781.php  # PHP port of the Dean Edwards JavaScript packer (a library)
+bb4e7c925a14552da321db28af2de597  b374k/module/database.php  # b374k's database tab: a SQL client page, no execution of its own
+73ad4c144fa2021270c2411f5a7ac8a1  b374k/module/mail.php  # b374k's mail tab: a mail form, no execution of its own
+b93b852373b168a6d765edca24c66807  tanjiti-webshell-sample/php/b93b852373b168a6d765edca24c66807.php  # b374k's mail tab: a mail form, no execution of its own
+5fbe4d8edeb2769eda5f4add9bab901e  blackarch-webshells/php/mysql_tool.php  # MySQL backup/restore tool (2003), an admin utility
+866ce456008af7ab0ce0da60e3f3dac6  xl7dev-webshell/Php/mysql_tool.php  # MySQL backup/restore tool (2003), an admin utility
+87948fb4b8839fe517f2d9636d8676e7  tanjiti-webshell-sample/php/87948fb4b8839fe517f2d9636d8676e7.php  # empty PHP block
+0bdfbc07bc33da24eeec2ebc073b2493  tanjiti-webshell-sample/php/a15692f651caf9a320f53a5364c2406d.php  # phpinfo() only
+a15692f651caf9a320f53a5364c2406d  xl7dev-webshell/Php/phpinfo.php  # phpinfo() only
+288e610081564c0f83b174e2035a253c  lcatro-bypass-waf/tradition-php-shell-get.php  # reads a request variable and does nothing with it
+052c90aca044e4e9e05dc5f5234b171f  tanjiti-webshell-sample/php/b88c42651a2c1e37b78ce008e4318c71.php  # includes a local text file, no code of its own
+b88c42651a2c1e37b78ce008e4318c71  xl7dev-webshell/Other/File include Bypass/includer.php  # includes a local text file, no code of its own
+79686564874203bd73e7dc5fdc0281cd  tanjiti-webshell-sample/php/79686564874203bd73e7dc5fdc0281cd.php  # database connection settings
+a802960455229c619d7c1d2050534ea0  xl7dev-webshell/脱裤脚本/mysql/config.inc.php  # database connection settings
+1fd67cdba1f09c929c1af7a08e56f973  tanjiti-webshell-sample/php/fd151f0163ddcd45bbe38bb35d23caa9.php  # MySQL wrapper class (a library)
+fd151f0163ddcd45bbe38bb35d23caa9  xl7dev-webshell/脱裤脚本/mysql/db_mysql.class.php  # MySQL wrapper class (a library)
+109385a082a012e4633249a43c72992c  tanjiti-webshell-sample/php/6efd8ab29b33fee17523aa4695a0ece5.php  # database error page of a CMS
+6efd8ab29b33fee17523aa4695a0ece5  xl7dev-webshell/脱裤脚本/mysql/db_mysql_error.inc.php  # database error page of a CMS
+b2831844bddf3a0ca87d6cbbaf06ceef  tanjiti-webshell-sample/php/b2831844bddf3a0ca87d6cbbaf06ceef.php  # sets two variables, nothing else
+bd83144a649c5cc21ac41b505a36a8f3  tanjiti-webshell-sample/php/bd83144a649c5cc21ac41b505a36a8f3.php  # configuration file of a shell (INI settings, no code)
+695f0ff75a23e03809788851a9626349  tanjiti-webshell-sample/php/695f0ff75a23e03809788851a9626349.php  # a username and password hash, nothing else
+8beb6d1259f8cfc7383c35c80139d539  tanjiti-webshell-sample/php/8beb6d1259f8cfc7383c35c80139d539.php  # phpinfo() page behind a session check
+c1976c1f0cd9b3e66e8fa9152178afc7  tanjiti-webshell-sample/php/c1976c1f0cd9b3e66e8fa9152178afc7.php  # login form handler of a toolkit, no execution of its own
+09c33f2b976f02b459e3811f42f33bf9  tanjiti-webshell-sample/php/09c33f2b976f02b459e3811f42f33bf9.php  # menu page of a toolkit (links only)

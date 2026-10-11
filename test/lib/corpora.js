@@ -7,7 +7,7 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { ROOT, MAX_BUFFER } = require('./paths');
+const { ROOT, CORPORA, MAX_BUFFER } = require('./paths');
 
 function loadCorpora() {
     const subs = new Map();
@@ -57,7 +57,27 @@ function benchmarkSet() {
  */
 const isRunnable = row => !!row.has_php || (row.matched_tokens || []).includes('@foreign_code');
 
+/**
+ * Files in the webshell collections that aren't webshells (libraries, empty
+ * files, configuration, ...), listed by MD5 in test/corpora/not-shells.txt:
+ * md5 => why. Every copy is left out of training and the benchmark.
+ */
+let notShellList = null;
+function notShells() {
+    if (!notShellList) {
+        notShellList = new Map();
+        for (const line of fs.readFileSync(path.join(CORPORA, 'not-shells.txt'), 'utf8').split('\n')) {
+            const m = /^([0-9a-f]{32})\s+.*?#\s*(.*)$/.exec(line);
+            if (m) notShellList.set(m[1], m[2]);
+        }
+    }
+    return notShellList;
+}
+
+/** Whether a file from a webshell collection counts as a shell: it can run, and it isn't listed as not a shell */
+const isShellSample = row => isRunnable(row) && !notShells().has(row.md5);
+
 /** Timestamps say when a corpus was copied, not anything about the file: score on content only */
 const contentOnly = rows => { rows.forEach(d => { d.mtime = 0; d.ctime = 0; }); return rows; };
 
-module.exports = { loadCorpora, isCheckedOut, corpus, benchmarkSet, isRunnable, contentOnly };
+module.exports = { loadCorpora, isCheckedOut, corpus, benchmarkSet, isRunnable, notShells, isShellSample, contentOnly };

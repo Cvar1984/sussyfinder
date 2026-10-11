@@ -65,10 +65,24 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `$tokenNeedles` weight map), `findStructuralSignals` (pseudo-tokens, below),
   `shannonEntropy` (whole-file bytes). `codeTokens()` walks the tokens once
   and `analyzeContent()` hands the result to all of them.
+- **Needle names match a global call only.** `tokenTextSets()` ('match' set)
+  drops a needle name used as a class (`new Exec()`, `Exec::run()`), a
+  namespace segment (`namespace App\System;`, `use Vendor\Exec;`, one token on
+  PHP 8, pieces before) or a member (`->exec`, `::exec`, `function exec`). A
+  name counts only when a `(` follows and it is not a namespaced piece or
+  `new`. This killed most rule false positives (framework `tests/` and vendor
+  paths full of `...\system\...`). Don't widen it back.
 - **Pseudo-tokens** are prefixed `@`, which no real PHP token can match:
   `@input_call` `$_GET['a']()`, `@preg_e`, `@concat_name` (name hidden in a
-  string; the recovered name is added too), `@halt_payload`, `@dyn_call`,
-  `@long_line`. Their weights live in `$tokenNeedles` next to real tokens.
+  string; the recovered name is added too), `@callback_exec` (an execution
+  function named as a string for a callback, e.g. `array_map('assert', ...)`;
+  only names rarely seen as plain data, and not after a capability check like
+  `function_exists`), `@input_include` (`include`/`require` of a request var,
+  `include $_GET[...]`; `$_SERVER` is excluded as a routine benign base),
+  `@wrapper_include` (`include`/`require` of a `php://` or `data:` stream, e.g.
+  `include('php://input')`; `phar://` excluded, it appears in legit phar stubs),
+  `@halt_payload`, `@dyn_call`, `@long_line`. Their weights
+  live in `$tokenNeedles` next to real tokens.
 - **Client** scoring lives between `// --- Client-side threat scoring` and
   `// --- End client-side threat scoring ---`. The tests (`test/lib/scanner.js`)
   execute exactly that slice, so keep it self-contained (no DOM) and keep the
@@ -206,6 +220,35 @@ revisiting one.
   outside any web root, they are live shells).
 - ASP/JSP/Perl shells saved as `.php` hold no PHP for the tokenizer to read;
   `@foreign_code` catches them instead.
+- **Injected test** (`test/php/inject.php`, `test/lib/inject.js`): real
+  backdoors are injected into legitimate files, not dropped as their own file,
+  and the surrounding code hides them. Each shell is inserted into a host file
+  of its own fold and scored among that project's files. `test/run train`
+  prints injected vs on-its-own detection; the ML model alone drops from ~90%
+  to ~33% on injected shells (padding dilutes the features). Rules hold up
+  (they fire on the shell's own tokens). `--augment` trains on injected copies
+  and recovers injected detection, but it is a **rebalance, not a free win**:
+  on the combined metric main.php uses (rule score + ML points), at matched
+  benign false positives (floor tuned to hold ~0.86% FP) the held-out numbers
+  are standalone shells 97.1% -> 90.6% (-6.5pt) and injected shells 72.6% ->
+  92.0% (+19pt). At no floor does the augmented model beat the plain one on
+  both. It trades the most common case (an uploaded standalone shell) for the
+  injected case. Same features and LR format, so ml-model.json stays v2 and
+  scores stay stable across PHP versions — the only cost is the recall shift.
+  Left off by default (the plain model ships); `--augment` is there for a
+  deployment that specifically expects injected backdoors. Closing the gap
+  without the standalone cost needs per-function/class scoring (score each
+  function or class and take the max, so surrounding benign code can't dilute
+  a shell) — a larger change and a feature-version bump, not done here.
+- **not-shells.txt** (`test/corpora/`): files inside the webshell collections
+  that aren't shells (bundled libraries, config, `phpinfo()` pages, include
+  stubs), matched by MD5. Dropped from training and the benchmark. Add to it,
+  don't relabel, when a collection carries a non-shell.
+- A hashed ML feature for identifier-like string literals (`sv:assert`) was
+  tried for the string-named-function blind spot and reverted: +0.8 pt on
+  injected shells didn't earn the `ML_FEATURE_VERSION` bump (older installs
+  then refuse the model). `@callback_exec` covers the common case in the rules
+  at no feature churn. The deeper fix stays per-function/class scoring.
 - After making important decision dump it here
 
 ## Style

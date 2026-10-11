@@ -17,6 +17,19 @@ const CASES = [
     ['<?php $f = "\\x73ystem";', ['system', '@concat_name'], []],
     ["<?php 'system'('id');", ['system', '@concat_name', '@dyn_call'], []],
     ["<?php \\system('id');", ['system'], []],
+    // A needle name counts only as a call to the global function
+    ["<?php namespace Drupal\\Tests\\system\\Functional; use Magento\\Framework\\Exec; class System {}", [], ['system', 'exec']],
+    ["<?php $a = new Exec(); Exec::run(); $b instanceof System; Foo\\system('x');", [], ['system', 'exec']],
+    ["<?php @system($_GET['c']);", ['system'], []],
+    // An execution function named as a string, reached by a callback
+    ["<?php array_map('ass'.'ert', $_POST['c']);", ['assert', '@callback_exec'], []],
+    ["<?php filter_var($_GET['x'], FILTER_CALLBACK, array('options' => 'shell_exec'));", ['shell_exec', '@callback_exec'], []],
+    ["<?php $m = array('name' => 'system', 'run' => 'exec');", [], ['@callback_exec']],
+    // Execution via include: a stream wrapper, a request superglobal, XSLT into PHP
+    ["<?php include('php://input');", ['@wrapper_include'], []],
+    ["<?php include $_GET['f'];", ['@input_include'], []],
+    ["<?php require_once $_REQUEST['p'] . '.php';", ['@input_include'], []],
+    ["<?php include $_SERVER['DOCUMENT_ROOT'] . '/inc.php'; require 'config.php';", [], ['@input_include', '@wrapper_include']],
     ['<?php echo `id`;', ['`'], []],
     ["<?php preg_replace('/x/e', $_POST['c'], 'x');", ['@preg_e'], []],
     ["<?php \\preg_replace('/x/e', $_POST['c'], 'x');", ['@preg_e'], []], // one token on PHP 8, three before

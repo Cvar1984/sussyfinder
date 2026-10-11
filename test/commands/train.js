@@ -93,6 +93,36 @@ function printReport(mal, ben, clusters, ctx) {
     }
 }
 
+/**
+ * The harder test: the same shells inserted into legitimate files, scored by
+ * the model that held both out, next to how the same shells do on their own
+ */
+function printInjected(injected, models, ctx) {
+    if (!injected.length) return;
+    const threshold = constant(ctx, 'ML_THRESHOLD'), anomalyScore = constant(ctx, 'ANOMALY_SCORE');
+    injected.forEach(x => { x.cvScore = ml.scorer(models[x.fold])(x.bits); });
+    // Rule scores as a scan would see the file: where the host lives
+    const rows = injected.map(x => Object.assign({}, x.row, { path: x.host.id }));
+    ctx.analyzeData(rows, constant(ctx, 'Z_THRESHOLD')).forEach((d, i) => { injected[i].ruleScore = d.ruleScore; });
+    const clean = injected.map(x => ({ ruleScore: x.shell.ruleScore, cvScore: x.shell.cvScore }));
+    const tests = [
+        [`rules (score >= ${anomalyScore})`, d => d.ruleScore >= anomalyScore],
+        [`ml >= ${threshold}`, d => d.cvScore >= threshold],
+        [`rules or ml >= ${threshold}`, d => d.ruleScore >= anomalyScore || d.cvScore >= threshold],
+        [`rules + ML points >= ${anomalyScore}`, d => d.ruleScore + ctx.mlPoints(d.cvScore) >= anomalyScore],
+    ];
+    console.log(`\nInjected into legitimate files (held out; ${injected.length} PHP shells, each inside a file from a project family its model never saw):`);
+    console.log(`  ${''.padEnd(28)} on its own   injected`);
+    tests.forEach(([label, hit]) => {
+        const a = clean.filter(hit).length, b = injected.filter(hit).length;
+        console.log(`  ${label.padEnd(28)} ${pct(a, clean.length).padStart(10)} ${pct(b, injected.length).padStart(10)}`);
+    });
+    if (args.list) {
+        console.log('\nINJECTED MISSES (rules + ML points):');
+        injected.filter(x => x.ruleScore + ctx.mlPoints(x.cvScore) < anomalyScore).forEach(x => console.log(`  ${x.shell.id}  ml=${x.cvScore.toFixed(3)} rules=${x.ruleScore}`));
+    }
+}
+
 /** --check DIR: score a directory the model never saw (all assumed benign) */
 async function checkDir(dir, model, ctx) {
     const tmp = path.join(tempDir('check'), 'rows.jsonl');
@@ -116,15 +146,20 @@ async function train() {
     const { samples, files, dropped } = ml.buildSamples(corpora, ctx);
     const mal = samples.filter(d => d.label), ben = samples.filter(d => !d.label);
     log(`${files} files -> ${mal.length} unique shells, ${ben.length} unique benign (dropped: ${dropped.htaccess} .htaccess, ` +
-        `${dropped.notCode} non-code files in shell collections, ${dropped.conflicts} shell-collection files also found in benign projects)`);
+        `${dropped.notCode} non-code and ${dropped.notShells} listed non-shell files in shell collections, ` +
+        `${dropped.conflicts} shell-collection files also found in benign projects)`);
     ml.assignGroups(samples, buckets, opts.similar);
     ml.assignFolds(samples, opts.folds);
     const clusters = new Set(mal.map(d => d.group)).size;
     log(`${clusters} shell clusters (Jaccard >= ${opts.similar}), ${new Set(ben.map(d => d.family)).size} benign families`);
+    const injected = await ml.injectSamples(samples, ml.featureKey());
+    log(`${injected.length} PHP shells injected into a legitimate file of their own fold`);
+    // --augment: the injected copies also train the models that don't hold them out
+    const augmented = args.augment ? injected.map(x => ({ label: 1, bits: x.bits, fold: x.fold, group: x.shell.group, corpus: x.shell.corpus, aug: true })) : [];
 
     // One training set per fold (everything outside it), plus the final model on everything
-    const packed = ml.pack(samples);
-    const pool = mal.concat(ml.capPerCorpus(ben, opts.cap));
+    const packed = ml.pack(samples.concat(augmented));
+    const pool = mal.concat(augmented, ml.capPerCorpus(ben, opts.cap));
     const sets = Array.from({ length: opts.folds }, (_, f) => pool.filter(d => d.fold !== f).map(d => d.idx));
     const wantFinal = args.write || args.check;
     if (wantFinal) sets.push(pool.map(d => d.idx));
@@ -139,6 +174,7 @@ async function train() {
         if (Math.abs(ml.scorer(models[0])(d.bits) - ctx.mlScore(d.hex, models[0])) > 1e-9) throw new Error('scorer mismatch on ' + d.id);
     });
     printReport(mal, ben, clusters, ctx);
+    printInjected(injected, models, ctx);
 
     const finalModel = wantFinal ? models[models.length - 1] : null;
     for (const dir of args.check || []) await checkDir(dir, finalModel, ctx);
@@ -174,6 +210,7 @@ ML_BUCKETS changes, so older installs refuse the new model.`,
         list: { type: 'boolean', help: 'held-out misses and false positives' },
         check: { type: 'string', multiple: true, arg: 'dir', help: 'how many files in a trusted dir get flagged (repeatable)' },
         write: { type: 'boolean', help: 'train on everything and write ml-model.json' },
+        augment: { type: 'boolean', help: 'also train on the shells injected into legitimate files' },
     },
     examples: ['test/run train --by-family', 'test/run train --write', 'test/run train --check /srv/www/myapp'],
     run(parsed) {

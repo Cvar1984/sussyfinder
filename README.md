@@ -202,13 +202,18 @@ Structural signals appear among the matched tokens with an `@` prefix (no real P
 | `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    |   10.0 |
 | `@foreign_code` | ASP, JSP or Perl CGI code in a PHP-named file with no PHP |   10.0 |
 | `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             |   10.0 |
+| `@callback_exec`| An execution function named as a string for a callback: `array_map('assert', …)` | 10.0 |
+| `@input_include`| `include`/`require` of a request value: `include $_GET['f']` (file inclusion) | 10.0 |
+| `@wrapper_include`| `include`/`require` of a `php://` or `data:` stream: `include('php://input')` | 10.0 |
 | `` ` ``         | Backtick operator (shell execution)                      |   10.0 |
 | `@concat_name`  | Function name hidden in a string (the name is added too) |    5.0 |
 | `@halt_payload` | Over 1 KiB of data after `__halt_compiler()`             |    5.0 |
 | `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |    2.0 |
 | `@long_line`    | A line over 5000 characters                              |    2.0 |
 
-`@input_call`, `@preg_e`, `@foreign_code` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
+`@input_call`, `@preg_e`, `@foreign_code`, `@callback_exec`, `@input_include`, `@wrapper_include` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
+
+A function name counts as a call only where it is one — a global call like `system(...)`, including `\system(...)`. The same name as a class (`new System()`, `System::run()`), a namespace segment (`namespace App\System;`, `use Vendor\Exec;`) or a member (`$db->exec(...)`) is not a match. `@callback_exec` recovers the names that reach a callback instead of being written as a call, for the few functions almost never passed as a plain string (`assert`, `create_function`, `shell_exec`, `passthru`, `proc_open`, `popen`); common strings like `'system'` or `'exec'` are left to the other signals, as they are everywhere in legitimate configuration.
 
 Additional multipliers are applied when combinations of suspicious behaviors are present.
 
@@ -396,6 +401,7 @@ Before training, the data is cleaned by:
 * removing exact duplicates by MD5
 * removing `.htaccess` files
 * removing shell-collection files with no server code at all, such as README pages. A file counts as server code when it holds PHP or `main.php`'s `@foreign_code` rule sees ASP, JSP or Perl CGI in it; the benchmark uses the same test
+* removing files listed in [`test/corpora/not-shells.txt`](test/corpora/not-shells.txt): files that ship inside the webshell collections but aren't shells (libraries such as a bundled packer, configuration files, `phpinfo()` pages, include stubs). They are matched by MD5, so every copy is dropped from both training and the benchmark
 
 #### Accuracy
 
@@ -404,6 +410,8 @@ Before training, the data is cleaned by:
 * Near-identical shells (feature-set Jaccard ≥ 0.8) share a fold, so a variant of a training shell can't count as a detection.
 * Whole project families share a fold, for example every WordPress version. So false positives are always measured on projects the model never trained on.
 * Folds and the per-corpus cap of legitimate training files are chosen by hashes, not a random stream, so adding or reordering samples only moves the samples that changed, and results are comparable across commits.
+
+`test/run train` also runs the harder **injected test**: each PHP shell inserted into a legitimate file of its own fold (a model that holds the shell out never saw the host's project family either), the way real backdoors arrive, built by [`test/php/inject.php`](test/php/inject.php). It prints detection on the injected files beside the same shells on their own, so the gap shows how much surrounding legitimate code hides a shell. `--augment` also trains on those injected copies. `test/run bench` and `test/run matrix` run a smaller injected check over the benchmark set.
 
 The five fold models and the final model train at the same time in worker threads. Extracted features are cached in `test/corpora/.rows/`, one file per sample commit, and re-extracted only when `main.php`'s extractor or `test/php/extract.php` changes.
 

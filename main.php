@@ -98,6 +98,9 @@ $tokenTiers = array(
         '@input_call',   // $_GET['a']($_GET['b'])
         '@preg_e',       // preg_replace('/.../e') evaluates the replacement
         '@foreign_code', // ASP/JSP/CGI code in a PHP-named file
+        '@callback_exec',// an execution function named as a string for a callback: array_map('assert', ...)
+        '@wrapper_include', // include('php://input') and other stream wrappers
+        '@input_include',   // include $_GET[...] (remote/local file inclusion)
     ),
     // High obfuscation and de-encoding
     '5.0' => array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'rawurldecode', 'urldecode',
@@ -141,7 +144,7 @@ foreach ($tokenTiers as $weight => $needles) {
 // "highlight" is only display: the needles shown in red in the results.
 $tokenRoles = array(
     'critical'    => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function', '`',
-        '@input_call', '@preg_e', '@foreign_code'),
+        '@input_call', '@preg_e', '@foreign_code', '@callback_exec', '@wrapper_include', '@input_include'),
     'obfuscation' => $tokenTiers['5.0'],
     'upload'      => array('move_uploaded_file', '$_files', 'file_put_contents'),
     'input'       => $tokenTiers['0.5'],
@@ -150,7 +153,7 @@ $tokenRoles = array(
         'getmyinode', 'posix_getuid', 'posix_geteuid', 'posix_getegid', 'posix_getlogin', 'disk_total_space',
         'disk_free_space', 'diskfreespace', 'getlastmod'),
     'highlight'   => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function',
-        '`', '@input_call', '@preg_e', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex',
+        '`', '@input_call', '@preg_e', '@callback_exec', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex',
         'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'),
 );
 
@@ -710,35 +713,54 @@ function codeTokens($tokens)
 }
 
 /**
- * Lowercased, trimmed, de-duplicated code token texts as a lookup set.
- * String/HTML/comment content is left out ("...`{$t}`..." would otherwise
- * yield a lone "`"), as are member and declaration names (->exec(),
- * ::system(), function eval()), since those aren't the global functions.
+ * Lowercased, trimmed, de-duplicated code token texts as lookup sets, from
+ * one pass: 'all' (counted as total_tokens) and 'match' (what needles are
+ * matched against). String/HTML/comment content is left out of both
+ * ("...`{$t}`..." would otherwise yield a lone "`"), and so are member and
+ * declaration names (->exec(), ::system(), function eval()). In 'match' a
+ * name only counts as a call to the global function: not a class (new Exec(),
+ * Exec::run(), class System) and not a piece of a namespaced name
+ * (namespace Drupal\Tests\system;, use Magento\Exec;), which PHP 8 hands out
+ * as one token and older PHP as pieces.
  *
  * @param array $sig codeTokens() 'sig'
- * @return array text => true
+ * @return array 'all' and 'match', each text => true
  */
-function tokenTextSet($sig)
+function tokenTextSets($sig)
 {
     $content = array(T_ENCAPSED_AND_WHITESPACE => true, T_INLINE_HTML => true);
     $member = memberTokenIds();
-    $set = array();
-    $prev = 0;
-    foreach ($sig as $token) {
-        if (!isset($content[$token[0]]) && !($token[0] == T_STRING && isset($member[$prev]))) {
-            $set[ltrim(strtolower(trim($token[1])), '\\')] = true;
+    $qualifier = array(T_STRING => true, T_NAMESPACE => true);
+    $constants = array('__compiler_halt_offset__' => true); // needles used without a call
+    $all = array();
+    $match = array();
+    $n = count($sig);
+    for ($i = 0; $i < $n; $i++) {
+        $id = $sig[$i][0];
+        $prev = $i > 0 ? $sig[$i - 1][0] : 0;
+        if (isset($content[$id]) || ($id == T_STRING && isset($member[$prev]))) {
+            continue;
         }
-        $prev = $token[0];
+        $text = ltrim(strtolower(trim($sig[$i][1])), '\\');
+        $all[$text] = true;
+        if ($id == T_STRING && !isset($constants[$text])) {
+            $called = $i + 1 < $n && $sig[$i + 1][1] == '(';
+            $qualified = $prev == T_NS_SEPARATOR && $i > 1 && isset($qualifier[$sig[$i - 2][0]]);
+            if (!$called || $qualified || $prev == T_NEW) {
+                continue;
+            }
+        }
+        $match[$text] = true;
     }
-    unset($set['']);
-    return $set;
+    unset($all[''], $match['']);
+    return array('all' => $all, 'match' => $match);
 }
 
 /**
  * The needles (keys of the weight map) present in a token set
  *
  * @param array $tokenNeedles needle => weight
- * @param array $tokenSet from tokenTextSet()
+ * @param array $tokenSet tokenTextSets() 'match'
  * @return array
  */
 function compareTokens($tokenNeedles, $tokenSet)
@@ -778,15 +800,15 @@ function matchTokens($content, $tokenNeedles)
 function analyzeContent($content, $tokenNeedles, $withMl)
 {
     $code = codeTokens(getFileTokens($content));
-    $textSet = tokenTextSet($code['sig']);
+    $textSets = tokenTextSets($code['sig']);
     $maxLine = maxLineLength($content);
     $entropy = shannonEntropy($content);
     return array(
         'entropy'        => $entropy,
-        'total_tokens'   => count($textSet),
+        'total_tokens'   => count($textSets['all']),
         'ml_features'    => $withMl ? mlFeatures($code['sig'], $maxLine, $entropy) : null,
         'matched_tokens' => array_values(array_unique(array_merge(
-            compareTokens($tokenNeedles, $textSet),
+            compareTokens($tokenNeedles, $textSets['match']),
             findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
         ))),
         'has_php'        => hasPhpCode($content),
@@ -873,6 +895,15 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
 {
     $needleSet = array_change_key_case($tokenNeedles, CASE_LOWER);
     $inputVars = array('$_get' => 1, '$_post' => 1, '$_request' => 1, '$_cookie' => 1, '$_server' => 1, '$_files' => 1);
+    // Only names almost never passed as a plain string in legitimate code;
+    // 'system', 'exec', 'eval', 'call_user_func' are common array values and config
+    $callbackExec = array('assert' => 1, 'create_function' => 1, 'shell_exec' => 1,
+        'passthru' => 1, 'proc_open' => 1, 'popen' => 1);
+    $capabilityCheck = array('function_exists' => 1, 'function_usable' => 1, 'is_callable' => 1,
+        'method_exists' => 1, 'defined' => 1, 'in_array' => 1);
+    $includeTokens = array(T_INCLUDE => 1, T_INCLUDE_ONCE => 1, T_REQUIRE => 1, T_REQUIRE_ONCE => 1);
+    // $_SERVER (DOCUMENT_ROOT, SCRIPT_NAME) is a routine, benign include base; the request vars aren't
+    $requestVars = array('$_get' => 1, '$_post' => 1, '$_request' => 1, '$_cookie' => 1);
 
     // Code up to __halt_compiler(); what follows it is data
     $sig = $code['sig'];
@@ -884,6 +915,8 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
 
         // String literal, or a chain of them joined with "."
         if ($id == T_CONSTANT_ENCAPSED_STRING) {
+            $prevText = ($i > 0) ? $sig[$i - 1][1] : '';
+            $startCaller = ($i > 1 && $prevText == '(') ? $sig[$i - 2][1] : '';
             $value = stringTokenValue($text);
             $parts = 1;
             $escaped = (substr($text, 0, 1) == '"' && strpos($text, '\\') !== false);
@@ -900,6 +933,16 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
             if (($parts > 1 || $escaped || $isCall) && isset($needleSet[$name]) && preg_match('/^[a-z_][a-z0-9_]*$/', $name)) {
                 $found[$name] = true;
                 $found['@concat_name'] = true;
+            }
+            // An execution function named as a string in a call-argument or
+            // array-value position ("(", "," or "=>"): array_map('assert', ...),
+            // call_user_func('system', ...), filter_var(.., array('options' => 'assert')).
+            // The name is reached by a callback, not written as a call, so the
+            // token matcher never sees it.
+            $argOfCall = $prevText == '(' && !isset($capabilityCheck[strtolower($startCaller)]);
+            if (isset($callbackExec[$name]) && ($argOfCall || $prevText == '=>')) {
+                $found[$name] = true;
+                $found['@callback_exec'] = true;
             }
             continue;
         }
@@ -939,6 +982,22 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
                 }
             }
         }
+
+        // include/require of a stream wrapper or a raw superglobal: include
+        // 'php://input', include $_GET[...] (remote/local file inclusion).
+        // The token matcher sees only "include", weight 0.1.
+        if (isset($includeTokens[$id])) {
+            $arg = ($i + 1 < $n && $sig[$i + 1][1] == '(') ? $i + 2 : $i + 1;
+            if ($arg < $n) {
+                if ($sig[$arg][0] == T_CONSTANT_ENCAPSED_STRING
+                    && preg_match('#^(php|data):#i', stringTokenValue($sig[$arg][1]))) {
+                    $found['@wrapper_include'] = true;
+                } elseif ($sig[$arg][0] == T_VARIABLE && isset($requestVars[strtolower($sig[$arg][1])])) {
+                    $found['@input_include'] = true;
+                }
+            }
+        }
+
     }
 
     // ASP/JSP/CGI shell code in a file named like PHP (no PHP in it at all):

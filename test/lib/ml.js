@@ -9,11 +9,14 @@ const path = require('path');
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const { MAIN, PHP_JOBS, ROW_CACHE: CACHE_DIR } = require('./paths');
 const { phpJob, runResumable, execAsync, parseRows } = require('./php');
-const { isRunnable, contentOnly } = require('./corpora');
+const { isHost, pairUp, runInjection } = require('./inject');
+const { tempDir } = require('./cleanup');
+const { isRunnable, notShells, contentOnly } = require('./corpora');
 const { constant, extractorSource } = require('./scanner');
 const { sha1, groupBy } = require('./util');
 
 const EXTRACT_PHP = path.join(PHP_JOBS, 'extract.php');
+const INJECT_PHP = path.join(PHP_JOBS, 'inject.php');
 
 // --- Features ---
 
@@ -84,13 +87,14 @@ function decodeBits(hex) {
 /**
  * Labelled, de-duplicated samples from the cached rows of each corpus.
  * Each corpus is rule-scored on its own (as a scan of it would be). Dropped:
- * .htaccess files, shell-collection files that can't run (isRunnable),
+ * .htaccess files, shell-collection files that can't run (isRunnable) or
+ * aren't shells (test/corpora/not-shells.txt),
  * and exact copies (by MD5); a file that also ships in a benign project is
  * benign. Keeps `hex` for the first `keepHex` samples (scorer parity checks).
  */
 function buildSamples(corpora, ctx, { keepHex = 500 } = {}) {
     const all = [];
-    const dropped = { htaccess: 0, notCode: 0, conflicts: 0 };
+    const dropped = { htaccess: 0, notCode: 0, notShells: 0, conflicts: 0 };
     for (const c of corpora) {
         const raw = contentOnly(parseRows(fs.readFileSync(c.cache, 'utf8')));
         const scored = ctx.analyzeData(raw, constant(ctx, 'Z_THRESHOLD'));
@@ -98,8 +102,10 @@ function buildSamples(corpora, ctx, { keepHex = 500 } = {}) {
             if (!d.ml_features) return;
             if (d.is_htaccess) { dropped.htaccess++; return; }
             if (c.label === 'shell' && !isRunnable(d)) { dropped.notCode++; return; }
+            if (c.label === 'shell' && notShells().has(d.md5)) { dropped.notShells++; return; }
             all.push({
                 id: c.name + '/' + d.path, corpus: c.name, family: c.family, label: c.label === 'shell' ? 1 : 0, md5: d.md5,
+                file: path.join(c.dir, d.path), size: d.size,
                 foreign: !d.has_php, bits: decodeBits(d.ml_features), hex: all.length < keepHex ? d.ml_features : null,
                 ruleAnomaly: scored[i].isAnomaly && !scored[i].mlOnly, ruleScore: scored[i].ruleScore,
             });
@@ -175,6 +181,48 @@ function capPerCorpus(benign, cap) {
         out.push(...list.map(d => ({ d, h: sha1(d.md5) })).sort((a, b) => (a.h < b.h ? -1 : 1)).slice(0, cap).map(x => x.d));
     }
     return out;
+}
+
+// --- The injected-shell set ---
+
+/**
+ * Each PHP shell inserted into a legitimate host file of its own fold, so
+ * the model that holds the shell out never saw the host's project family
+ * either, and the other models may train on it (--augment). The rows come
+ * from test/php/inject.php, cached in the row cache. Resolves to
+ * [{ shell, host, fold, row, bits }].
+ */
+async function injectSamples(samples, key) {
+    const asRow = d => ({ has_php: !d.foreign, is_htaccess: false, size: d.size });
+    const hostsByFold = groupBy(samples.filter(d => !d.label && isHost(asRow(d))), d => d.fold);
+    const pairs = [];
+    for (const [fold, shells] of groupBy(samples.filter(d => d.label && !d.foreign), d => d.fold)) {
+        pairUp(shells.map(d => ({ key: d.md5, d })), (hostsByFold.get(fold) || []).map(d => ({ key: d.id, d }))).forEach(({ shell, host }) => {
+            const id = shell.d.id + ' -> ' + host.d.id;
+            if (!/[\t\n]/.test(id)) pairs.push({ shellPath: shell.d.file, hostPath: host.d.file, id, shell: shell.d, host: host.d });
+        });
+    }
+    const cacheKey = sha1(key + fs.readFileSync(INJECT_PHP, 'utf8') + pairs.map(p => p.id).join('\n')).slice(0, 12);
+    const cache = path.join(CACHE_DIR, `injected-${cacheKey}.jsonl`);
+    if (!fs.existsSync(cache)) {
+        const work = tempDir('inject');
+        const chunks = Array.from({ length: os.cpus().length }, (_, i) => pairs.filter((p, j) => j % os.cpus().length === i)).filter(c => c.length);
+        const parts = await Promise.all(chunks.map((chunk, i) => {
+            const state = path.join(work, 'state-' + i);
+            const read = name => { try { return fs.readFileSync(path.join(state, name), 'utf8'); } catch (e) { return ''; } };
+            return runInjection({ pairs: chunk, php: f => execAsync('php', ['-d', 'error_log=' + path.join(work, 'php-errors.log'), f]), read, state, work, name: 'inject-' + i });
+        }));
+        parts.forEach(p => p.crashed.forEach(id => process.stderr.write(`PHP crashed on injected ${id}, skipped\n`)));
+        fs.mkdirSync(CACHE_DIR, { recursive: true });
+        fs.writeFileSync(cache + '.tmp', parts.map(p => p.rows.map(r => JSON.stringify(r)).join('\n')).join('\n') + '\n');
+        fs.renameSync(cache + '.tmp', cache);
+        fs.readdirSync(CACHE_DIR).filter(f => /^injected-[0-9a-f]{12}\.jsonl$/.test(f) && path.join(CACHE_DIR, f) !== cache).forEach(f => fs.rmSync(path.join(CACHE_DIR, f)));
+    }
+    const byId = new Map(parseRows(fs.readFileSync(cache, 'utf8')).filter(r => r.ml_features).map(r => [r.path, r]));
+    return pairs.filter(p => byId.has(p.id)).map(p => {
+        const row = byId.get(p.id);
+        return { shell: p.shell, host: p.host, fold: p.shell.fold, row, bits: decodeBits(row.ml_features) };
+    });
 }
 
 // --- Training ---
@@ -266,6 +314,6 @@ function scorer(model) {
 }
 
 module.exports = {
-    CACHE_DIR, featureKey, extractTo, extractCorpus, decodeBits, buildSamples, assignGroups, assignFolds, capPerCorpus,
+    CACHE_DIR, featureKey, extractTo, extractCorpus, decodeBits, buildSamples, injectSamples, assignGroups, assignFolds, capPerCorpus,
     pack, train, trainParallel, quantize, scorer,
 };

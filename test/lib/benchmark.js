@@ -13,12 +13,13 @@ const fs = require('fs');
 const path = require('path');
 const { ROOT, PHP_JOBS } = require('./paths');
 const { phpJob, runResumable, parseRows } = require('./php');
-const { benchmarkSet, isRunnable, contentOnly } = require('./corpora');
+const { benchmarkSet, isShellSample, contentOnly } = require('./corpora');
 const { loadScoring, constant, readModel } = require('./scanner');
 const { rates, pct } = require('./util');
 const selfcheck = require('./selfcheck');
 const { startContainer } = require('./targets');
 const { webCheck } = require('./webcheck');
+const { isHost, pairUp, runInjection } = require('./inject');
 
 // Options both commands take
 const OPTIONS = {
@@ -34,7 +35,7 @@ async function runBenchmark(targets, args, work) {
     const bench = benchmarkSet();
     const shellPrefixes = bench.filter(c => c.label === 'shell').map(c => c.path + '/');
     const inShellCorpus = d => shellPrefixes.some(p => d.rel.startsWith(p));
-    const isMal = d => inShellCorpus(d) && isRunnable(d);
+    const isMal = d => inShellCorpus(d) && isShellSample(d);
     const inTarget = (t, hostPath) => path.join(t.work, path.relative(work, hostPath));
 
     async function runUnitChecks(t) {
@@ -58,9 +59,9 @@ async function runBenchmark(targets, args, work) {
         const threshold = args.threshold ? parseFloat(args.threshold) : constant(ctx, 'Z_THRESHOLD');
         const anomalyScore = constant(ctx, 'ANOMALY_SCORE'), criticalScore = constant(ctx, 'CRITICAL_SCORE');
         const scored = ctx.analyzeData(rows, threshold);
-        const notCode = scored.filter(d => inShellCorpus(d) && !isRunnable(d));
+        const notCode = scored.filter(d => inShellCorpus(d) && !isShellSample(d));
         const mal = scored.filter(isMal), ben = scored.filter(d => !inShellCorpus(d));
-        if (notCode.length) console.log(`not counted        ${notCode.length} shell-corpus file(s) with no server code: ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
+        if (notCode.length) console.log(`not counted        ${notCode.length} shell-corpus file(s) that aren't shells (no server code, or in not-shells.txt): ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
         const line = (label, hit) => {
             const r = rates(mal, ben, hit);
             console.log(`${label.padEnd(18)} detected ${r.tp}/${r.nMal} (${pct(r.tp, r.nMal)})   false positives ${r.fp}/${r.nBen} (${pct(r.fp, r.nBen)})`);
@@ -76,7 +77,27 @@ async function runBenchmark(targets, args, work) {
         line('  ml only*', d => d.mlOnly);
         console.log('  * trained on these samples; test/run train for held-out rates');
         if (args.dump) fs.writeFileSync(args.dump, JSON.stringify(scored.map(d => Object.assign({ mal: isMal(d) }, d))));
-        return { scored, anomaly, weights: summary.weights };
+        return { scored, anomaly, weights: summary.weights, ctx, threshold };
+    }
+
+    // The harder test: every benchmark shell (PHP ones) inserted into a
+    // legitimate file of the benchmark projects, scored among those projects'
+    // own files, as a scan of an infected site would see it
+    async function injectedTest(t, rows, ctx, threshold) {
+        const shells = rows.filter(d => isMal(d) && d.has_php).map(d => ({ key: d.md5, rel: d.rel }));
+        const hosts = rows.filter(d => !inShellCorpus(d) && isHost(d)).map(d => ({ key: d.rel, rel: d.rel }));
+        const pairs = pairUp(shells, hosts).map(({ shell, host }) => ({
+            shellPath: path.join(t.repo, shell.rel), hostPath: path.join(t.repo, host.rel), id: shell.rel + ' -> ' + host.rel,
+        }));
+        const { rows: injected } = await runInjection({
+            pairs, php: t.php, read: f => t.read('inject/' + f), state: path.join(t.state, 'inject'),
+            work, phpWork: t.work, repo: t.repo, name: 'inject-' + (t.container || 'local'),
+        });
+        const benign = rows.filter(d => !inShellCorpus(d));
+        const scored = ctx.analyzeData(benign.concat(contentOnly(injected)), threshold).slice(benign.length);
+        const tp = scored.filter(d => d.isAnomaly).length;
+        console.log(`injected           detected ${tp}/${pairs.length} (${pct(tp, pairs.length)})   each shell inserted into a legitimate file`);
+        return { tp, n: pairs.length, scored };
     }
 
     async function runTarget(t) {
@@ -96,6 +117,12 @@ async function runBenchmark(targets, args, work) {
         if (r.unitFailures.length) fail();
         if (ex.summary) {
             Object.assign(r, benchmark(ex.summary, ex.rows));
+            try {
+                r.injected = await injectedTest(t, ex.rows, r.ctx, r.threshold);
+            } catch (e) {
+                console.log('injected           FAIL: ' + e.message);
+                fail();
+            }
         } else {
             console.log(t.supported ? 'FAIL: feature extraction produced no JSON' : 'feature extraction failed (expected: below the PHP 4.3 floor)');
             fail();
@@ -115,10 +142,11 @@ async function runBenchmark(targets, args, work) {
         results.forEach(r => { r.diff = r.scored ? r.scored.filter(d => signature(refByRel.get(d.rel) || { matched_tokens: [] }) !== signature(d)) : []; });
         if (results.length < 2) return refByRel;
         console.log(`\n== Summary (matches compared with ${ref.t.name})`);
-        console.log('PHP                    unit checks  anomaly detected / FP      web  files matching differently');
+        console.log('PHP                    unit checks  anomaly detected / FP      injected   web  files matching differently');
         results.forEach(r => console.log((r.t.v ? r.t.v + (r.t.profile !== 'default' ? ' ' + r.t.profile : '') : r.t.name).padEnd(22) + ' ' +
             (r.unitFailures ? (r.unitFailures.length ? r.unitFailures.length + ' FAILED' : 'OK') : '-').padEnd(12) + ' ' +
             (r.anomaly ? `${r.anomaly.tp} / ${r.anomaly.fp}` : (r.t.supported ? 'FAIL' : 'n/a (below 4.3)')).padEnd(26) + ' ' +
+            (r.injected ? `${r.injected.tp}/${r.injected.n}` : '-').padEnd(10) + ' ' +
             (r.web ? (r.web.ok ? 'OK' : 'FAIL') : '-').padEnd(4) + ' ' +
             (r.scored ? r.diff.length : '-') + (r.crashed && r.crashed.length ? `  (PHP crashed on ${r.crashed.length} file(s), skipped)` : '')));
         return refByRel;
@@ -133,6 +161,10 @@ async function runBenchmark(targets, args, work) {
     function printLists(results, ref, refByRel) {
         console.log(`\n${ref.t.name} MISSED:`);
         ref.scored.filter(d => isMal(d) && !d.isAnomaly).forEach(d => console.log('  ' + d.rel + '  [' + d.matched_tokens.join(', ') + ']'));
+        if (ref.injected) {
+            console.log(`\n${ref.t.name} INJECTED MISSES:`);
+            ref.injected.scored.filter(d => !d.isAnomaly).forEach(d => console.log('  ' + d.path + '  score=' + d.threatScore + '  [' + d.matched_tokens.join(', ') + ']'));
+        }
         console.log(`\n${ref.t.name} FALSE POSITIVES:`);
         ref.scored.filter(d => !inShellCorpus(d) && d.isAnomaly).forEach(d => console.log('  ' + d.rel + '  score=' + d.threatScore + '  [' + d.matched_tokens.join(', ') + ']'));
         results.filter(r => r !== ref && r.diff && r.diff.length).forEach(r => {
