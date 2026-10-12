@@ -236,10 +236,48 @@ revisiting one.
   injected case. Same features and LR format, so ml-model.json stays v2 and
   scores stay stable across PHP versions — the only cost is the recall shift.
   Left off by default (the plain model ships); `--augment` is there for a
-  deployment that specifically expects injected backdoors. Closing the gap
-  without the standalone cost needs per-function/class scoring (score each
-  function or class and take the max, so surrounding benign code can't dilute
-  a shell) — a larger change and a feature-version bump, not done here.
+  deployment that specifically expects injected backdoors. The gap is closed
+  instead by per-unit scoring (below), which needed no retrain or feature bump.
+- **Per-unit ML scoring** (`mlFeatureUnits()`, `mlScoreUnits()`,
+  `ML_UNIT_FLOOR`): the injected gap is a *scoring*-time problem, not a model
+  problem — a shell's features are diluted only because they're averaged over a
+  whole big file. So `mlFeatures()` is also run on each top-level function and
+  class on its own (emitted in `ml_units`), and the page takes the max over the
+  whole file and those units. A unit counts only if it independently clears
+  `ML_UNIT_FLOOR`, held at `ML_THRESHOLD` (the bar a whole file clears to be
+  flagged). The whole-file score is always one term, so this can't lower a
+  score — clean-shell detection and old installs (which ignore `ml_units`) are
+  untouched, and `ml-model.json` stays exactly as is. `test/run train` reports
+  the held-out rates. Design notes, all measured in the prototype
+  (`scratchpad`, grouped-family holdout) and confirmed on the pipeline:
+  - The win is large and the standalone cost is nil (the max only ever adds).
+  - **Retraining on per-unit samples makes everything worse**, not better:
+    labelling every benign function negative pulls down shell-feature weights,
+    and a shell file's benign helper functions become noisy positives — clean,
+    injected *and* whole-file detection all dropped. The existing whole-file
+    model is the right one to score per-unit.
+  - The gate is the whole trick. Ungated (any unit counts), benign framework
+    functions that merely look odd in isolation (getid3, PHPMailer, a crypto
+    lib) roughly double the benign false positives. Gating sub-units at the
+    flag threshold removes almost all of that while keeping the injected win,
+    because an injected shell and a benign file with one dynamic-dispatch
+    function are the *same shape* below the bar — the separation only appears
+    once a unit is shell-like enough to be flagged on its own.
+  - Besides functions and classes, a head and a tail window
+    (`ML_UNIT_WINDOW` tokens) are scored, where an inline shell pasted at the
+    top or bottom of a file lands — the common injection no function unit
+    catches. Held out this lifts injected detection (combined 80.5% -> 84.5%,
+    ML alone 63% -> 71%) for +0.2pt benign false positives (~0.2% -> ~0.3% ML
+    only). It works because a file's head and tail are usually declaration
+    boilerplate, not shell-like.
+  - Chopping the *whole* main body into windows (not just head/tail) was
+    tried and **rejected**: about the same injected gain but tripled the
+    ML-only benign false positives (~0.2% -> ~0.6%, ~1,600 more flagged per
+    389k) — an arbitrary window of benign procedural *middle* code has no
+    semantic boundary and scores like a shell, where the head/tail boilerplate
+    doesn't. Two windows at the injection sites, not the body shredded.
+    (`test/run train` prints all of these; drop the head/tail block in
+    `mlFeatureUnits()` for the lower-false-positive, function-only variant.)
 - **not-shells.txt** (`test/corpora/`): files inside the webshell collections
   that aren't shells (bundled libraries, config, `phpinfo()` pages, include
   stubs), matched by MD5. Dropped from training and the benchmark. Add to it,
@@ -248,7 +286,7 @@ revisiting one.
   tried for the string-named-function blind spot and reverted: +0.8 pt on
   injected shells didn't earn the `ML_FEATURE_VERSION` bump (older installs
   then refuse the model). `@callback_exec` covers the common case in the rules
-  at no feature churn. The deeper fix stays per-function/class scoring.
+  at no feature churn. The injected blind spot is closed by per-unit scoring.
 - After making important decision dump it here
 
 ## Style

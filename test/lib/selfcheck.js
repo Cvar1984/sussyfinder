@@ -52,6 +52,8 @@ const CASES = [
 // named .php, a "root -> /" symlink (not followed, but warned about), and
 // non-PHP names.
 const LISTING_WANT = ['.user.ini', 'a.php', 'caf%E9.php', 'deep.php', 'it%27s%20%22odd%22.php', 'linked.php', 'shell.php.', 'x.php.jpg'].sort();
+// Expected mlFeatureUnits() unit counts for selfcheck.php's probes, in order.
+const UNIT_PROBES = [1, 4];
 function buildFixture(work) {
     const fixture = path.join(work, 'fixture');
     fs.mkdirSync(path.join(fixture, 'sub'), { recursive: true });
@@ -113,6 +115,15 @@ function check(out, models) {
     if (JSON.stringify(listed) !== JSON.stringify(LISTING_WANT)) failures.push(`listing: got [${listed.join(', ')}]`);
     if (out.outside_warned !== true) failures.push('listing: no warning for the symlink leading outside');
     models.want.forEach((ok, i) => { if ((out.models || [])[i] !== ok) failures.push(`ml-model.json check: ${models.names[i]} should be ${ok ? 'accepted' : 'refused'}`); });
+    // mlFeatureUnits() segmentation, in selfcheck.php's probe order: inline-only
+    // code is one vector (the whole file), functions+class around a main body
+    // is four (whole + alpha + Beta + main). The first is always the whole file.
+    UNIT_PROBES.forEach((want, i) => {
+        const got = (out.units || [])[i];
+        if (!got || got.count !== want || got.firstIsWhole !== true) {
+            failures.push(`mlFeatureUnits probe ${i}: want ${want} units (whole-file first), got ${JSON.stringify(got)}`);
+        }
+    });
     return failures;
 }
 
@@ -130,7 +141,7 @@ async function run({ work, php, repo, phpWork = work, name = 'selfcheck' }) {
     const job = phpJob(path.join(work, name + '.php'), path.join(repo, path.relative(ROOT, JOB)), prep.vars(path.join(repo, 'main.php'), phpWork));
     try {
         const out = jobJson(await php(inPhp(job)));
-        return { php: out.php, failures: check(out, prep.models), summary: `${CASES.length} detector cases, listing, ${prep.models.names.length} model files` };
+        return { php: out.php, failures: check(out, prep.models), summary: `${CASES.length} detector cases, listing, ${prep.models.names.length} model files, ${UNIT_PROBES.length} unit probes` };
     } catch (e) {
         return { php: '?', failures: ['the PHP self-check produced no JSON: ' + e.message.split('\n')[0]] };
     }

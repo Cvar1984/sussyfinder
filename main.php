@@ -81,6 +81,19 @@ define('ML_BUCKETS', 2048);
 // Bump whenever mlFeatures() changes what it emits: a model trained on other
 // features is refused (ml-model.json carries the version it was trained on)
 define('ML_FEATURE_VERSION', 2);
+// Per-unit scoring (mlFeatureUnits()): score each top-level function/class on
+// its own so a shell injected into a big legitimate file isn't diluted away.
+// Cap the units a file yields, and the smallest slice worth its own unit. A
+// head and a tail window of this many tokens are scored too, where an inline
+// shell pasted at the top or bottom of a file lands.
+define('ML_MAX_UNITS', 64);
+define('ML_MIN_UNIT_TOKENS', 12);
+define('ML_UNIT_WINDOW', 150);
+// Below this many significant tokens a file is too small to dilute a shell —
+// the whole-file score already sees it — so no per-unit vectors are emitted,
+// which keeps ml_units off the many tiny files in a scan (page weight). 60
+// drops almost no injected detection; higher loses it fast (test/run train).
+define('ML_UNIT_MIN_FILE_TOKENS', 60);
 
 // Which files to scan, matched against the file name: a PHP-ish or SSI last
 // extension, "php" as an inner extension ("x.php.jpg" and "x.php." run as PHP
@@ -234,6 +247,7 @@ if (function_exists('get_magic_quotes_runtime') && @get_magic_quotes_runtime()) 
 $compatTokenId = -1;
 foreach (array('T_DOC_COMMENT', 'T_ML_COMMENT', 'T_NULLSAFE_OBJECT_OPERATOR', 'T_NS_SEPARATOR', 'T_NAMESPACE',
     'T_NAME_QUALIFIED', 'T_NAME_FULLY_QUALIFIED', 'T_NAME_RELATIVE', 'T_ATTRIBUTE', 'T_MATCH', 'T_ENUM', 'T_READONLY',
+    'T_INTERFACE', 'T_TRAIT',
     'T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG', 'T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG') as $compatToken) {
     if (!defined($compatToken)) {
         define($compatToken, $compatTokenId--);
@@ -803,10 +817,28 @@ function analyzeContent($content, $tokenNeedles, $withMl)
     $textSets = tokenTextSets($code['sig']);
     $maxLine = maxLineLength($content);
     $entropy = shannonEntropy($content);
+    // Per-unit vectors (mlFeatureUnits()): ml_features is the whole file (what
+    // the model is trained on); ml_units are its top-level functions and classes
+    // scored on their own, so a shell injected into a big legitimate file isn't
+    // diluted. Files too small to dilute a shell (and files with no top-level
+    // units) emit ml_features alone — the common tiny file stays light.
+    $totalTokens = count($textSets['all']);
+    if (!$withMl) {
+        $mlFeatures = null;
+        $mlUnits = null;
+    } elseif ($totalTokens >= ML_UNIT_MIN_FILE_TOKENS) {
+        $units = mlFeatureUnits($code['sig'], $maxLine, $entropy);
+        $mlFeatures = $units[0];
+        $mlUnits = count($units) > 1 ? array_slice($units, 1) : null;
+    } else {
+        $mlFeatures = mlFeatures($code['sig'], $maxLine, $entropy);
+        $mlUnits = null;
+    }
     return array(
         'entropy'        => $entropy,
-        'total_tokens'   => count($textSets['all']),
-        'ml_features'    => $withMl ? mlFeatures($code['sig'], $maxLine, $entropy) : null,
+        'total_tokens'   => $totalTokens,
+        'ml_features'    => $mlFeatures,
+        'ml_units'       => $mlUnits,
         'matched_tokens' => array_values(array_unique(array_merge(
             compareTokens($tokenNeedles, $textSets['match']),
             findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
@@ -1030,6 +1062,21 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
  */
 function mlFeatures($sig, $maxLine, $entropy)
 {
+    return mlEncodeBits(mlFeatureSet($sig, $maxLine, $entropy));
+}
+
+/**
+ * The set of feature strings for $sig (keys of the returned array), before
+ * they are hashed into a bitmap. Split out of mlFeatures() so the same code
+ * builds a whole-file vector and a per-unit vector (mlFeatureUnits()).
+ *
+ * @param array $sig     codeTokens() 'sig' (whole file, or one unit's slice)
+ * @param int   $maxLine maxLineLength() of the content
+ * @param float $entropy shannonEntropy() of the content
+ * @return array feature string => 1
+ */
+function mlFeatureSet($sig, $maxLine, $entropy)
+{
     static $names = array(); // token_name() cache
     $member = memberTokenIds();
     $member[T_NEW] = true;
@@ -1075,7 +1122,19 @@ function mlFeatures($sig, $maxLine, $entropy)
     $set['f:line' . strlen(decbin($maxLine))] = 1;
     $set['f:tok' . strlen(decbin($n))] = 1;
     $set['f:ent' . (int) ($entropy * 4)] = 1;
+    return $set;
+}
 
+/**
+ * Hash a feature set (mlFeatureSet()) into a hex bitmap of ML_BUCKETS bits.
+ * Each feature is a short string hashed into a bucket with crc32; "& mask"
+ * keeps the low bits the same on 32- and 64-bit PHP.
+ *
+ * @param array $set feature string => 1
+ * @return string
+ */
+function mlEncodeBits($set)
+{
     $mask = ML_BUCKETS - 1;
     $bits = array_fill(0, ML_BUCKETS / 4, 0);
     foreach ($set as $feature => $one) {
@@ -1087,6 +1146,91 @@ function mlFeatures($sig, $maxLine, $entropy)
         $hex .= dechex($nibble);
     }
     return $hex;
+}
+
+/**
+ * Per-unit feature bitmaps: the whole file, then each top-level function,
+ * class, interface or trait on its own, then whatever top-level code is left
+ * (the "main body"). A shell injected into a large legitimate file dilutes
+ * the whole-file vector until the model can't see it; scoring each unit on
+ * its own and taking the max keeps the shell's own function visible however
+ * much benign code surrounds it. The whole-file vector stays first so the
+ * caller can fall back to it (and so an installer that only reads one still
+ * sees the old behaviour).
+ *
+ * Units are capped so a pathological file (thousands of tiny functions) can't
+ * blow up scoring; tiny slices are folded into the main body instead of
+ * becoming their own unit.
+ *
+ * @param array $sig     codeTokens() 'sig'
+ * @param int   $maxLine maxLineLength() of the content
+ * @param float $entropy shannonEntropy() of the content
+ * @return array hex bitmaps, whole file first
+ */
+function mlFeatureUnits($sig, $maxLine, $entropy)
+{
+    $starters = array(T_FUNCTION => 1, T_CLASS => 1, T_INTERFACE => 1, T_TRAIT => 1);
+    $units = array(mlFeatures($sig, $maxLine, $entropy));
+    $n = count($sig);
+    $main = array();
+    $count = 0;
+    $depth = 0; // brace depth of top-level code, so a method or closure is not its own unit
+    $i = 0;
+    while ($i < $n) {
+        $id = $sig[$i][0];
+        if ($depth <= 0 && $count < ML_MAX_UNITS && isset($starters[$id])) {
+            $unit = array();
+            $uDepth = 0;
+            $opened = false;
+            for (; $i < $n; $i++) {
+                $unit[] = $sig[$i];
+                $t = $sig[$i][1];
+                if ($t == '{') {
+                    $uDepth++;
+                    $opened = true;
+                } elseif ($t == '}') {
+                    $uDepth--;
+                    if ($opened && $uDepth <= 0) {
+                        $i++;
+                        break;
+                    }
+                } elseif ($t == ';' && !$opened) {
+                    // A forward declaration or abstract method: no body.
+                    $i++;
+                    break;
+                }
+            }
+            if (count($unit) >= ML_MIN_UNIT_TOKENS) {
+                $units[] = mlFeatures($unit, $maxLine, $entropy);
+                $count++;
+            } else {
+                foreach ($unit as $tok) {
+                    $main[] = $tok;
+                }
+            }
+        } else {
+            $t = $sig[$i][1];
+            if ($t == '{') {
+                $depth++;
+            } elseif ($t == '}') {
+                $depth--;
+            }
+            $main[] = $sig[$i];
+            $i++;
+        }
+    }
+    if (count($main) >= ML_MIN_UNIT_TOKENS && count($main) < $n) {
+        $units[] = mlFeatures($main, $maxLine, $entropy);
+    }
+    // A head and a tail window, where an inline shell pasted at the top or
+    // bottom of a file lands — the common injection that no function unit
+    // catches. Only two windows (not the whole body chopped up), so benign
+    // files add little: their head and tail are usually declaration boilerplate.
+    if ($n > 2 * ML_UNIT_WINDOW) {
+        $units[] = mlFeatures(array_slice($sig, 0, ML_UNIT_WINDOW), $maxLine, $entropy);
+        $units[] = mlFeatures(array_slice($sig, $n - ML_UNIT_WINDOW), $maxLine, $entropy);
+    }
+    return $units;
 }
 
 /**
@@ -1108,6 +1252,7 @@ function featureRow($path, $fields)
         'entropy'        => null,
         'total_tokens'   => null,
         'ml_features'    => null,
+        'ml_units'       => null,
         'matched_tokens' => array('NOT_READABLE'),
         'md5'            => 'N/A',
         'is_blacklisted' => false,
@@ -2283,6 +2428,17 @@ if (isset($_POST['ajax_action'])) {
             // 0.6 on test/run bench: lower adds false positives, higher loses catches
             // (test/run train reports the same sweep on held-out scores)
             const ML_FLOOR = 0.6;
+            // Per-unit scoring (mlScoreUnits): a single top-level function or
+            // class counts as a shell on its own only if it independently clears
+            // this bar — the same bar a whole file must clear to be flagged. A
+            // shell injected into a big legitimate file is diluted in the
+            // whole-file score but its own function still clears it; benign
+            // functions that merely look odd in isolation (below the bar) are
+            // ignored, so this closes the injection blind spot at almost no cost
+            // in false positives (test/run train reports both). Held at
+            // ML_THRESHOLD, not ML_FLOOR, on purpose: the partial-points band is
+            // where benign functions crowd in.
+            const ML_UNIT_FLOOR = ML_THRESHOLD;
 
             // floor: ML_FLOOR unless given (test/run train sweeps it)
             function mlPoints(ml, floor) {
@@ -2329,6 +2485,29 @@ if (isset($_POST['ajax_action'])) {
                     if (nibble & 8) sum += w[k + 3];
                 }
                 return 1 / (1 + Math.exp(-(model.bias + sum * model.scale)));
+            }
+
+            /**
+             * ML score for a file: the whole-file score, raised to a top-level
+             * function/class's own score when that unit independently clears
+             * ML_UNIT_FLOOR (ml_units from the server). A shell injected into a
+             * big legitimate file dilutes the whole-file vector until the model
+             * can't see it; its own function, scored alone, still clears the
+             * bar. A unit below the bar is ignored, so a benign file with one
+             * odd-looking function isn't dragged up. The whole-file score is the
+             * floor of the result, so clean-file detection never regresses.
+             * @param {Object} d row with ml_features and optional ml_units
+             * @return {number|null}
+             */
+            function mlScoreUnits(d) {
+                let ml = mlScore(d.ml_features);
+                if (ml !== null && d.ml_units) {
+                    for (let i = 0; i < d.ml_units.length; i++) {
+                        const u = mlScore(d.ml_units[i]);
+                        if (u !== null && u >= ML_UNIT_FLOOR && u > ml) ml = u;
+                    }
+                }
+                return ml;
             }
 
             function medianOf(sorted) {
@@ -2424,7 +2603,7 @@ if (isset($_POST['ajax_action'])) {
 
                     // The ML model was trained on PHP, so .htaccess files aren't scored.
                     // Its points are added after the rule multipliers, never multiplied.
-                    const ml = d.is_htaccess ? null : mlScore(d.ml_features);
+                    const ml = d.is_htaccess ? null : mlScoreUnits(d);
                     const mlPts = mlPoints(ml);
                     const ruleScore = calculateThreatScore(d, weights);
                     let threatScore = Math.round((ruleScore + mlPts) * 100) / 100;

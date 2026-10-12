@@ -106,7 +106,8 @@ function buildSamples(corpora, ctx, { keepHex = 500 } = {}) {
             all.push({
                 id: c.name + '/' + d.path, corpus: c.name, family: c.family, label: c.label === 'shell' ? 1 : 0, md5: d.md5,
                 file: path.join(c.dir, d.path), size: d.size,
-                foreign: !d.has_php, bits: decodeBits(d.ml_features), hex: all.length < keepHex ? d.ml_features : null,
+                foreign: !d.has_php, bits: decodeBits(d.ml_features), unitBits: (d.ml_units || []).map(decodeBits),
+                hex: all.length < keepHex ? d.ml_features : null,
                 ruleAnomaly: scored[i].isAnomaly && !scored[i].mlOnly, ruleScore: scored[i].ruleScore,
             });
         });
@@ -221,7 +222,7 @@ async function injectSamples(samples, key) {
     const byId = new Map(parseRows(fs.readFileSync(cache, 'utf8')).filter(r => r.ml_features).map(r => [r.path, r]));
     return pairs.filter(p => byId.has(p.id)).map(p => {
         const row = byId.get(p.id);
-        return { shell: p.shell, host: p.host, fold: p.shell.fold, row, bits: decodeBits(row.ml_features) };
+        return { shell: p.shell, host: p.host, fold: p.shell.fold, row, bits: decodeBits(row.ml_features), unitBits: (row.ml_units || []).map(decodeBits) };
     });
 }
 
@@ -313,7 +314,22 @@ function scorer(model) {
     return bits => { let s = 0; for (let k = 0; k < bits.length; k++) s += w[bits[k]]; return 1 / (1 + Math.exp(-(model.bias + s * model.scale))); };
 }
 
+/**
+ * main.php's mlScoreUnits(): the whole-file score raised by any top-level
+ * function/class (d.unitBits) that independently clears `floor`. Takes a sample
+ * with `bits` and optional `unitBits`, so a shell injected into a big file is
+ * scored on its own function, not diluted away. `floor` is ML_UNIT_FLOOR.
+ */
+function scorerUnits(model, floor) {
+    const sc = scorer(model);
+    return d => {
+        let ml = sc(d.bits);
+        if (d.unitBits) for (const u of d.unitBits) { const s = sc(u); if (s >= floor && s > ml) ml = s; }
+        return ml;
+    };
+}
+
 module.exports = {
     CACHE_DIR, featureKey, extractTo, extractCorpus, decodeBits, buildSamples, injectSamples, assignGroups, assignFolds, capPerCorpus,
-    pack, train, trainParallel, quantize, scorer,
+    pack, train, trainParallel, quantize, scorer, scorerUnits,
 };

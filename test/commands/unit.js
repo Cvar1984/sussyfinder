@@ -46,6 +46,24 @@ function jsTests() {
         }
     });
 
+    test("trainer's scorerUnits equals main.php's mlScoreUnits() (per-unit max)", () => {
+        const w = Float64Array.from({ length: 2048 }, (_, i) => Math.sin(i * 12.9898) * 1.5);
+        const model = ml.quantize({ w, b: 0.3 });
+        const ctx = loadScoring({ weights: {}, model });
+        const floor = constant(ctx, 'ML_UNIT_FLOOR');
+        const mlScoreUnits = constant(ctx, 'mlScoreUnits');
+        const score = ml.scorerUnits(model, floor);
+        const hexOf = seed => { let h = ''; for (let i = 0; i < 512; i++) h += ((i * 7 + seed * 13) % 16).toString(16); return h; };
+        for (let t = 0; t < 30; t++) {
+            const whole = hexOf(t);
+            const units = t % 4 === 0 ? [] : [hexOf(t + 100), hexOf(t + 200), hexOf(t + 300)];
+            const d = { ml_features: whole, ml_units: units.length ? units : null };
+            const a = score({ bits: ml.decodeBits(whole), unitBits: units.map(ml.decodeBits) });
+            const b = mlScoreUnits(d);
+            assert(Math.abs(a - b) < 1e-12, `sample ${t}: ${a} vs ${b}`);
+        }
+    });
+
     const fakeSamples = () => {
         const s = [];
         for (let i = 0; i < 60; i++) s.push({ label: 1, md5: sha1('s' + i), group: 'shell:' + (i % 20), corpus: 'shells', bits: Uint16Array.of(i % 7, 100) });

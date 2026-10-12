@@ -32,4 +32,27 @@ foreach ($SUSSY_MODELS as $file) {
     $models[] = mlModelJson($file) !== 'null';
 }
 
-echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models));
+// Per-unit ML segmentation (mlFeatureUnits()): a file with top-level functions
+// and classes yields the whole-file vector first, then one vector per unit, so
+// a shell injected into a big legitimate file is scored on its own function
+// instead of diluted. Locked per PHP version so every build segments alike.
+$unitProbes = array();
+$probes = array(
+    // inline code only: just the whole-file vector, no sub-units
+    "<?php echo \$_GET['x']; system(\$_POST['c']); \$a = base64_decode(\$_REQUEST['d']); eval(\$a);",
+    // two functions and a class around a main body: whole + 3 units
+    "<?php\n"
+        . "function alpha(\$a, \$b) { \$r = \$a + \$b; \$r = \$r * 2; \$r = str_repeat('x', \$r); return strrev(\$r); }\n"
+        . "class Beta { function gamma(\$n) { \$s = 0; for (\$i = 0; \$i < \$n; \$i++) { \$s += \$i; } return \$s; } }\n"
+        . "\$z = alpha(1, 2); \$y = strlen(\$z); echo \$y . \$z;\n",
+);
+foreach ($probes as $probe) {
+    $sig = codeTokens(getFileTokens($probe));
+    $sig = $sig['sig'];
+    $maxLine = maxLineLength($probe);
+    $entropy = shannonEntropy($probe);
+    $units = mlFeatureUnits($sig, $maxLine, $entropy);
+    $unitProbes[] = array('count' => count($units), 'firstIsWhole' => $units[0] === mlFeatures($sig, $maxLine, $entropy));
+}
+
+echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes));

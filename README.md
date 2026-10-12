@@ -364,6 +364,16 @@ $$
 
 $P_{\mathrm{ML}}$ is a ranking score from 0 to 1, not a calibrated probability. It is turned into threat points (see [ML Points](#ml-points)), so it can only raise a file's score, never lower it: the model can add flags but never clears one. `.htaccess` files aren't scored. The score appears in each row's details and as a sort order.
 
+#### Per-unit scoring
+
+A backdoor is usually injected into a legitimate file rather than dropped as its own file, and the surrounding legitimate code dilutes the whole-file feature set until the model stops seeing the shell. To counter that, `mlFeatures()` is run not only on the whole file but on each top-level function and class on its own, plus a head and a tail window where an inline shell pasted at the top or bottom of a file lands (`mlFeatureUnits()`), and the page scores every unit. With $\tau$ the unit floor (`ML_UNIT_FLOOR`):
+
+$$
+P_{\mathrm{ML}} = \max\left(P_{\text{whole file}},\ \max_{\text{unit } u}\ \lbrace P_u : P_u \ge \tau \rbrace\right)
+$$
+
+A single function counts as a shell on its own only if it independently clears $\tau$ (the same bar a whole file clears to be flagged) — so a shell's own function stays visible however much benign code surrounds it, while a benign function that merely looks odd in isolation is ignored. Because the whole-file score is always one of the terms, this never lowers a file's score, so clean-file detection can't regress; it only lifts files whose shell was being diluted. The extra per-unit bitmaps travel in `ml_units`, alongside the whole-file `ml_features`. Files too small for surrounding code to dilute a shell (below `ML_UNIT_MIN_FILE_TOKENS` tokens) send no `ml_units` at all, and a file with no top-level functions or classes and too few tokens for a head/tail split sends none either, so the many tiny files in a scan stay light. The model itself is unchanged — same features, same `ml-model.json` — so an older install that doesn't send `ml_units` simply scores the whole file as before. `test/run train` and `test/run bench` report detection on injected shells beside the same shells on their own, which is where this earns its keep.
+
 #### Where the model comes from
 
 Like the whitelist and blacklist, the model isn't built into `main.php`. When the page loads, the server downloads `ml-model.json` from this repository over verified TLS. Retraining therefore updates every install without anyone replacing `main.php`.
@@ -411,7 +421,7 @@ Before training, the data is cleaned by:
 * Whole project families share a fold, for example every WordPress version. So false positives are always measured on projects the model never trained on.
 * Folds and the per-corpus cap of legitimate training files are chosen by hashes, not a random stream, so adding or reordering samples only moves the samples that changed, and results are comparable across commits.
 
-`test/run train` also runs the harder **injected test**: each PHP shell inserted into a legitimate file of its own fold (a model that holds the shell out never saw the host's project family either), the way real backdoors arrive, built by [`test/php/inject.php`](test/php/inject.php). It prints detection on the injected files beside the same shells on their own, so the gap shows how much surrounding legitimate code hides a shell. `--augment` also trains on those injected copies. `test/run bench` and `test/run matrix` run a smaller injected check over the benchmark set.
+`test/run train` also runs the harder **injected test**: each PHP shell inserted into a legitimate file of its own fold (a model that holds the shell out never saw the host's project family either), the way real backdoors arrive, built by [`test/php/inject.php`](test/php/inject.php). It prints detection on the injected files beside the same shells on their own, so the gap shows how much surrounding legitimate code hides a shell — the gap [per-unit scoring](#per-unit-scoring) is there to close. `--augment` also trains on those injected copies. `test/run bench` and `test/run matrix` run a smaller injected check over the benchmark set.
 
 The five fold models and the final model train at the same time in worker threads. Extracted features are cached in `test/corpora/.rows/`, one file per sample commit, and re-extracted only when `main.php`'s extractor or `test/php/extract.php` changes.
 
