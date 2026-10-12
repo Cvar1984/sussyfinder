@@ -6,6 +6,10 @@
 29f61d48b3be6cc37dc4aeeb0d60f781  tanjiti-webshell-sample/php/29f61d48b3be6cc37dc4aeeb0d60f781.php  # PHP port of the Dean Edwards JavaScript packer (a library)
 bb4e7c925a14552da321db28af2de597  b374k/module/database.php  # b374k's database tab: a SQL client page, no execution of its own
 73ad4c144fa2021270c2411f5a7ac8a1  b374k/module/mail.php  # b374k's mail tab: a mail form, no execution of its own
+5ebd9d7c00f24e245cfaf0d9abb9996a  b374k/module/convert.php  # b374k's convert tab: an encode/decode form, no execution of its own
+f6ea0f271cdba45734f7a5e3352ff93d  b374k/module/processes.php  # b374k's processes tab: a process-list page, no execution of its own
+87b6a75d418407fcbd81fb46c2f52f26  b374k/base/layout.php  # b374k's page layout: HTML/CSS/JS chrome, no execution of its own
+bfd170c3c77c43bb80c1fdf01f94d920  b374k/base/resources.php  # b374k's resources: packed icon and MIME-type assets, returned (gzinflate) not executed
 b93b852373b168a6d765edca24c66807  tanjiti-webshell-sample/php/b93b852373b168a6d765edca24c66807.php  # b374k's mail tab: a mail form, no execution of its own
 5fbe4d8edeb2769eda5f4add9bab901e  blackarch-webshells/php/mysql_tool.php  # MySQL backup/restore tool (2003), an admin utility
 866ce456008af7ab0ce0da60e3f3dac6  xl7dev-webshell/Php/mysql_tool.php  # MySQL backup/restore tool (2003), an admin utility
