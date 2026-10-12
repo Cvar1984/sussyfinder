@@ -270,6 +270,12 @@ revisiting one.
     ML alone 63% -> 71%) for +0.2pt benign false positives (~0.2% -> ~0.3% ML
     only). It works because a file's head and tail are usually declaration
     boilerplate, not shell-like.
+  - A sub-unit's `f:ent` feature uses the entropy of its *own* text, not the
+    whole file's (`mlUnitEntropy()`); the whole-file vector (units[0], what the
+    model trains on) keeps the file's entropy, so this needs no retrain or
+    feature-version bump. A packed payload isolated in one unit then reads as
+    high-entropy though it's diluted in the whole-file score. Held out: +1pt
+    injected (84.5% -> 85.5% combined) for +0.03pt benign false positives.
   - Chopping the *whole* main body into windows (not just head/tail) was
     tried and **rejected**: about the same injected gain but tripled the
     ML-only benign false positives (~0.2% -> ~0.6%, ~1,600 more flagged per

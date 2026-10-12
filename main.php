@@ -1170,7 +1170,12 @@ function mlEncodeBits($set)
 function mlFeatureUnits($sig, $maxLine, $entropy)
 {
     $starters = array(T_FUNCTION => 1, T_CLASS => 1, T_INTERFACE => 1, T_TRAIT => 1);
+    // units[0] is the whole file with the file's own entropy (what the model is
+    // trained on). Sub-units are collected in $subs and emitted with their OWN
+    // entropy below, so a packed, high-entropy payload isolated in one unit
+    // reads as high-entropy even though it's diluted in the whole-file score.
     $units = array(mlFeatures($sig, $maxLine, $entropy));
+    $subs = array();
     $n = count($sig);
     $main = array();
     $count = 0;
@@ -1201,7 +1206,7 @@ function mlFeatureUnits($sig, $maxLine, $entropy)
                 }
             }
             if (count($unit) >= ML_MIN_UNIT_TOKENS) {
-                $units[] = mlFeatures($unit, $maxLine, $entropy);
+                $subs[] = $unit;
                 $count++;
             } else {
                 foreach ($unit as $tok) {
@@ -1220,17 +1225,37 @@ function mlFeatureUnits($sig, $maxLine, $entropy)
         }
     }
     if (count($main) >= ML_MIN_UNIT_TOKENS && count($main) < $n) {
-        $units[] = mlFeatures($main, $maxLine, $entropy);
+        $subs[] = $main;
     }
     // A head and a tail window, where an inline shell pasted at the top or
     // bottom of a file lands — the common injection that no function unit
     // catches. Only two windows (not the whole body chopped up), so benign
     // files add little: their head and tail are usually declaration boilerplate.
     if ($n > 2 * ML_UNIT_WINDOW) {
-        $units[] = mlFeatures(array_slice($sig, 0, ML_UNIT_WINDOW), $maxLine, $entropy);
-        $units[] = mlFeatures(array_slice($sig, $n - ML_UNIT_WINDOW), $maxLine, $entropy);
+        $subs[] = array_slice($sig, 0, ML_UNIT_WINDOW);
+        $subs[] = array_slice($sig, $n - ML_UNIT_WINDOW);
+    }
+    foreach ($subs as $unit) {
+        $units[] = mlFeatures($unit, $maxLine, mlUnitEntropy($unit));
     }
     return $units;
+}
+
+/**
+ * Shannon entropy of a unit's own text (its token texts joined), for the
+ * f:ent feature of a sub-unit in mlFeatureUnits(). The whole-file entropy is
+ * diluted by the host; a unit holding a packed payload reads high on its own.
+ *
+ * @param array $unit codeTokens() 'sig' slice
+ * @return float
+ */
+function mlUnitEntropy($unit)
+{
+    $text = '';
+    foreach ($unit as $tok) {
+        $text .= $tok[1];
+    }
+    return shannonEntropy($text);
 }
 
 /**
