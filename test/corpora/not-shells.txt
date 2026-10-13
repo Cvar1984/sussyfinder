@@ -31,3 +31,10 @@ bd83144a649c5cc21ac41b505a36a8f3  tanjiti-webshell-sample/php/bd83144a649c5cc21a
 8beb6d1259f8cfc7383c35c80139d539  tanjiti-webshell-sample/php/8beb6d1259f8cfc7383c35c80139d539.php  # phpinfo() page behind a session check
 c1976c1f0cd9b3e66e8fa9152178afc7  tanjiti-webshell-sample/php/c1976c1f0cd9b3e66e8fa9152178afc7.php  # login form handler of a toolkit, no execution of its own
 09c33f2b976f02b459e3811f42f33bf9  tanjiti-webshell-sample/php/09c33f2b976f02b459e3811f42f33bf9.php  # menu page of a toolkit (links only)
+c64c54b9d258c4bb921cdae817c843b4  webshellpub-awsome/php/phpinfo.txt  # a phpinfo() page, no execution of its own
+48101bbdd897877cc62b8704a293a436  joychou-webshell/PHP/apache_htaccess_backdoor/shell.txt  # phpinfo() proof-of-concept payload; the .htaccess is the backdoor, not this file
+36ee2836b8f10b6d558abf5260b05c2f  fuzzdb-backdoors/attack/file-upload/malicious-images/POC_img_phpinfo-CR.gif  # GIF/PHP polyglot whose payload is only phpinfo(), no execution of its own
+173f4cac55f92443cff054a197da668e  fuzzdb-backdoors/attack/file-upload/malicious-images/POC_img_phpinfo-LF-CR.gif  # GIF/PHP polyglot whose payload is only phpinfo(), no execution of its own
+4cd8ffff77c78381b5bc9586cd264055  tanjiti-webshell-sample/php/4cd8ffff77c78381b5bc9586cd264055.php  # b374k-family page layout: HTML/JS chrome, no execution of its own
+598bcd7d81ed18914807e4ffb441ab37  tanjiti-webshell-sample/php/598bcd7d81ed18914807e4ffb441ab37.php  # b374k-family page layout: HTML/JS chrome, no execution of its own
+ef3b2a636a4053264a3ff9db7009600e  tanjiti-webshell-sample/php/ef3b2a636a4053264a3ff9db7009600e.php  # b374k-family resources: packed icon/mime/bundle assets, returned not executed

@@ -286,8 +286,20 @@ revisiting one.
     `mlFeatureUnits()` for the lower-false-positive, function-only variant.)
 - **not-shells.txt** (`test/corpora/`): files inside the webshell collections
   that aren't shells (bundled libraries, config, `phpinfo()` pages, include
-  stubs), matched by MD5. Dropped from training and the benchmark. Add to it,
-  don't relabel, when a collection carries a non-shell.
+  stubs, toolkit UI/data/asset components, empty files), matched by MD5.
+  Dropped from training and the benchmark. Add to it, don't relabel, when a
+  collection carries a non-shell.
+  - A file is a non-shell only when it is positively, by inspection, one of
+    those things -- **never** because a capability scan found "nothing". Those
+    are opposite claims: the positive corpora are full of heavily obfuscated
+    shells (YAK-Pro-encoded, `array_walk_recursive`/`array_intersect_ukey`
+    callback dispatch, `mb_eregi_replace('...','e')`, `"${eval(...)}"` string
+    interpolation, COM objects, SQL/MOF shells) whose capability is invisible
+    to a scanner -- and those are exactly the hard cases the detector exists to
+    catch, so excluding them would both corrupt ground truth and fake the
+    detection rate. When unsure, keep it labelled a shell. An inertness scan
+    can *suggest* candidates, but every entry here was confirmed by reading the
+    file, not by the scan alone.
 - A hashed ML feature for identifier-like string literals (`sv:assert`) was
   tried for the string-named-function blind spot and reverted: +0.8 pt on
   injected shells didn't earn the `ML_FEATURE_VERSION` bump (older installs
