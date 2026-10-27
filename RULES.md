@@ -284,6 +284,40 @@ revisiting one.
     doesn't. Two windows at the injection sites, not the body shredded.
     (`test/run train` prints all of these; drop the head/tail block in
     `mlFeatureUnits()` for the lower-false-positive, function-only variant.)
+- **Missing a shell is worse than a false positive** (owner's call), so the
+  thresholds are tuned for recall, not precision. Held out (389k benign / 1,581
+  shells), vs the earlier 0.9/0.6 point:
+  - `ML_THRESHOLD` 0.9 -> 0.8 and `ML_FLOOR` 0.6 -> 0.4: the model alone reaches
+    the bar sooner and starts adding points sooner. +26 standalone shells (43
+    missed -> 17), injected 85.4% -> 90.1%, for benign false positives 1.4% ->
+    2.0%. `test/run train`'s floor sweep brackets 0.4 (0.3-0.6).
+  - `pcntl_exec` promoted to Critical RCE (replaces the process with a program).
+    `@com_exec` added -- `new COM('WScript.Shell')` / `new DOTNET(…)` is Windows
+    OLE command execution. A critical token needs BOTH the 10.0 weight tier and
+    the `critical` role; adding only the role scores it 1.0 (the `@com_exec` bug,
+    fixed).
+  - `assert` runs code only when its argument is a string or a request value, so
+    it is Critical through the `@assert_exec` structural signal
+    (`assert("…")` / `assert($_POST[..])`), not as a bare token. Measured the
+    split first: of benign `assert` calls 536 are `assert($expr)` test
+    assertions and 8 pass a string; of shell `assert` calls 23 of 34 pass a
+    string or superglobal. Blanket-critical `assert` cost 1.4pt of benign false
+    positives for the same catches; the gate keeps the catches and gives the
+    false positives back (held out, 2.8% -> 2.0%; rules-only FP back to 1.0%).
+    A plain `assert($x === 3)` keeps its routine weight.
+  - PHP 4's `$HTTP_*_VARS` / `$HTTP_RAW_POST_DATA` / `$HTTP_POST_FILES` count as
+    request input/upload like their `$_` forms (the scanner supports PHP 4.3).
+  - The opposite trade (a false-positive pass: cap unbacked execution calls,
+    gate the entropy trigger on a non-routine token, raise `ML_UNIT_FLOOR` to
+    0.95) was built and measured -- combined FP 1.4% -> 0.55% -- but *not*
+    shipped, because each part missed shells. Revisit only if the owner reverses
+    the call. The measured knobs are above and in git history.
+  - Trap worth remembering: training scores each corpus alone, so packed shells
+    sit among packed shells and the entropy z-trigger *looks* useless (0 unique
+    catches). Scored against each benign site's distribution it catches ~18% of
+    the shells the rules miss. Check a population-dependent signal that way
+    before dropping it. Same for the suspicious-folder bonus: shell corpora
+    don't sit in deployment paths, so the data can't measure it.
 - **not-shells.txt** (`test/corpora/`): files inside the webshell collections
   that aren't shells (bundled libraries, config, `phpinfo()` pages, include
   stubs, toolkit UI/data/asset components, empty files), matched by MD5.

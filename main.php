@@ -106,14 +106,16 @@ $pattern = '/\.(ph[^.]+|sh[^.]+|inc|htaccess)$|\.(php[0-9]*|phtml|pht|phar)\.|^(
 $tokenTiers = array(
     // Critical RCE
     '10.0' => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function', 'pcntl_fork',
-        'posix_kill', 'posix_setuid',
+        'pcntl_exec', 'posix_kill', 'posix_setuid',
         '`',             // backtick operator = shell_exec
         '@input_call',   // $_GET['a']($_GET['b'])
+        '@assert_exec',  // assert() of a string or request value runs it as PHP
         '@preg_e',       // preg_replace('/.../e') evaluates the replacement
         '@foreign_code', // ASP/JSP/CGI code in a PHP-named file
         '@callback_exec',// an execution function named as a string for a callback: array_map('assert', ...)
         '@wrapper_include', // include('php://input') and other stream wrappers
         '@input_include',   // include $_GET[...] (remote/local file inclusion)
+        '@com_exec',        // new COM('WScript.Shell') / new DOTNET(...): Windows OLE command execution
     ),
     // High obfuscation and de-encoding
     '5.0' => array('base64_decode', 'gzinflate', 'str_rot13', 'gzuncompress', 'convert_uu', 'rawurldecode', 'urldecode',
@@ -124,12 +126,14 @@ $tokenTiers = array(
     // Obfuscation helpers and I/O manipulation
     '2.0' => array('assert', 'htmlspecialchars_decode', 'hexdec', 'chr', 'strrev', 'goto', 'extract', 'parse_str', 'popen',
         'fsockopen', 'posix_setsid', 'posix_setpgid', 'proc_nice', 'proc_close', 'proc_terminate', 'apache_child_terminate',
-        'move_uploaded_file', '$_files', '$auth_pass', '$password', '$pass', 'proc_get_status', 'posix_mkfifo', 'php_uname',
+        'move_uploaded_file', '$_files', '$http_post_files', '$auth_pass', '$password', '$pass', 'proc_get_status', 'posix_mkfifo', 'php_uname',
         '@dyn_call',     // call through a variable/expression: $f(), $a['x'](), (...)()
         '@long_line',    // a line over LONG_LINE_BYTES
     ),
-    // User input: everywhere in legit code, only matters in combination
-    '0.5' => array('$_get', '$_post', '$_request', '$_cookie', 'getallheaders'),
+    // User input: everywhere in legit code, only matters in combination. The
+    // $HTTP_*_VARS arrays are PHP 4's names for the same request data.
+    '0.5' => array('$_get', '$_post', '$_request', '$_cookie', 'getallheaders',
+        '$http_get_vars', '$http_post_vars', '$http_cookie_vars', '$http_raw_post_data'),
     // Low / routine
     '0.1' => array('preg_replace', // the dangerous /e form is scored as @preg_e
         'call_user_func', 'call_user_func_array', 'register_shutdown_function', 'register_tick_function', 'implode', 'strtr',
@@ -156,17 +160,18 @@ foreach ($tokenTiers as $weight => $needles) {
 // and upload alone are dampened; two or more recon calls add a bonus.
 // "highlight" is only display: the needles shown in red in the results.
 $tokenRoles = array(
-    'critical'    => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function', '`',
-        '@input_call', '@preg_e', '@foreign_code', '@callback_exec', '@wrapper_include', '@input_include'),
+    'critical'    => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'create_function',
+        'pcntl_exec', '`', '@input_call', '@assert_exec', '@preg_e', '@foreign_code', '@callback_exec',
+        '@wrapper_include', '@input_include', '@com_exec'),
     'obfuscation' => $tokenTiers['5.0'],
-    'upload'      => array('move_uploaded_file', '$_files', 'file_put_contents'),
+    'upload'      => array('move_uploaded_file', '$_files', '$http_post_files', 'file_put_contents'),
     'input'       => $tokenTiers['0.5'],
     // Server reconnaissance: a webshell's header shows the box it landed on
     'recon'       => array('php_uname', 'phpinfo', 'get_cfg_var', 'get_current_user', 'getmyuid', 'getmygid', 'getmypid',
         'getmyinode', 'posix_getuid', 'posix_geteuid', 'posix_getegid', 'posix_getlogin', 'disk_total_space',
         'disk_free_space', 'diskfreespace', 'getlastmod'),
-    'highlight'   => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', 'create_function',
-        '`', '@input_call', '@preg_e', '@callback_exec', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex',
+    'highlight'   => array('eval', 'exec', 'shell_exec', 'system', 'passthru', 'proc_open', 'assert', '@assert_exec', 'create_function',
+        'pcntl_exec', '@com_exec', '`', '@input_call', '@preg_e', '@callback_exec', '@concat_name', '@halt_payload', 'base64_decode', 'str_rot13', 'bin2hex',
         'hex2bin', 'gzinflate', 'gzuncompress', '$_files', '$auth_pass', '$password', '$pass', '$SISTEMIT_COM_ENC'),
 );
 
@@ -945,6 +950,18 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
         $id = $sig[$i][0];
         $text = $sig[$i][1];
 
+        // new COM('WScript.Shell') / new COM('IIS://...') / new DOTNET(...):
+        // Windows OLE automation, used to run commands and manage the box.
+        if ($id == T_STRING) {
+            $cls = strtolower(ltrim($text, '\\'));
+            if ($cls == 'com' || $cls == 'dotnet') {
+                $before = $i > 0 && $sig[$i - 1][0] == T_NS_SEPARATOR ? $i - 2 : $i - 1;
+                if ($before >= 0 && $sig[$before][0] == T_NEW) {
+                    $found['@com_exec'] = true;
+                }
+            }
+        }
+
         // String literal, or a chain of them joined with "."
         if ($id == T_CONSTANT_ENCAPSED_STRING) {
             $prevText = ($i > 0) ? $sig[$i - 1][1] : '';
@@ -975,6 +992,21 @@ function findStructuralSignals($code, $content, $tokenNeedles, $maxLine)
             if (isset($callbackExec[$name]) && ($argOfCall || $prevText == '=>')) {
                 $found[$name] = true;
                 $found['@callback_exec'] = true;
+            }
+            continue;
+        }
+
+        // assert(...) runs its argument as PHP when that argument is a string
+        // (assert("eval(...)"), assert('ph'.'pinfo();')) or comes straight from
+        // the request (assert($_POST['c'])). A plain assert($expr) -- a test
+        // assertion, the overwhelming benign use -- is left at its routine weight.
+        if ($id == T_STRING && strtolower($text) == 'assert' && $i + 2 < $n && $sig[$i + 1][1] == '(') {
+            $arg = $sig[$i + 2];
+            $argId = $arg[0];
+            $argText = strtolower($arg[1]);
+            if ($argId == T_CONSTANT_ENCAPSED_STRING || $arg[1] == '"' || $arg[1] == '`'
+                || ($argId == T_VARIABLE && isset($inputVars[$argText]))) {
+                $found['@assert_exec'] = true;
             }
             continue;
         }
@@ -2446,13 +2478,17 @@ if (isset($_POST['ajax_action'])) {
             // writes ml-model.json; the server embeds it in the page as ML_MODEL
             // (null when unavailable or disabled).
             // Score at or above which the model alone flags a file (a ranking
-            // score from training, not a calibrated probability)
-            const ML_THRESHOLD = 0.9;
+            // score from training, not a calibrated probability). Set for recall:
+            // a missed webshell costs more than a false positive. Held out, 0.8
+            // (with ML_FLOOR 0.4) missed 20 of 1,581 standalone shells where 0.9
+            // / 0.6 missed 43, and 165 of 1,545 injected ones where it missed
+            // 225, for 1.9% benign false positives instead of 1.4% (test/run train)
+            const ML_THRESHOLD = 0.8;
             // The ML score adds threat points: none at or below ML_FLOOR, rising
             // linearly to 8 (the anomaly / HIGH RISK bar) at ML_THRESHOLD and 10 at 1.0.
-            // 0.6 on test/run bench: lower adds false positives, higher loses catches
-            // (test/run train reports the same sweep on held-out scores)
-            const ML_FLOOR = 0.6;
+            // Lower adds false positives, higher loses catches (test/run train
+            // reports the sweep on held-out scores)
+            const ML_FLOOR = 0.4;
             // Per-unit scoring (mlScoreUnits): a single top-level function or
             // class counts as a shell on its own only if it independently clears
             // this bar — the same bar a whole file must clear to be flagged. A

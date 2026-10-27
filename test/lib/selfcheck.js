@@ -23,6 +23,19 @@ const CASES = [
     ["<?php @system($_GET['c']);", ['system'], []],
     // An execution function named as a string, reached by a callback
     ["<?php array_map('ass'.'ert', $_POST['c']);", ['assert', '@callback_exec'], []],
+    // PHP 4's long request arrays are request input like $_POST
+    ["<?php system($HTTP_POST_VARS['c']); move_uploaded_file($HTTP_POST_FILES['f']['tmp_name'], 'x');",
+        ['system', '$http_post_vars', '$http_post_files'], []],
+    // assert() of a string or request value runs it as PHP; a bare assert($expr)
+    // test assertion does not
+    ["<?php assert(\"ev\".\"al\");", ['assert', '@assert_exec'], []],
+    ["<?php assert($_POST['c']);", ['assert', '@assert_exec'], []],
+    ["<?php assert($count === 3);", ['assert'], ['@assert_exec']],
+    // new COM(...)/new DOTNET(...): Windows command execution
+    ["<?php $o = new COM('WScript.Shell'); $o->Run($_GET['c']);", ['@com_exec'], []],
+    ["<?php $x = new \\DOTNET('a', 'b');", ['@com_exec'], []],
+    // a plain class named Com* must NOT trip @com_exec
+    ["<?php $x = new Comment($a);", [], ['@com_exec']],
     ["<?php filter_var($_GET['x'], FILTER_CALLBACK, array('options' => 'shell_exec'));", ['shell_exec', '@callback_exec'], []],
     ["<?php $m = array('name' => 'system', 'run' => 'exec');", [], ['@callback_exec']],
     // Execution via include: a stream wrapper, a request superglobal, XSLT into PHP

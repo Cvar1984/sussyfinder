@@ -60,7 +60,7 @@ function printReport(mal, ben, clusters, ctx) {
     line(`  ml only (>= ${threshold})`, d => !d.ruleAnomaly && d.cvScore >= threshold);
     // How main.php combines them: ML points added to the rule score (mlPoints())
     console.log(`\nThreat score with ML points (ML_FLOOR sweep, shipped ${floor}):`);
-    [0.5, 0.6, 0.7, 0.8].forEach(f => {
+    [0.3, 0.4, 0.5, 0.6].forEach(f => {
         const combined = d => d.ruleScore + ctx.mlPoints(d.cvScore, f);
         line(`  anomaly, floor ${f}${f === floor ? ' *' : ''}`, d => d.ruleAnomaly || combined(d) >= anomalyScore);
         line(`  score >= ${criticalScore}, floor ${f}`, d => combined(d) >= criticalScore);

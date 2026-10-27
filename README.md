@@ -189,7 +189,7 @@ Example token weights include:
 
 | Category           | Example                         | Weight |
 | ------------------ | ------------------------------- | -----: |
-| Critical RCE       | `eval`, `exec`, `system`        |   10.0 |
+| Critical RCE       | `eval`, `exec`, `system`, `pcntl_exec`          |   10.0 |
 | Obfuscation        | `base64_decode`, `gzinflate`    |    5.0 |
 | Suspicious I/O     | `move_uploaded_file`, `$_FILES` |    2.0 |
 | User input         | `$_GET`, `$_POST`, `$_COOKIE`   |    0.5 |
@@ -200,18 +200,20 @@ Structural signals appear among the matched tokens with an `@` prefix (no real P
 | Signal          | Meaning                                                  | Weight |
 | --------------- | -------------------------------------------------------- | -----: |
 | `@input_call`   | Calls a superglobal element: `$_GET['a']($_GET['b'])`    |   10.0 |
+| `@assert_exec`  | `assert()` of a string or request value: `assert("eval(…)")`, `assert($_POST['c'])` | 10.0 |
 | `@foreign_code` | ASP, JSP or Perl CGI code in a PHP-named file with no PHP |   10.0 |
 | `@preg_e`       | `preg_replace` with the `/e` (eval) modifier             |   10.0 |
 | `@callback_exec`| An execution function named as a string for a callback: `array_map('assert', …)` | 10.0 |
 | `@input_include`| `include`/`require` of a request value: `include $_GET['f']` (file inclusion) | 10.0 |
 | `@wrapper_include`| `include`/`require` of a `php://` or `data:` stream: `include('php://input')` | 10.0 |
+| `@com_exec`     | `new COM('WScript.Shell')` / `new DOTNET(…)`: Windows OLE command execution | 10.0 |
 | `` ` ``         | Backtick operator (shell execution)                      |   10.0 |
 | `@concat_name`  | Function name hidden in a string (the name is added too) |    5.0 |
 | `@halt_payload` | Over 1 KiB of data after `__halt_compiler()`             |    5.0 |
 | `@dyn_call`     | Call through a variable or expression: `$f()`, `(...)()` |    2.0 |
 | `@long_line`    | A line over 5000 characters                              |    2.0 |
 
-`@input_call`, `@preg_e`, `@foreign_code`, `@callback_exec`, `@input_include`, `@wrapper_include` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation.
+`@input_call`, `@assert_exec`, `@preg_e`, `@foreign_code`, `@callback_exec`, `@input_include`, `@wrapper_include`, `@com_exec` and the backtick count as Critical RCE tokens; `@concat_name` and `@halt_payload` as obfuscation. `pcntl_exec` is Critical because it replaces the process with a program. `assert` runs its argument as PHP, but only when that argument is a string or a request value: `assert("eval(…)")` and `assert($_POST['c'])` raise `@assert_exec` and count Critical, while a plain `assert($x === 3)` test assertion — the overwhelming benign use — keeps its low weight.
 
 A function name counts as a call only where it is one — a global call like `system(...)`, including `\system(...)`. The same name as a class (`new System()`, `System::run()`), a namespace segment (`namespace App\System;`, `use Vendor\Exec;`) or a member (`$db->exec(...)`) is not a match. `@callback_exec` recovers the names that reach a callback instead of being written as a call, for the few functions almost never passed as a plain string (`assert`, `create_function`, `shell_exec`, `passthru`, `proc_open`, `popen`); common strings like `'system'` or `'exec'` are left to the other signals, as they are everywhere in legitimate configuration.
 
@@ -297,13 +299,13 @@ Last, the ML model's score $P_{\mathrm{ML}}$ (see [ML Model](#ml-model)) adds po
 
 $$
 \text{Score}' = \text{Score} + \left\lbrace \begin{array}{ll}
-0 & P_{\mathrm{ML}} \leq 0.6 \\
-8 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.6}{0.9 - 0.6} & 0.6 < P_{\mathrm{ML}} < 0.9 \\
-8 + 2 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.9}{1 - 0.9} & P_{\mathrm{ML}} \geq 0.9
+0 & P_{\mathrm{ML}} \leq 0.4 \\
+8 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.4}{0.8 - 0.4} & 0.4 < P_{\mathrm{ML}} < 0.8 \\
+8 + 2 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.8}{1 - 0.8} & P_{\mathrm{ML}} \geq 0.8
 \end{array} \right.
 $$
 
-A file the model scores 0.9 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
+The floor (`ML_FLOOR` 0.4) and the bar (`ML_THRESHOLD` 0.8) are set for recall: a missed webshell costs more than a false positive, so the model is believed sooner. Held out, lowering the bar from 0.9/0.6 to 0.8/0.4 caught 26 more of 1,581 standalone shells and lifted injected-shell detection from 85% to 90%, for benign false positives rising from 1.4% to 2.0% (`test/run train` reports the sweep). A file the model scores 0.8 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
 
 The final score is rounded to two decimal places.
 
@@ -341,7 +343,7 @@ File size (`Z_size`), the suspicious-token count Z-score (`Z_suspicious`) and th
 
 ### Threat Matrix
 
-The first chart plots the two parts of the threat score against each other. Its y-axis is the rule score on a log scale, because it runs from 0 to the thousands and the anomaly bar at 8 must stay visible. Its x-axis is the ML score. The dashed lines are the scanner's own bars (`ANOMALY_SCORE` 8 and `ML_THRESHOLD` 0.9), so each quadrant says which detector flags a file. Each dot is coloured by the file's verdict, as in the table: critical, anomaly or not flagged. Without a model, the x-axis shows the share of a file's tokens that are needles.
+The first chart plots the two parts of the threat score against each other. Its y-axis is the rule score on a log scale, because it runs from 0 to the thousands and the anomaly bar at 8 must stay visible. Its x-axis is the ML score. The dashed lines are the scanner's own bars (`ANOMALY_SCORE` 8 and `ML_THRESHOLD` 0.8), so each quadrant says which detector flags a file. Each dot is coloured by the file's verdict, as in the table: critical, anomaly or not flagged. Without a model, the x-axis shows the share of a file's tokens that are needles.
 
 On held-out data, most shells land in the top right, where both detectors agree, and almost no legitimate files do. Most of the rules' false positives sit in the top left, so a file there is worth reading before acting on it. `test/run train` prints the current split of shells and legitimate files per quadrant, scored by models that never saw the file.
 
