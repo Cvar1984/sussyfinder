@@ -301,11 +301,11 @@ $$
 \text{Score}' = \text{Score} + \left\lbrace \begin{array}{ll}
 0 & P_{\mathrm{ML}} \leq 0.4 \\
 8 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.4}{0.8 - 0.4} & 0.4 < P_{\mathrm{ML}} < 0.8 \\
-8 + 2 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.8}{1 - 0.8} & P_{\mathrm{ML}} \geq 0.8
+8 + 7 \cdot \displaystyle\frac{P_{\mathrm{ML}} - 0.8}{0.95 - 0.8} & P_{\mathrm{ML}} \geq 0.8
 \end{array} \right.
 $$
 
-The floor (`ML_FLOOR` 0.4) and the bar (`ML_THRESHOLD` 0.8) are set for recall: a missed webshell costs more than a false positive, so the model is believed sooner. Held out, lowering the bar from 0.9/0.6 to 0.8/0.4 caught 26 more of 1,581 standalone shells and lifted injected-shell detection from 85% to 91%, for benign false positives rising from 1.4% to 1.9% (`test/run train` reports the sweep). A file the model scores 0.8 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
+The floor (`ML_FLOOR` 0.4) and the bar (`ML_THRESHOLD` 0.8) are set for recall: a missed webshell costs more than a false positive, so the model is believed sooner. Held out, lowering the bar from 0.9/0.6 to 0.8/0.4 caught 26 more of 1,581 standalone shells and lifted injected-shell detection from 85% to 91%, for benign false positives rising from 1.4% to 1.9% (`test/run train` reports the sweep). A file the model scores 0.8 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Above the bar the points keep climbing, reaching the critical bar of 15 at 0.95 (`ML_CRITICAL`) and 17.3 at 1.0: the rule score grows with file size, one weight per matched needle, so a large CMS file collects points a small shell never does, and a confident model should outrank that. Held out, this puts 95.9% of standalone shells in critical instead of 72.9% (injected 72.8% to 84.9%), for benign files in critical rising from 0.3% to 0.6%; which files are flagged at all doesn't change. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
 
 The final score is rounded to two decimal places.
 

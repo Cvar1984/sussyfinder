@@ -315,6 +315,14 @@ revisiting one.
     call on that swap. No l2 between 0.0005 and 0.001 keeps every shell:
     `cbe9ea…` drops at any value below 0.001, and 0.0007/0.0008 give no FP
     gain. Lower still (0.0001: 1.7%) costs standalone shells outright.
+  - ML points no longer stop at 10: they reach `CRITICAL_SCORE` at `ML_CRITICAL`
+    0.95 and keep the same slope (17.3 at 1.0). The rule score grows with file
+    size (one weight per matched needle), so a big CMS file out-scored a small
+    shell the model was sure of, and ML alone could never make critical. Held
+    out: critical holds 95.9% of standalone shells instead of 72.9% (injected
+    72.8% -> 84.9%), benign critical 0.3% -> 0.6%. Below `ML_THRESHOLD` nothing
+    moved, so the anomaly set is identical. Swept 0.90-0.97: past 0.95 each
+    extra shell costs ~36 benign files in critical.
   - Measured and *not* shipped, because each lost shells or saved nothing:
     requiring a sub-unit to carry its own critical token before its ML score
     counts (FP ~1.3%, but ~200 injected shells — the per-unit score exists for

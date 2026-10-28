@@ -2485,10 +2485,20 @@ if (isset($_POST['ajax_action'])) {
             // earlier 0.9 / 0.6 missed 43 and caught 85%, for 1.4% (test/run train)
             const ML_THRESHOLD = 0.8;
             // The ML score adds threat points: none at or below ML_FLOOR, rising
-            // linearly to 8 (the anomaly / HIGH RISK bar) at ML_THRESHOLD and 10 at 1.0.
-            // Lower adds false positives, higher loses catches (test/run train
-            // reports the sweep on held-out scores)
+            // linearly to ANOMALY_SCORE (the anomaly / HIGH RISK bar) at
+            // ML_THRESHOLD, then to CRITICAL_SCORE at ML_CRITICAL and on at the
+            // same slope (17.3 at 1.0). Lower adds false positives, higher loses
+            // catches (test/run train reports the sweep on held-out scores)
             const ML_FLOOR = 0.4;
+            // ML score at which the model alone makes a file critical. The rule
+            // score grows with file size (one weight per matched needle), so a
+            // big CMS file collects points a small shell never does; ML points
+            // don't, and a confident model should outrank that. Held out, ML
+            // capped at 10 points put 72.9% of standalone shells in critical;
+            // this puts 95.9% (injected 72.8% -> 84.9%) for benign critical
+            // 0.3% -> 0.6%. The anomaly set doesn't change: nothing below
+            // ML_THRESHOLD moved. 0.92 adds 8 shells for 289 more benign.
+            const ML_CRITICAL = 0.95;
             // Per-unit scoring (mlScoreUnits): a single top-level function or
             // class counts as a shell on its own only if it independently clears
             // this bar — the same bar a whole file must clear to be flagged. A
@@ -2506,8 +2516,9 @@ if (isset($_POST['ajax_action'])) {
                 if (floor === undefined) floor = ML_FLOOR;
                 if (ml === null || ml <= floor) return 0;
                 const pts = ml < ML_THRESHOLD
-                    ? 8 * (ml - floor) / (ML_THRESHOLD - floor)
-                    : 8 + 2 * (Math.min(ml, 1) - ML_THRESHOLD) / (1 - ML_THRESHOLD);
+                    ? ANOMALY_SCORE * (ml - floor) / (ML_THRESHOLD - floor)
+                    : ANOMALY_SCORE + (CRITICAL_SCORE - ANOMALY_SCORE) *
+                        (Math.min(ml, 1) - ML_THRESHOLD) / (ML_CRITICAL - ML_THRESHOLD);
                 return Math.round(pts * 100) / 100;
             }
             const _mlWeightCache = new Map();

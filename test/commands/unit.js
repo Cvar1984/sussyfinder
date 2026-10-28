@@ -123,7 +123,15 @@ function jsTests() {
 
     test('scoring block constants', () => {
         const ctx = loadScoring({ weights: {} });
-        ['Z_THRESHOLD', 'ANOMALY_SCORE', 'CRITICAL_SCORE', 'ML_THRESHOLD', 'ML_FLOOR'].forEach(n => assert(typeof constant(ctx, n) === 'number', n));
+        ['Z_THRESHOLD', 'ANOMALY_SCORE', 'CRITICAL_SCORE', 'ML_THRESHOLD', 'ML_FLOOR', 'ML_CRITICAL'].forEach(n => assert(typeof constant(ctx, n) === 'number', n));
+    });
+    test('ML points: 0 at the floor, the anomaly bar at ML_THRESHOLD, critical at ML_CRITICAL, rising', () => {
+        const ctx = loadScoring({ weights: {} });
+        const c = n => constant(ctx, n);
+        assert(ctx.mlPoints(c('ML_FLOOR')) === 0 && ctx.mlPoints(null) === 0, 'floor');
+        assert(ctx.mlPoints(c('ML_THRESHOLD')) === c('ANOMALY_SCORE'), 'threshold');
+        assert(ctx.mlPoints(c('ML_CRITICAL')) === c('CRITICAL_SCORE'), 'critical');
+        for (let m = 0; m < 1; m += 0.01) assert(ctx.mlPoints(m + 0.01) >= ctx.mlPoints(m), 'monotonic at ' + m.toFixed(2));
     });
     return tests;
 }
