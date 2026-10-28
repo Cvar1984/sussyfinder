@@ -2480,9 +2480,9 @@ if (isset($_POST['ajax_action'])) {
             // Score at or above which the model alone flags a file (a ranking
             // score from training, not a calibrated probability). Set for recall:
             // a missed webshell costs more than a false positive. Held out, 0.8
-            // (with ML_FLOOR 0.4) missed 20 of 1,581 standalone shells where 0.9
-            // / 0.6 missed 43, and 165 of 1,545 injected ones where it missed
-            // 225, for 1.9% benign false positives instead of 1.4% (test/run train)
+            // (with ML_FLOOR 0.4) missed 17 of 1,581 standalone shells and caught
+            // 91% of 1,545 injected ones, for 1.9% benign false positives; the
+            // earlier 0.9 / 0.6 missed 43 and caught 85%, for 1.4% (test/run train)
             const ML_THRESHOLD = 0.8;
             // The ML score adds threat points: none at or below ML_FLOOR, rising
             // linearly to 8 (the anomaly / HIGH RISK bar) at ML_THRESHOLD and 10 at 1.0.

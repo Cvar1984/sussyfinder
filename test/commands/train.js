@@ -204,7 +204,7 @@ Bump ML_FEATURE_VERSION in main.php before --write whenever mlFeatures() or
 ML_BUCKETS changes, so older installs refuse the new model.`,
     options: {
         folds: { type: 'string', default: '5', help: 'cross-validation folds' },
-        l2: { type: 'string', default: '0.001', help: 'L2 penalty on the weights' },
+        l2: { type: 'string', default: '0.0005', help: 'L2 penalty on the weights' },
         epochs: { type: 'string', default: '400', help: 'full-batch Adam epochs' },
         cap: { type: 'string', default: '2000', help: 'benign training files per corpus' },
         similar: { type: 'string', default: '0.8', help: 'Jaccard at which shells are one cluster' },

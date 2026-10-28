@@ -307,6 +307,22 @@ revisiting one.
     A plain `assert($x === 3)` keeps its routine weight.
   - PHP 4's `$HTTP_*_VARS` / `$HTTP_RAW_POST_DATA` / `$HTTP_POST_FILES` count as
     request input/upload like their `$_` forms (the scanner supports PHP 4.3).
+  - Trainer `--l2` 0.001 -> 0.0005 (the model was over-regularized). Held out at
+    the same 0.8/0.4: benign false positives 2.0% -> 1.9% (7,649 -> 7,417),
+    injected 89.8% -> 91.1%, standalone unchanged at 17 missed -- but not the
+    same 17: `cbe9ea…` (tanjiti) and `php-shell-file_put_contents.php`
+    (lcatro) drop out, two encoded `xorro` shells come in. Shipped as an owner
+    call on that swap. No l2 between 0.0005 and 0.001 keeps every shell:
+    `cbe9ea…` drops at any value below 0.001, and 0.0007/0.0008 give no FP
+    gain. Lower still (0.0001: 1.7%) costs standalone shells outright.
+  - Measured and *not* shipped, because each lost shells or saved nothing:
+    requiring a sub-unit to carry its own critical token before its ML score
+    counts (FP ~1.3%, but ~200 injected shells — the per-unit score exists for
+    shells the rules can't see); raising only `ML_UNIT_FLOOR` (~23 injected
+    shells per ~800 FP); stopping uncorroborated files (no critical, upload,
+    password or 2+ recon) from flagging on rule score (0 shells lost, but held
+    out FP stayed 2.0%: the statistical triggers flag those files anyway).
+    Below ~1.9% combined FP, every knob found so far trades specific shells.
   - The opposite trade (a false-positive pass: cap unbacked execution calls,
     gate the entropy trigger on a non-routine token, raise `ML_UNIT_FLOOR` to
     0.95) was built and measured -- combined FP 1.4% -> 0.55% -- but *not*

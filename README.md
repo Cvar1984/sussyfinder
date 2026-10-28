@@ -305,7 +305,7 @@ $$
 \end{array} \right.
 $$
 
-The floor (`ML_FLOOR` 0.4) and the bar (`ML_THRESHOLD` 0.8) are set for recall: a missed webshell costs more than a false positive, so the model is believed sooner. Held out, lowering the bar from 0.9/0.6 to 0.8/0.4 caught 26 more of 1,581 standalone shells and lifted injected-shell detection from 85% to 90%, for benign false positives rising from 1.4% to 2.0% (`test/run train` reports the sweep). A file the model scores 0.8 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
+The floor (`ML_FLOOR` 0.4) and the bar (`ML_THRESHOLD` 0.8) are set for recall: a missed webshell costs more than a false positive, so the model is believed sooner. Held out, lowering the bar from 0.9/0.6 to 0.8/0.4 caught 26 more of 1,581 standalone shells and lifted injected-shell detection from 85% to 91%, for benign false positives rising from 1.4% to 1.9% (`test/run train` reports the sweep). A file the model scores 0.8 or more reaches the anomaly / HIGH RISK bar of 8 on the ML alone, and a moderate ML score can lift a file with some rule evidence over it. Each row shows the split (`rules 3.2 + ML 4.0`) and an **ML +x** badge when the model contributed.
 
 The final score is rounded to two decimal places.
 
