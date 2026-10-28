@@ -6,6 +6,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const zlib = require('zlib');
 const { ROOT } = require('./paths');
 const { corpus } = require('./corpora');
 const { LISTING_WANT } = require('./selfcheck');
@@ -40,11 +41,27 @@ function webCheck(t) {
     const procOk = feats.length === 3 && feats[0].md5 === microMd5 &&
         feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1 &&
         proc.warnings.some(w => w.indexOf('Skipped /work/fixture/missing.php') === 0);
-    const fixtureOk = !!fixtureScan && fixtureScan.total === LISTING_WANT.length;
+    // actionScan() sends each directory once and [dir index, name] per file;
+    // joined back, the fixture's paths are its own, names byte for byte
+    const pairs = fixtureScan ? (fixtureScan.readable || []).concat(fixtureScan.not_readable || []) : [];
+    const joined = [];
+    for (let i = 0; i < pairs.length; i += 2) joined.push({ path: fixtureScan.dirs[pairs[i]] + '/' + pairs[i + 1], name: pairs[i + 1] });
+    const fixtureOk = !!fixtureScan && fixtureScan.total === LISTING_WANT.length &&
+        JSON.stringify(joined.map(j => j.name).sort()) === JSON.stringify(LISTING_WANT) &&
+        joined.every(j => j.path.startsWith('/work/fixture/'));
+    // A browser that takes gzip gets it, when the host can (zlib); either way the same JSON
+    let gzip = 'n/a';
+    try {
+        const raw = execFileSync('curl', ['-s', '-m', '120', '-H', 'X-Sussy-Request: 1', '-H', 'Accept-Encoding: gzip',
+            '--data', 'ajax_action=scan', '--data', 'dir=/work/fixture', url], { maxBuffer: 1 << 26 });
+        const zipped = raw[0] === 0x1f && raw[1] === 0x8b;
+        const body = json((zipped ? zlib.gunzipSync(raw) : raw).toString());
+        gzip = body && fixtureScan && body.total === fixtureScan.total ? (zipped ? 'gzip' : 'plain') : 'BROKEN';
+    } catch (e) { gzip = 'BROKEN'; }
     const csrfOk = !!noHeader && noHeader.error === 'forbidden';
     return {
-        ok: jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk,
-        text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'}, fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
+        ok: jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk && gzip !== 'BROKEN',
+        text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'} (${gzip}), fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
             `process ${procOk ? 'OK' : 'FAIL'}, CSRF check ${csrfOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : ''),
     };
 }

@@ -7,8 +7,7 @@
 // $SUSSY_CASES, $SUSSY_FIXTURE, $SUSSY_MODELS, $SUSSY_CHECKSUM_FIXTURE. Must stay PHP
 // 4.3-safe.
 define('SUSSY_LIB', true);
-// Vendor checksums read local stand-ins for their downloads, with no session
-define('LIST_CACHE_SECONDS', 0);
+// Vendor checksums read local stand-ins for their downloads
 define('_CHECKSUMS_URL_', $SUSSY_CHECKSUM_FIXTURE . '/checksums.txt');
 define('_WP_CORE_CHECKSUMS_URL_', $SUSSY_CHECKSUM_FIXTURE . '/manifests/core-{version}-{locale}.json');
 define('_WP_PLUGIN_CHECKSUMS_URL_', $SUSSY_CHECKSUM_FIXTURE . '/manifests/plugin-{slug}-{version}.json');

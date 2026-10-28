@@ -76,7 +76,6 @@ settingDefault('TIME_LIMIT', 3600);          // seconds a request may run
 settingDefault('HTTP_CONNECT_TIMEOUT', 10);  // seconds
 settingDefault('HTTP_TIMEOUT', 30);          // seconds
 settingDefault('MHR_BATCH', 1000);           // hashes per MHR request (the API's limit)
-settingDefault('LIST_CACHE_SECONDS', 900);   // a scan's requests share the downloaded hash lists this long (0: download each time)
 settingDefault('LONG_LINE_BYTES', 5000);     // a longer line is @long_line
 settingDefault('HALT_PAYLOAD_BYTES', 1024);  // more data after __halt_compiler() is @halt_payload
 
@@ -1459,6 +1458,9 @@ function httpRequest($url, $body = null, $headers = array())
         if (defined('CURL_HTTP_VERSION_1_1')) {
             $options[CURLOPT_HTTP_VERSION] = constant('CURL_HTTP_VERSION_1_1');
         }
+        if (defined('CURLOPT_ENCODING')) { // '' asks for every encoding this cURL can decode (gzip: ~1/3 of checksums.txt)
+            $options[constant('CURLOPT_ENCODING')] = '';
+        }
         if ($body !== null) {
             $options[CURLOPT_POST] = true;
             $options[CURLOPT_POSTFIELDS] = $body;
@@ -1479,7 +1481,9 @@ function httpRequest($url, $body = null, $headers = array())
     }
     if (ini_get('allow_url_fopen')) {
         $tried = true;
-        $http = array('header' => implode("\r\n", $headers), 'ignore_errors' => true, 'timeout' => HTTP_TIMEOUT);
+        $gzip = functionAvailable('gzdecode'); // PHP 5.4+ with zlib; PHP streams don't decode it themselves
+        $http = array('header' => implode("\r\n", $gzip ? array_merge($headers, array('Accept-Encoding: gzip')) : $headers),
+            'ignore_errors' => true, 'timeout' => HTTP_TIMEOUT);
         if ($body !== null) {
             $http['method'] = 'POST';
             $http['content'] = $body;
@@ -1503,14 +1507,26 @@ function httpRequest($url, $body = null, $headers = array())
             }
             fclose($fp);
             $status = 0;
+            $gzipped = false;
             $lines = isset($meta['wrapper_data']) ? $meta['wrapper_data'] : array();
             if (isset($lines['headers'])) {
                 $lines = $lines['headers']; // the cURL stream wrapper's layout
             }
-            foreach ((array) $lines as $line) { // the last status line counts, after redirects
+            foreach ((array) $lines as $line) { // the last response counts, after redirects
                 if (is_string($line) && preg_match('#^HTTP/\S+\s+(\d+)#', $line, $m)) {
                     $status = (int) $m[1];
+                    $gzipped = false;
+                } elseif (is_string($line) && preg_match('#^Content-Encoding:\s*gzip#i', $line)) {
+                    $gzipped = true;
                 }
+            }
+            if ($gzipped && $gzip) {
+                $decoded = @gzdecode($response);
+                if (!is_string($decoded)) {
+                    trigger_error('Could not decompress ' . $url, E_USER_WARNING);
+                    return false;
+                }
+                $response = $decoded;
             }
             return array('status' => $status, 'body' => $response);
         }
@@ -1564,121 +1580,42 @@ function fetchText($url, $missingOk = false)
 }
 
 /**
- * Open this script's own PHP session (its own cookie name, so an application
- * on the same host keeps its session untouched). Used only to share the
- * downloads between the requests of one scan; they stay on the server, so
- * the browser can't substitute its own blacklist.
- *
- * @return bool whether $_SESSION can be used
- */
-function listSessionStart()
-{
-    if (LIST_CACHE_SECONDS <= 0 || !functionAvailable('session_start') || headers_sent()) {
-        return false;
-    }
-    if (session_id() === '') {
-        session_name('SUSSYFINDER');
-    }
-    @session_start();
-    return isset($_SESSION) && is_array($_SESSION);
-}
-
-/**
- * The texts the session keeps that are younger than LIST_CACHE_SECONDS.
- * The caller closes the session.
- *
- * @return array url => array('time', 'text')
- */
-function keptTexts()
-{
-    $kept = array();
-    $all = isset($_SESSION['sussy_texts']) && is_array($_SESSION['sussy_texts']) ? $_SESSION['sussy_texts'] : array();
-    foreach ($all as $url => $entry) {
-        if (time() - $entry['time'] < LIST_CACHE_SECONDS) {
-            $kept[$url] = $entry;
-        }
-    }
-    return $kept;
-}
-
-/**
- * A download (fetchText()) made at most once per request and kept in the
- * scan's session for LIST_CACHE_SECONDS, so the batches of a scan reuse it.
- * A failed one is kept too, as '', so a missing file or plugin costs one
- * request per scan, not one per batch. Kept as text, not parsed: a string
- * unserializes in a fraction of the time and memory a parsed list takes.
- *
- * @param string $url
- * @param bool $refresh download it again even when a copy is kept (a new scan)
- * @param bool $missingOk see fetchText()
- * @return string
- */
-function cachedText($url, $refresh = false, $missingOk = false)
-{
-    static $texts = null;
-    if ($texts === null) { // the request's first call reads them all at once
-        $texts = array();
-        if (listSessionStart()) {
-            foreach (keptTexts() as $kept => $entry) {
-                $texts[$kept] = $entry['text'];
-            }
-            session_write_close(); // don't hold the session lock while the batch runs
-        }
-    }
-    if (isset($texts[$url]) && !$refresh) {
-        return $texts[$url];
-    }
-    $text = fetchText($url, $missingOk);
-    $texts[$url] = $text === false ? '' : $text;
-    if (listSessionStart()) {
-        $kept = keptTexts(); // older scans' entries expire here
-        $kept[$url] = array('time' => time(), 'text' => $texts[$url]);
-        $_SESSION['sussy_texts'] = $kept;
-        session_write_close();
-    }
-    return $texts[$url];
-}
-
-/**
  * A hash list as md5 => true (empty when it can't be fetched): one MD5 per
- * line of a cachedText().
+ * line of a download, made once per request and kept nowhere else, so every
+ * batch sees the list as it is now.
  *
  * @param string $url
- * @param bool $refresh see cachedText()
  * @return array
  */
-function hashList($url, $refresh = false)
+function hashList($url)
 {
     static $lists = array();
-    if (isset($lists[$url]) && !$refresh) {
-        return $lists[$url];
-    }
-    $lists[$url] = array();
-    foreach (explode("\n", cachedText($url, $refresh)) as $line) {
-        $line = strtolower(trim($line));
-        if ($line !== '') {
-            $lists[$url][$line] = true;
+    if (!isset($lists[$url])) {
+        $lists[$url] = array();
+        foreach (explode("\n", (string) fetchText($url)) as $line) {
+            $line = strtolower(trim($line));
+            if ($line !== '') {
+                $lists[$url][$line] = true;
+            }
         }
     }
     return $lists[$url];
 }
 
 /**
- * @param bool $refresh see hashList()
  * @return array the known-good list, md5 => true (empty when _WHITELIST_ is off)
  */
-function whitelist($refresh = false)
+function whitelist()
 {
-    return _WHITELIST_ ? hashList(_WHITELIST_URL_, $refresh) : array();
+    return _WHITELIST_ ? hashList(_WHITELIST_URL_) : array();
 }
 
 /**
- * @param bool $refresh see hashList()
  * @return array the known-bad list, md5 => true (empty when _BLACKLIST_ is off)
  */
-function blacklist($refresh = false)
+function blacklist()
 {
-    return _BLACKLIST_ ? hashList(_BLACKLIST_URL_, $refresh) : array();
+    return _BLACKLIST_ ? hashList(_BLACKLIST_URL_) : array();
 }
 
 // Vendor checksums. A file byte-identical to the one an official release ships
@@ -1690,12 +1627,11 @@ function blacklist($refresh = false)
 // checksums.txt (release files by path suffix, test/run checksums --write).
 
 /**
- * @param bool $refresh see cachedText()
  * @return string checksums.txt ('' when _CHECKSUMS_ is off or it can't be fetched)
  */
-function checksumList($refresh = false)
+function checksumList()
 {
-    return _CHECKSUMS_ ? cachedText(_CHECKSUMS_URL_, $refresh, true) : '';
+    return _CHECKSUMS_ ? (string) fetchText(_CHECKSUMS_URL_, true) : '';
 }
 
 /**
@@ -1803,7 +1739,7 @@ function checksumManifest($url, $filesKey)
     if (!functionAvailable('json_decode')) {
         return $manifests[$url];
     }
-    $data = json_decode(cachedText($url, false, true), true);
+    $data = json_decode((string) fetchText($url, true), true);
     if (is_array($data) && isset($data[$filesKey]) && is_array($data[$filesKey])) {
         foreach ($data[$filesKey] as $path => $sums) {
             if (is_array($sums)) {
@@ -1977,22 +1913,37 @@ function mhrCredentials()
 }
 
 /**
- * List the files to analyse (phase 1 of a scan), and fetch fresh hash lists
- * for the batches that follow.
+ * List the files to analyse (phase 1). A big site has hundreds of thousands,
+ * so each path isn't sent whole: "dirs" holds every directory once, and
+ * "readable" / "not_readable" are flat [dir index, name, dir index, name, ...]
+ * lists in scan order, joined by the page as dirs[i] + '/' + name.
+ * Directories keep "/" unencoded, so a joined path is the usual encoded form
+ * (453,627 files: 61 MB of JSON as whole rawurlencode()d paths, 25 MB so).
  *
  * @return array
  */
 function actionScan()
 {
-    whitelist(true);
-    blacklist(true);
-    checksumList(true);
     $result = getSortedByPattern(inputValue('dir', getcwd()), $GLOBALS['pattern']);
-    return array(
-        'readable'     => array_map('rawurlencode', $result['file_readable']),
-        'not_readable' => array_map('rawurlencode', $result['file_not_readable']),
-        'total'        => count($result['file_readable']) + count($result['file_not_readable']),
-    );
+    $dirs = array();
+    $index = array();
+    $lists = array('readable' => $result['file_readable'], 'not_readable' => $result['file_not_readable']);
+    foreach ($lists as $key => $paths) {
+        $flat = array();
+        foreach ($paths as $path) { // absolute, with "/" separators (recursiveScan())
+            $cut = strrpos($path, '/');
+            $dir = (string) substr($path, 0, $cut);
+            if (!isset($index[$dir])) {
+                $index[$dir] = count($dirs);
+                $dirs[] = str_replace('%2F', '/', rawurlencode($dir));
+            }
+            $flat[] = $index[$dir];
+            $flat[] = rawurlencode(substr($path, $cut + 1));
+        }
+        $lists[$key] = $flat;
+    }
+    return array('dirs' => $dirs, 'readable' => $lists['readable'], 'not_readable' => $lists['not_readable'],
+        'total' => count($result['file_readable']) + count($result['file_not_readable']));
 }
 
 /**
@@ -2088,7 +2039,17 @@ function ajaxRespond($data)
         $warnings[] = 'Unexpected output suppressed: ' . substr($stray, 0, 500);
     }
     $data['warnings'] = array_values($warnings);
-    echo jsonEncode($data);
+    $json = jsonEncode($data);
+    // Gzipped when the browser takes it: a big site's file list is tens of MB
+    // of JSON and about a twentieth of that compressed (453,627 files:
+    // 25 MB -> 3 MB). Not when PHP compresses its output itself already.
+    $accept = isset($_SERVER['HTTP_ACCEPT_ENCODING']) ? $_SERVER['HTTP_ACCEPT_ENCODING'] : '';
+    if (preg_match('/\bgzip\b/i', $accept) && functionAvailable('gzencode') && !ini_get('zlib.output_compression') && !headers_sent()) {
+        header('Content-Encoding: gzip');
+        header('Vary: Accept-Encoding');
+        $json = gzencode($json, 6);
+    }
+    echo $json;
     exit;
 }
 
@@ -3344,6 +3305,81 @@ if (isset($_POST['ajax_action'])) {
                 return _shown.has(d);
             }
 
+            // One results row (the table and the live list during a scan)
+            function rowHtml(d) {
+                let color = '#dddbdb';
+                let badge = '';
+                let status = '';
+                let verbosity = '';
+
+                if (d.is_unreadable) {
+                    color = '#f72f2f';
+                    badge = badgeHtml('NOT READABLE', '#8b0000');
+                } else if (d.is_blacklisted) {
+                    color = '#f72f2f';
+                    badge = badgeHtml('BLACKLIST', '#cc0000');
+                    if (d.error) status = escapeHtml(shortenUnlinkError(d.error));
+                } else if (d.mhr_hit) {
+                    color = '#f72f2f';
+                    badge = badgeHtml('MHR HIT (' + escapeHtml(String(d.mhr_detection_rate)) + '%)', '#cc0000');
+                    status = escapeHtml(d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown')));
+                } else if (d.threatScore >= CRITICAL_SCORE) {
+                    color = '#dddbdb';
+                    badge = badgeHtml('CRITICAL (' + d.threatScore.toFixed(1) + ')', '#990000');
+                } else if (d.threatScore >= ANOMALY_SCORE) {
+                    color = '#dddbdb';
+                    badge = badgeHtml('HIGH RISK (' + d.threatScore.toFixed(1) + ')', '#b37700');
+                } else if (d.is_htaccess) {
+                    color = '#66ccff';
+                    badge = badgeHtml('HTACCESS', '#005580');
+                } else if (d.duplicate_of !== false) {
+                    badge = '<span class="badge badge-muted">DUPLICATE</span> ';
+                    status = escapeHtml(d.duplicate_of);
+                }
+
+                if (d.mlPoints > 0) {
+                    const why = `ML model ${Math.round(d.mlScore * 100)}%: +${d.mlPoints.toFixed(1)} of the threat score` +
+                        (d.mlOnly ? '. Flagged only because of it' : '');
+                    badge += badgeHtml('ML +' + d.mlPoints.toFixed(1), '#6a3d9a', why);
+                }
+                if (d.verified) {
+                    badge += badgeHtml('VERIFIED', '#2e7d32', 'Byte-identical to ' + d.verified + '; its content scored ' + d.contentScore.toFixed(1));
+                }
+
+                if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
+                    let tokens = d.matched_tokens.map(t => {
+                        if (ROLES.highlight.has(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
+                        return escapeHtml(t);
+                    });
+                    status = tokens.join(', ');
+                }
+
+                if (d.is_unreadable) {
+                    verbosity = d.date;
+                } else {
+                    const sizeKB = (d.size / 1024).toFixed(1);
+                    const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
+                    verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' (rules ' + d.ruleScore.toFixed(1) + ' + ML ' + d.mlPoints.toFixed(1) + ' from ' + Math.round(d.mlScore * 100) + '%)' : ''} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
+                }
+
+                const fileLink = `<span class="file-link" data-copy="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>`;
+                let md5Btn = '';
+                let vtBadge = '';
+                if (!d.is_unreadable && d.md5 && d.md5 !== 'N/A') {
+                    md5Btn = `<span class="copy-hash-btn" data-copy="${escapeHtml(d.md5)}" title="Copy MD5 hash">📋</span>`;
+                    vtBadge = `<span class="vt-badge" data-vt="${escapeHtml(d.md5)}" title="check on VirusTotal">VT</span>`;
+                }
+                let mainLine = badge + fileLink + md5Btn + vtBadge;
+                if (status) mainLine += ' (' + status + ')';
+
+                return `<tr data-path="${escapeHtml(d.path)}">
+                    <td style="color:${color}; font-size:13px;">
+                        ${mainLine}
+                        <br><span class="verbosity">${verbosity}</span>
+                    </td>
+                </tr>`;
+            }
+
             function renderTable(data) {
                 renderWarningPanel(data);
                 let filtered = data.filter(d => shouldShowFile(d));
@@ -3361,79 +3397,7 @@ if (isset($_POST['ajax_action'])) {
                 if (filtered.length === 0) {
                     html = '<tr><td style="color:#888;text-align:center;padding:15px;">No files match the current search or filters.</td></tr>';
                 } else {
-                    filtered.forEach(d => {
-                        let color = '#dddbdb';
-                        let badge = '';
-                        let status = '';
-                        let verbosity = '';
-
-                        if (d.is_unreadable) {
-                            color = '#f72f2f';
-                            badge = badgeHtml('NOT READABLE', '#8b0000');
-                        } else if (d.is_blacklisted) {
-                            color = '#f72f2f';
-                            badge = badgeHtml('BLACKLIST', '#cc0000');
-                            if (d.error) status = escapeHtml(shortenUnlinkError(d.error));
-                        } else if (d.mhr_hit) {
-                            color = '#f72f2f';
-                            badge = badgeHtml('MHR HIT (' + escapeHtml(String(d.mhr_detection_rate)) + '%)', '#cc0000');
-                            status = escapeHtml(d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown')));
-                        } else if (d.threatScore >= CRITICAL_SCORE) {
-                            color = '#dddbdb';
-                            badge = badgeHtml('CRITICAL (' + d.threatScore.toFixed(1) + ')', '#990000');
-                        } else if (d.threatScore >= ANOMALY_SCORE) {
-                            color = '#dddbdb';
-                            badge = badgeHtml('HIGH RISK (' + d.threatScore.toFixed(1) + ')', '#b37700');
-                        } else if (d.is_htaccess) {
-                            color = '#66ccff';
-                            badge = badgeHtml('HTACCESS', '#005580');
-                        } else if (d.duplicate_of !== false) {
-                            badge = '<span class="badge badge-muted">DUPLICATE</span> ';
-                            status = escapeHtml(d.duplicate_of);
-                        }
-
-                        if (d.mlPoints > 0) {
-                            const why = `ML model ${Math.round(d.mlScore * 100)}%: +${d.mlPoints.toFixed(1)} of the threat score` +
-                                (d.mlOnly ? '. Flagged only because of it' : '');
-                            badge += badgeHtml('ML +' + d.mlPoints.toFixed(1), '#6a3d9a', why);
-                        }
-                        if (d.verified) {
-                            badge += badgeHtml('VERIFIED', '#2e7d32', 'Byte-identical to ' + d.verified + '; its content scored ' + d.contentScore.toFixed(1));
-                        }
-
-                        if (!status && d.matched_tokens && d.matched_tokens.length > 0) {
-                            let tokens = d.matched_tokens.map(t => {
-                                if (ROLES.highlight.has(t.toLowerCase())) return '<span class="token-highlight">' + escapeHtml(t) + '</span>';
-                                return escapeHtml(t);
-                            });
-                            status = tokens.join(', ');
-                        }
-
-                        if (d.is_unreadable) {
-                            verbosity = d.date;
-                        } else {
-                            const sizeKB = (d.size / 1024).toFixed(1);
-                            const entStr = d.entropy !== null ? d.entropy.toFixed(2) : 'N/A';
-                            verbosity = `${d.date} | Size: ${sizeKB} KB | Tokens: ${d.total_tokens || 0} | Suspicious: ${d.suspCount} | Entropy: ${entStr} | Score: ${d.threatScore.toFixed(1)}${d.mlScore !== null ? ' (rules ' + d.ruleScore.toFixed(1) + ' + ML ' + d.mlPoints.toFixed(1) + ' from ' + Math.round(d.mlScore * 100) + '%)' : ''} | Z‑Susp: ${d.zScores.susp.toFixed(1)} | Z‑Ctime: ${d.zScores.ctime.toFixed(1)} | Owner: ${d.owner}${d.rareOwner ? ' (RARE)' : ''}`;
-                        }
-
-                        const fileLink = `<span class="file-link" data-copy="${escapeHtml(d.path)}">${escapeHtml(d.path)}</span>`;
-                        let md5Btn = '';
-                        let vtBadge = '';
-                        if (!d.is_unreadable && d.md5 && d.md5 !== 'N/A') {
-                            md5Btn = `<span class="copy-hash-btn" data-copy="${escapeHtml(d.md5)}" title="Copy MD5 hash">📋</span>`;
-                            vtBadge = `<span class="vt-badge" data-vt="${escapeHtml(d.md5)}" title="check on VirusTotal">VT</span>`;
-                        }
-                        let mainLine = badge + fileLink + md5Btn + vtBadge;
-                        if (status) mainLine += ' (' + status + ')';
-
-                        html += `<tr data-path="${escapeHtml(d.path)}">
-                            <td style="color:${color}; font-size:13px;">
-                                ${mainLine}
-                                <br><span class="verbosity">${verbosity}</span>
-                            </td>
-                        </tr>`;
-                    });
+                    html = filtered.map(rowHtml).join('');
                 }
                 document.getElementById('result').innerHTML = html;
                 _rowByPath = new Map();
@@ -4293,7 +4257,6 @@ if (isset($_POST['ajax_action'])) {
             var _scanCancelled = false;
             // md5 => path of the first file seen with it, for duplicate_of across batches
             var _firstPathByMd5 = new Map();
-            var _lastProgressRender = 0;
 
             function getChunkSize() {
                 var el = document.getElementById('chunkSizeInput');
@@ -4313,7 +4276,6 @@ if (isset($_POST['ajax_action'])) {
                 var chunkSize = getChunkSize();
                 _scanCancelled = false;
                 _firstPathByMd5 = new Map();
-                _lastProgressRender = Date.now();
                 _chartSelection = null;
                 var allFeatures = [];
 
@@ -4330,21 +4292,23 @@ if (isset($_POST['ajax_action'])) {
                     .then(function(data) {
                         if (_scanCancelled) { return; }
                         reportServerWarnings(data);
+                        // actionScan(): each directory once in "dirs", the files as
+                        // flat [dir index, name, ...] lists in scan order
+                        var dirs        = data.dirs || [];
                         var readable    = data.readable    || [];
                         var notReadable = data.not_readable || [];
-                        var total       = data.total || (readable.length + notReadable.length);
+                        var total       = data.total || (readable.length + notReadable.length) / 2;
 
                         document.getElementById('ajaxStatus').textContent =
                             'Phase 2: Processing ' + total + ' files\u2026 (chunk size: ' + chunkSize + ')';
 
-                        // Build flat chunk list
+                        // A chunk is a slice of those lists; its paths are joined when it is sent
                         var chunks = [];
-                        for (var i = 0; i < readable.length; i += chunkSize) {
-                            chunks.push({ paths: readable.slice(i, i + chunkSize), isNotReadable: false });
-                        }
-                        for (var j = 0; j < notReadable.length; j += chunkSize) {
-                            chunks.push({ paths: notReadable.slice(j, j + chunkSize), isNotReadable: true });
-                        }
+                        [[readable, false], [notReadable, true]].forEach(function (pair) {
+                            for (var i = 0; i < pair[0].length; i += 2 * chunkSize) {
+                                chunks.push({ list: pair[0], from: i, to: i + 2 * chunkSize, dirs: dirs, isNotReadable: pair[1] });
+                            }
+                        });
 
                         return processChunk(chunks, 0, allFeatures, total, chunkSize);
                     })
@@ -4361,6 +4325,15 @@ if (isset($_POST['ajax_action'])) {
                     });
             }
 
+            // The encoded paths of a chunk (dir + '/' + name, as actionScan() split them)
+            function chunkPaths(chunk) {
+                var paths = [];
+                for (var k = chunk.from; k < Math.min(chunk.to, chunk.list.length); k += 2) {
+                    paths.push(chunk.dirs[chunk.list[k]] + '/' + chunk.list[k + 1]);
+                }
+                return paths;
+            }
+
             // One 'process' request for a batch of paths (see postAction() for failures)
             function fetchProcessBatch(paths, isNotReadable) {
                 return postAction({
@@ -4375,7 +4348,8 @@ if (isset($_POST['ajax_action'])) {
             // original and later ones are its duplicates
             function applyProcessResult(data, allFeatures) {
                 reportServerWarnings(data);
-                (data.features || []).forEach(function(f) {
+                const batch = data.features || [];
+                batch.forEach(function(f) {
                     f.pathRaw = f.path; // encoded form, sent back as-is
                     f.path = decodePath(f.path);
                     f.duplicate_of = false;
@@ -4385,6 +4359,26 @@ if (isset($_POST['ajax_action'])) {
                     }
                     allFeatures.push(f);
                 });
+                appendLiveRows(batch);
+            }
+
+            // During a scan each batch is listed as it arrives, every file scored
+            // on its own: analyzeData() of the one file, whose statistics are then
+            // neutral, so the outliers among all files are flagged when the scan
+            // ends and the whole table is redrawn, sorted
+            function appendLiveRows(batch) {
+                const threshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
+                const rows = batch.map(f => analyzeData([f], threshold)[0]).filter(d => shouldShowFile(d));
+                if (rows.length) document.getElementById('result').insertAdjacentHTML('beforeend', rows.map(rowHtml).join(''));
+            }
+
+            // Progress counts the files that have come back, so the bar keeps up
+            // with what the list shows
+            function showScanProgress(received, total, chunk, chunks) {
+                var pct = total > 0 ? Math.round(Math.min(received, total) / total * 100) : 100;
+                document.getElementById('ajaxBar').style.width = pct + '%';
+                document.getElementById('ajaxSubStatus').textContent =
+                    'Chunk ' + chunk + '/' + chunks + ' \u2014 ' + received + '/' + total + ' files (' + pct + '%)';
             }
 
             // A batch that fails to parse as JSON usually means exactly one
@@ -4419,14 +4413,10 @@ if (isset($_POST['ajax_action'])) {
                 if (_scanCancelled || idx >= chunks.length) { return Promise.resolve(); }
 
                 var chunk = chunks[idx];
-                var done  = Math.min(idx * chunkSize, totalFiles);
-                var pct   = totalFiles > 0 ? Math.round(done / totalFiles * 100) : 0;
+                var paths = chunkPaths(chunk);
+                showScanProgress(allFeatures.length, totalFiles, idx + 1, chunks.length);
 
-                document.getElementById('ajaxBar').style.width = pct + '%';
-                document.getElementById('ajaxSubStatus').textContent =
-                    'Chunk ' + (idx + 1) + '/' + chunks.length + ' \u2014 ' + done + '/' + totalFiles + ' files (' + pct + '%)';
-
-                return fetchProcessBatch(chunk.paths, chunk.isNotReadable)
+                return fetchProcessBatch(paths, chunk.isNotReadable)
                     .then(function(data) {
                         if (_scanCancelled) { return; }
                         applyProcessResult(data, allFeatures);
@@ -4436,28 +4426,23 @@ if (isset($_POST['ajax_action'])) {
                         // never stop the entire scan \u2014 always fall through to
                         // the next chunk below, regardless of what happens here.
                         if (_scanCancelled) { return; }
-                        if (err instanceof SyntaxError && chunk.paths.length > 1) {
+                        if (err instanceof SyntaxError && paths.length > 1) {
                             logWarning(
-                                'Chunk ' + (idx + 1) + '/' + chunks.length + ' returned an invalid response \u2014 retrying its ' + chunk.paths.length + ' file(s) in smaller batches',
+                                'Chunk ' + (idx + 1) + '/' + chunks.length + ' returned an invalid response \u2014 retrying its ' + paths.length + ' file(s) in smaller batches',
                                 'warning'
                             );
-                            return retryProcessBisect(chunk.paths, chunk.isNotReadable, allFeatures);
+                            return retryProcessBisect(paths, chunk.isNotReadable, allFeatures);
                         }
                         // A network-level failure would fail identically on every
                         // retry, so there's nothing to gain from splitting it up.
                         logWarning(
-                            'Chunk ' + (idx + 1) + '/' + chunks.length + ' failed (' + chunk.paths.length + ' file(s) skipped): ' + err.message,
+                            'Chunk ' + (idx + 1) + '/' + chunks.length + ' failed (' + paths.length + ' file(s) skipped): ' + err.message,
                             'error'
                         );
                     })
                     .then(function() {
                         if (_scanCancelled) { return; }
-                        // Show results so far every few seconds: rescoring and rendering
-                        // everything after each chunk would cost more than the scan
-                        if (Date.now() - _lastProgressRender > 3000) {
-                            reanalyze(allFeatures);
-                            _lastProgressRender = Date.now();
-                        }
+                        showScanProgress(allFeatures.length, totalFiles, idx + 1, chunks.length);
                         return processChunk(chunks, idx + 1, allFeatures, totalFiles, chunkSize);
                     });
             }

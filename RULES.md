@@ -113,7 +113,13 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `disallow_nul`, some WAFs) strip or drop such values, which silently emptied
   every scan on a real host. Responses go
   through `ajaxRespond()`, which folds in captured PHP warnings and encodes
-  with `jsonEncode()` (UTF-8-safe), so the body is never empty.
+  with `jsonEncode()` (UTF-8-safe), so the body is never empty, and gzips it
+  when the browser accepts gzip (unless `zlib.output_compression` already
+  does). `scan` doesn't send whole paths: `dirs` lists each directory once
+  (`/` left unencoded) and `readable` / `not_readable` are flat
+  `[dir index, name, ...]` lists in scan order, joined by the page as
+  `dirs[i] + '/' + name` when a chunk is sent (453,627 files: 61 MB of JSON
+  before, 25 MB so, ~3 MB gzipped).
 - **`mhr_unlink`** deletes only files whose *current* md5 MHR confirms in that
   same request. Never make it trust the browser's path list.
 - **Listing** (`getSortedByPattern` → `recursiveScan`): `$pattern` is one
@@ -136,13 +142,13 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `data-vt`, `data-filter-path`).
 - **Downloads** all go through `httpRequest()`: verified TLS (the blacklist
   deletes files), a fresh cURL handle per request, else PHP streams; it
-  returns the status and body. `fetchText()` is the one way to get a list,
-  manifest or model: an http(s) URL or a local file, a 404 optionally quiet,
-  a host that didn't answer not asked again in that request. `cachedText()`
-  keeps downloads in the scan's own session, never taken from the browser, as
-  text (a parsed 1.2 MB list in the session cost every batch ~30 MB and
-  ~150 ms), failed ones as '' so they cost one request per scan.
-  `hashList()` parses a cached text per request.
+  returns the status and body, asking for gzip where it can decode it
+  (cURL's `CURLOPT_ENCODING`; streams only with `gzdecode()`, PHP 5.4+).
+  `fetchText()` is the one way to get a list, manifest or model: an http(s)
+  URL or a local file, a 404 optionally quiet, a host that didn't answer not
+  asked again in that request. **Nothing is cached between requests**
+  (owner's call): each batch downloads what it needs, once per request
+  (`hashList()`, `checksumManifest()` keep it for that request only).
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it
   returns a clear error. A `json_decode` fallback was deliberately not added:
   legacy builds have no HTTPS, so it could never run.
@@ -418,6 +424,12 @@ revisiting one.
     (egress-blocked), so test/php/selfcheck.php points the URL settings at
     local files in the documented formats (escaped slashes, md5 lists, upper
     case, a locale falling back to en_US).
+- **Scan progress:** each batch is listed as it arrives, every file scored on
+  its own (`analyzeData([file])`, whose statistics are neutral), and the bar
+  counts files that came back. The statistics need the whole scan, so the
+  final `reanalyze()` flags outliers and redraws the table sorted. A full
+  rescore and redraw every 3 s used to block the page and the next request,
+  so the list and the bar trailed what had arrived.
 - After making important decision dump it here
 
 ## Style

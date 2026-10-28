@@ -58,7 +58,12 @@ function buildSandbox(box) {
 
 // --- Scenarios ---
 async function testScanAndCharts() {
-    await js(`document.querySelector('input[name="dir"]').value = ${JSON.stringify(DATA)}; startChunkedScan(); true`);
+    // Small batches, so the scan has a middle: each batch is listed as it
+    // arrives, and the bar counts what came back
+    await js(`document.getElementById('chunkSizeInput').value = 20; document.querySelector('input[name="dir"]').value = ${JSON.stringify(DATA)}; startChunkedScan(); true`);
+    check('the list fills in while the scan runs', await waitFor(`document.getElementById("ajaxProgress").style.display === "block" &&
+        document.querySelectorAll("#result tr[data-path]").length > 0 && parseFloat(document.getElementById("ajaxBar").style.width) > 0`),
+        await js('document.querySelectorAll("#result tr[data-path]").length') + ' rows, bar ' + await js('document.getElementById("ajaxBar").style.width'));
     check('scan finished', await waitFor('analyzedData.length > 0 && document.getElementById("ajaxProgress").style.display === "none"'), await js('analyzedData.length') + ' files');
     await js('toggleCharts(); true'); await sleep(300);
     check('4 charts built', await js('_charts.length') === 4);

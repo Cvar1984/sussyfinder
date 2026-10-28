@@ -512,7 +512,6 @@ define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
 | `TIME_LIMIT` | `3600` | seconds a request may run |
 | `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |
 | `MHR_BATCH` | `1000` | hashes per MHR request |
-| `LIST_CACHE_SECONDS` | `900` | how long the requests of a scan share the downloaded hash lists (`0`: download for every request) |
 | `LONG_LINE_BYTES`, `HALT_PAYLOAD_BYTES` | `5000`, `1024` | thresholds of the `@long_line` and `@halt_payload` signals |
 
 Which files are scanned (`$pattern`), the needles and their weights (`$tokenTiers`), and how they combine in the threat score (`$tokenRoles`) follow the settings. The page's scoring reads the weights and roles from the server, so they are defined in one place.
@@ -529,7 +528,7 @@ By default, both lists are fetched from:
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt`
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt`
 
-You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Each scan downloads them once when it starts and keeps them, as text, in its own PHP session (cookie `SUSSYFINDER`) for `LIST_CACHE_SECONDS`, so the batches that follow reuse them; a download that failed is kept as empty, so it isn't retried every batch. They stay on the server, so the browser can't substitute its own blacklist; without a session the batches download them again. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
+You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Nothing is cached: every batch of a scan downloads the lists it needs again (gzip-compressed when the host's cURL or PHP 5.4+ can decode it: whitelist, blacklist and `checksums.txt` are 0.6 MB a batch instead of 1.5 MB), so each batch uses the lists as they are now. A bigger chunk size means fewer downloads; on a host that should not fetch them at all, point the URL settings at local copies. They stay on the server, so the browser can't substitute its own blacklist. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
 
 > **Note:** The provided whitelist is harvested from common frameworks and libraries. It is up to you to trust or modify it. For blacklist contributions, please provide source files when creating a pull request.
 
@@ -547,7 +546,7 @@ Why this can't hide a shell: injecting a shell into a vendor file changes its MD
 
 What it doesn't cover: modified files, custom themes and code, premium plugins, and release versions no list has hashed; those are scanned as usual. What it does trust: an official release that was itself backdoored (hijacked or sold plugins have shipped malware). The badge names the release, so such a file is easy to look up.
 
-Both WordPress sources are rows of `$checksumSources` in `main.php`'s configuration: a marker file that identifies an install, where the version (and locale) are read, the manifest URL and the label. A platform that publishes per-file MD5s in the same JSON shape needs only another row. The checksums are downloaded once per scan and kept in the scan's session, like the hash lists. A host that doesn't answer is warned about once, and the scan carries on without that source. Turn it off with `_CHECKSUMS_` set to `false`, or point the URLs at local copies on an offline host.
+Both WordPress sources are rows of `$checksumSources` in `main.php`'s configuration: a marker file that identifies an install, where the version (and locale) are read, the manifest URL and the label. A platform that publishes per-file MD5s in the same JSON shape needs only another row. The checksums are downloaded by each batch that needs them, like the hash lists. A host that doesn't answer is warned about once, and the scan carries on without that source. Turn it off with `_CHECKSUMS_` set to `false`, or point the URLs at local copies on an offline host.
 
 ## Screenshots
 
