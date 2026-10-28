@@ -133,16 +133,21 @@ function jsTests() {
         assert(ctx.mlPoints(c('ML_CRITICAL')) === c('CRITICAL_SCORE'), 'critical');
         for (let m = 0; m < 1; m += 0.01) assert(ctx.mlPoints(m + 0.01) >= ctx.mlPoints(m), 'monotonic at ' + m.toFixed(2));
     });
-    test('a verified release file is never flagged, unless the blacklist or MHR names it', () => {
+    test('a verified release file scores below VERIFIED_MAX and isn\'t flagged, unless the blacklist or MHR names it', () => {
         const ctx = loadScoring();
         const file = (path, extra) => Object.assign({ path, matched_tokens: ['eval', 'base64_decode', '$_post'], total_tokens: 400, size: 9000,
             mtime: 1e9, ctime: 1e9, owner: 1, entropy: 6, md5: 'x', is_blacklisted: false, is_htaccess: false, duplicate_of: false }, extra);
-        const rows = ctx.analyzeData([file('plain.php', {}), file('verified.php', { verified: 'acme release file a.php' }),
-            file('verified-blacklisted.php', { verified: 'acme release file a.php', is_blacklisted: true }),
-            file('verified-mhr.php', { verified: 'acme release file a.php', mhr_hit: true })], constant(ctx, 'Z_THRESHOLD'));
+        const verified = { verified: 'acme release file a.php' };
+        const rows = ctx.analyzeData([file('plain.php', {}), file('verified.php', verified),
+            file('verified-more.php', Object.assign({}, verified, { matched_tokens: ['eval', 'system', 'base64_decode', '$_post', '$_get'] })),
+            file('verified-blacklisted.php', Object.assign({ is_blacklisted: true }, verified)),
+            file('verified-mhr.php', Object.assign({ mhr_hit: true }, verified))], constant(ctx, 'Z_THRESHOLD'));
         const flagged = rows.map(d => d.isAnomaly);
-        assert(JSON.stringify(flagged) === '[true,false,true,true]', 'isAnomaly per row: ' + JSON.stringify(flagged));
-        assert(rows[1].threatScore >= constant(ctx, 'CRITICAL_SCORE'), 'the score is still computed and shown');
+        assert(JSON.stringify(flagged) === '[true,false,false,true,true]', 'isAnomaly per row: ' + JSON.stringify(flagged));
+        assert(rows[1].contentScore >= constant(ctx, 'CRITICAL_SCORE') && rows[1].threatScore < constant(ctx, 'VERIFIED_MAX'),
+            `content ${rows[1].contentScore} held to ${rows[1].threatScore}`);
+        assert(rows[2].threatScore > rows[1].threatScore, 'verified files stay in order');
+        assert(rows[3].threatScore === 100 && rows[4].threatScore === 100, 'the blacklist and MHR still win');
     });
     return tests;
 }

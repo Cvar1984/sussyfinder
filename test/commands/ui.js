@@ -11,7 +11,7 @@ const path = require('path');
 const { MAIN } = require('../lib/paths');
 const { loadCorpora, corpus } = require('../lib/corpora');
 const { tempDir } = require('../lib/cleanup');
-const { sleep } = require('../lib/util');
+const { sleep, md5 } = require('../lib/util');
 const { findChrome, spawnManaged, openPage } = require('../lib/browser');
 const { phpString } = require('../lib/php');
 
@@ -44,9 +44,9 @@ function buildSandbox(box) {
     const wp = path.join(corpus('wordpress-7.2-alpha', corpora).dir, 'wp-includes');
     fs.mkdirSync(path.join(DATA, 'wp'));
     fs.readdirSync(wp).filter(f => f.endsWith('.php')).forEach(f => fs.copyFileSync(path.join(wp, f), path.join(DATA, 'wp', f)));
-    VERIFIED = fs.readdirSync(path.join(DATA, 'wp')).sort()[0];
-    const md5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(DATA, 'wp', VERIFIED))).digest('hex');
-    fs.writeFileSync(checksums, `${md5} wordpress wp/${VERIFIED}\n`);
+    // the largest copied file, so it has needles whose display can be checked
+    VERIFIED = fs.readdirSync(path.join(DATA, 'wp')).sort((a, b) => fs.statSync(path.join(DATA, 'wp', b)).size - fs.statSync(path.join(DATA, 'wp', a)).size || (a < b ? -1 : 1))[0];
+    fs.writeFileSync(checksums, `${md5(fs.readFileSync(path.join(DATA, 'wp', VERIFIED)))} wordpress wp/${VERIFIED}\n`);
     const xss = path.join(DATA, "a');alert(1);('.php");
     fs.writeFileSync(xss, '<?php eval($_GET[1]);');
     // distinct dates so the timeline has several buckets
@@ -139,12 +139,17 @@ async function testZoomAndResize() {
 }
 
 async function testVerified() {
-    const d = await js(`(() => { const d = analyzedData.find(d => d.verified); return d ? { path: d.path, verified: d.verified, isAnomaly: d.isAnomaly } : null; })()`);
+    const d = await js(`(() => { const d = analyzedData.find(d => d.verified); return d ? { path: d.path, verified: d.verified, isAnomaly: d.isAnomaly,
+        threatScore: d.threatScore, contentScore: d.contentScore, tokens: d.matched_tokens } : null; })()`);
     check('a file on the checksum list scans as verified and is not flagged', !!d && d.path.endsWith('/wp/' + VERIFIED) && d.isAnomaly === false
         && /^wordpress release file wp\//.test(d.verified), JSON.stringify(d));
     check('only that file is verified', await js('analyzedData.filter(d => d.verified).length') === 1);
+    check('its threat score is held below VERIFIED_MAX', !!d && d.threatScore < await js('VERIFIED_MAX') && d.threatScore <= d.contentScore,
+        d && `content ${d.contentScore} -> ${d.threatScore}`);
     await js(`(() => { document.getElementById('searchInput').value = ${JSON.stringify(VERIFIED)}; applySearch(); return true; })()`); await sleep(200);
-    check('its row shows the VERIFIED badge', await js(`[...document.querySelectorAll('#result tr[data-path]')].some(r => r.innerHTML.includes('VERIFIED'))`));
+    const row = await js(`(() => { const r = [...document.querySelectorAll('#result tr[data-path]')].find(r => r.innerHTML.includes('VERIFIED')); return r ? r.textContent : ''; })()`);
+    check('its row shows the VERIFIED badge', row !== '');
+    check('and still shows its matched tokens', !!d && d.tokens.length > 0 && d.tokens.every(t => row.includes(t)), d && d.tokens.join(', '));
     await js(`(() => { document.getElementById('searchInput').value = ''; applySearch(); return true; })()`); await sleep(200);
 }
 

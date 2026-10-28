@@ -136,10 +136,13 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `data-vt`, `data-filter-path`).
 - **Downloads** all go through `httpRequest()`: verified TLS (the blacklist
   deletes files), a fresh cURL handle per request, else PHP streams; it
-  returns the status and body. Hash lists are kept in the scan's own session
-  (`hashList()`), never taken from the browser; so are the vendor checksum
-  manifests (`checksumManifest()`), including the empty one for a manifest
-  that 404s, so a premium plugin costs one request per scan.
+  returns the status and body. `fetchText()` is the one way to get a list,
+  manifest or model: an http(s) URL or a local file, a 404 optionally quiet,
+  a host that didn't answer not asked again in that request. `cachedText()`
+  keeps downloads in the scan's own session, never taken from the browser, as
+  text (a parsed 1.2 MB list in the session cost every batch ~30 MB and
+  ~150 ms), failed ones as '' so they cost one request per scan.
+  `hashList()` parses a cached text per request.
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it
   returns a clear error. A `json_decode` fallback was deliberately not added:
   legacy builds have no HTTPS, so it could never run.
@@ -371,13 +374,24 @@ revisiting one.
   at no feature churn. The injected blind spot is closed by per-unit scoring.
 - **Vendor checksums** (`checksumVerified()`, `checksums.txt`, `test/run
   checksums`): a file byte-identical to an official release's file at that
-  path is VERIFIED and never flagged unless the blacklist or MHR names it. The
+  path is VERIFIED, its score held down, unless the blacklist or MHR names it. The
   owner's alternative idea, shipping the trainer to learn on the live site, was
   rejected: the site can't label its own files, so a shell already there (or
   look-alikes an attacker plants) would be learned as normal. Decisions:
   - **Mark, don't hide.** Unlike the whitelist, a verified file is still
-    analysed, scored and listed with a badge naming the release: an official
-    release can itself be backdoored, and the badge makes that checkable.
+    analysed and listed, with its tokens and a badge naming the release: an
+    official release can itself be backdoored, and the badge makes that
+    checkable.
+  - **In the score, not around it.** `scoreRows()` saturates a verified
+    file's threat score below `VERIFIED_MAX` (half the anomaly bar):
+    `4 s / (s + 4)` of its content score `s` (kept as `contentScore`), before
+    the blacklist/MHR lift to 100. Every consumer of `threatScore` (flags,
+    critical, sorting, charts, copy) then follows with no special case; only
+    the statistical triggers in `flagAnomalies()` need `!d.verified`. A first
+    version kept the full score and special-cased seven consumers: verified
+    files still sorted to the top, and the badge hid the row's tokens. A
+    multiplier doesn't bound it (×0.1 still left 100 listed files at or over
+    8; scores reach 466), a subtraction even less.
   - **MD5**, because PHP 4.3 has no `hash()`. Matching an existing file's MD5
     needs a second preimage, out of reach; MD5 collisions need both files made
     by the attacker, which doesn't help here.
@@ -394,11 +408,16 @@ revisiting one.
   - Only WordPress publishes per-file checksums (core and wordpress.org
     plugins; no themes). Joomla publishes package hashes only, Drupal and
     Magento nothing per file, so the rest come from our own corpora.
+  - **Sources are data** (`$checksumSources`): root marker, version/locale
+    readers (a file pattern or a plugin-style header), manifest URL template,
+    label. JSON is read with `json_decode()` behind `functionAvailable()`,
+    as MHR does: these APIs are HTTPS-only, which legacy PHP without
+    `json_decode` can't do either. checksums.txt is looked up in its text
+    (`strpos` of the MD5), not parsed into an array.
   - The WordPress endpoints were unreachable from the development container
-    (egress-blocked), so the parsers are tested against fixtures in the
-    documented formats (escaped slashes, md5 lists, upper case) in
-    test/php/selfcheck.php. They are deliberately lenient: an entry they
-    can't read only means that file gets scanned.
+    (egress-blocked), so test/php/selfcheck.php points the URL settings at
+    local files in the documented formats (escaped slashes, md5 lists, upper
+    case, a locale falling back to en_US).
 - After making important decision dump it here
 
 ## Style

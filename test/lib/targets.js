@@ -36,8 +36,8 @@ const PROFILES = {
         ini: 'disable_functions = exec,shell_exec,system,passthru,proc_open,popen,pcntl_exec,curl_init,curl_exec,curl_multi_exec,fsockopen,pfsockopen\nallow_url_fopen = Off\n',
     },
     minimal: {
-        about: 'json_encode and cURL missing (as on PHP < 5.2 or a stripped build)',
-        ini: 'disable_functions = json_encode,curl_init,curl_exec,curl_setopt,curl_error\n',
+        about: 'json_encode, json_decode and cURL missing (as on PHP < 5.2 or a stripped build)',
+        ini: 'disable_functions = json_encode,json_decode,curl_init,curl_exec,curl_setopt,curl_error\n',
     },
 };
 

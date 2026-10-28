@@ -3,13 +3,13 @@
 // FIFO), process returns rows with paths that round-trip byte for byte, and a
 // request without the CSRF header is refused.
 const { execFileSync } = require('child_process');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const { ROOT } = require('./paths');
 const { corpus } = require('./corpora');
 const { LISTING_WANT } = require('./selfcheck');
+const { md5 } = require('./util');
 
 function webCheck(t) {
     const url = `http://127.0.0.1:${t.port}/main.php`;
@@ -30,7 +30,7 @@ function webCheck(t) {
     const noHeader = json(curl(['--data', 'ajax_action=scan', '--data', 'dir=/work/fixture'], false));
     // Paths are rawurlencoded on the wire, then form-encoded; the Latin-1 name must round-trip
     const micro = shells + '/micro.php';
-    const microMd5 = crypto.createHash('md5').update(fs.readFileSync(path.join(ROOT, path.relative(t.repo, micro)))).digest('hex');
+    const microMd5 = md5(fs.readFileSync(path.join(ROOT, path.relative(t.repo, micro))));
     const latin1 = '%2Fwork%2Ffixture%2Fcaf%E9.php';
     const wire = p => encodeURIComponent(encodeURIComponent(p));
     // comma-separated (%2C); a path that doesn't exist must come back as a warning, not vanish

@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { ROOT, MODEL, PHP_JOBS } = require('./paths');
 const { phpJob, jobJson } = require('./php');
+const { md5 } = require('./util');
 
 const JOB = path.join(PHP_JOBS, 'selfcheck.php');
 
@@ -81,34 +82,36 @@ function buildFixture(work) {
     return fixture;
 }
 
-// --- Vendor checksums fixture (checksumVerified()): selfcheck.php seeds the
-// manifests itself; this is the site they describe ---
+// --- Vendor checksums fixture (checksumVerified()): a WordPress install
+// (de_DE) with a plugin and a vendor library, and local stand-ins for the
+// manifests in the APIs' own formats (escaped slashes, upper case, an md5
+// list). Only an en_US core manifest exists, so the locale falls back. ---
+const CORE = '<?php // core file\n', PLUGIN = '<?php // plugin file\n', VENDOR = '<?php // vendor file\n';
 function buildChecksumFixture(work) {
     const dir = path.join(work, 'checksums');
     const files = {
         'site/wp-includes/version.php': "<?php\n$wp_version = '6.6.2';\n$wp_local_package = 'de_DE';\n",
-        'site/wp-login.php': '<?php // core file\n',
+        'site/wp-login.php': CORE,
         'site/wp-content/plugins/demo/demo.php': '<?php\n/**\n * Plugin Name: Demo\n * Version: 1.2 */\n',
-        'site/wp-content/plugins/demo/inc/x.php': '<?php // plugin file\n',
-        'site/vendor/acme/lib/src/A.php': '<?php // vendor file\n',
-        'site/vendor/acme/lib/xsrc/A.php': '<?php // vendor file\n',
-        'elsewhere/A.php': '<?php // vendor file\n',
+        'site/wp-content/plugins/demo/inc/x.php': PLUGIN,
+        'site/vendor/acme/lib/src/A.php': VENDOR,
+        'site/vendor/acme/lib/xsrc/A.php': VENDOR,
+        'elsewhere/A.php': VENDOR,
+        'manifests/core-6.6.2-en_US.json': '{"checksums":{"wp-login.php":"' + md5(CORE).toUpperCase() + '","wp-admin\\/about.php":"' + '0'.repeat(32) + '"}}',
+        'manifests/plugin-demo-1.2.json': '{"plugin":"demo","version":"1.2","files":{"inc\\/x.php":{"md5":["' + 'f'.repeat(32) + '","' + md5(PLUGIN) +
+            '"],"sha256":["a","b"]},"demo.php":{"md5":"' + 'e'.repeat(32) + '","sha256":"c"}}}',
+        'checksums.txt': md5(VENDOR) + ' acme src/A.php\nnot a checksum line\n',
     };
-    fs.mkdirSync(path.join(dir, 'site', 'wp-admin'), { recursive: true });
     Object.entries(files).forEach(([name, text]) => {
         fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });
         fs.writeFileSync(path.join(dir, name), text);
     });
     return dir;
 }
-const md5 = text => require('crypto').createHash('md5').update(text).digest('hex');
-const CHECKSUM_WANT = {
-    install: { version: '6.6.2', locale: 'de_DE' },
-    core: { 'wp-login.php': [md5('<?php // core file\n')], 'wp-admin/about.php': ['0'.repeat(32)] },
-    plugin: { 'inc/x.php': ['f'.repeat(32), md5('<?php // plugin file\n')], 'demo.php': ['e'.repeat(32)] },
-    header: ['1.2', false],
-    verified: ['WordPress 6.6.2 core', false, 'WordPress.org plugin demo 1.2', 'acme release file src/A.php', false, false],
-};
+// selfcheck.php's probes, in order: core file, the same modified, plugin file,
+// release file in place, the same bytes elsewhere, a suffix not at a directory.
+// Without json_decode() (PHP < 5.2) only checksums.txt can verify.
+const checksumWant = json => [json ? 'WordPress 6.6.2 core' : false, false, json ? 'WordPress.org plugin demo 1.2' : false, 'acme release file src/A.php', false, false];
 
 // --- Model files main.php must accept (true) or refuse (false) ---
 function buildModels(work) {
@@ -168,15 +171,11 @@ function check(out, models) {
             failures.push(`mlFeatureUnits probe ${i}: want ${want} units (whole-file first), got ${JSON.stringify(got)}`);
         }
     });
-    // Vendor checksums: parsers, plugin header, install detection, matching
+    // Vendor checksums: install detection, manifests, matching
     const cs = out.checksums || {};
-    const inst = cs.install || {};
-    if (inst.version !== CHECKSUM_WANT.install.version || inst.locale !== CHECKSUM_WANT.install.locale || !/\/site$/.test(inst.root || '')) {
-        failures.push(`wordpressInstall: want 6.6.2 de_DE at .../site, got ${JSON.stringify(cs.install)}`);
-    }
-    ['core', 'plugin', 'header', 'verified'].forEach(k => {
-        if (JSON.stringify(cs[k]) !== JSON.stringify(CHECKSUM_WANT[k])) failures.push(`checksums ${k}: want ${JSON.stringify(CHECKSUM_WANT[k])}, got ${JSON.stringify(cs[k])}`);
-    });
+    if (!/\/site$/.test(cs.root || '')) failures.push(`checksumRoot: want .../site, got ${JSON.stringify(cs.root)}`);
+    const want = checksumWant(cs.json === true);
+    if (JSON.stringify(cs.verified) !== JSON.stringify(want)) failures.push(`checksumVerified: want ${JSON.stringify(want)}, got ${JSON.stringify(cs.verified)}`);
     return failures;
 }
 
@@ -194,7 +193,7 @@ async function run({ work, php, repo, phpWork = work, name = 'selfcheck' }) {
     const job = phpJob(path.join(work, name + '.php'), path.join(repo, path.relative(ROOT, JOB)), prep.vars(path.join(repo, 'main.php'), phpWork));
     try {
         const out = jobJson(await php(inPhp(job)));
-        return { php: out.php, failures: check(out, prep.models), summary: `${CASES.length} detector cases, listing, ${prep.models.names.length} model files, ${UNIT_PROBES.length} unit probes, ${CHECKSUM_WANT.verified.length} checksum probes` };
+        return { php: out.php, failures: check(out, prep.models), summary: `${CASES.length} detector cases, listing, ${prep.models.names.length} model files, ${UNIT_PROBES.length} unit probes, ${checksumWant(true).length} checksum probes` };
     } catch (e) {
         return { php: '?', failures: ['the PHP self-check produced no JSON: ' + e.message.split('\n')[0]] };
     }

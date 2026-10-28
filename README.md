@@ -14,7 +14,7 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 * **Token-based detection** – scans PHP tokens for known obfuscation, shell execution, file I/O, and credential-related functions (method names like `$pdo->exec()` and text inside strings/comments are ignored)
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
-* **Vendor checksums** – a file byte-identical to an official release (WordPress core and wordpress.org plugins through WordPress's checksum APIs, and release files of 57 CMSs, frameworks and libraries in `checksums.txt`) is shown as **VERIFIED** and never flagged; an injected shell changes the hash, so nothing can hide this way ([details](#vendor-checksums))
+* **Vendor checksums** – a file byte-identical to an official release (WordPress core and wordpress.org plugins through WordPress's checksum APIs, and release files of 57 CMSs, frameworks and libraries in `checksums.txt`) is shown as **VERIFIED** and its threat score held below half the anomaly bar; an injected shell changes the hash, so nothing can hide this way ([details](#vendor-checksums))
 * **Shannon entropy calculation** – per-file byte entropy detects heavily obfuscated or encoded content
 * **Tiny ML model**: a 4 KB logistic regression over hashed token features, run in the browser. Its score adds points to the threat score, so it can lift a file the rules underrate; it never lowers a score.
 * **Client-side statistical analysis** – computes robust (median/MAD) Z-scores for size, mtime, tokens, suspicious token count, entropy and the ctime–mtime gap, plus residuals and file-owner rarity, to flag outliers
@@ -463,7 +463,7 @@ test/run all              # unit + bench + ui, with a summary: run before a comm
 * `test/run matrix`: the same on every PHP version (`test/run matrix --help` lists the defaults; `--php all` adds PHTest's legacy builds) under each php.ini profile, in Docker:
   * `default`: the image's own php.ini
   * `hardened`: shared-hosting style, with no exec family, no cURL and no remote fopen
-  * `minimal`: no `json_encode` and no cURL
+  * `minimal`: no `json_encode`, no `json_decode` and no cURL (as on PHP < 5.2)
 
   Each also gets a page/AJAX check. It ends with a table and lists files that match differently than on the newest PHP. `test/run setup --docker` pulls the images.
 * `test/run ui`: drives the page in headless Chrome with real mouse and keyboard events. It covers chart selection, hover linking, filters, the threshold control, zoom, HiDPI sizing and resizing, and checks that a file named `a');alert(1);('.php` runs no script and that a file on a local checksum list scans as verified. It scans a temporary copy of the samples with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips when there is none (`--require-browser` makes that a failure).
@@ -503,12 +503,12 @@ define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
 |---|---|---|
 | `_WHITELIST_`, `_BLACKLIST_` | `true` | use the known-good / known-bad MD5 lists |
 | `_MHR_` | `true` | Malware Hash Registry lookups |
-| `_CHECKSUMS_` | `true` | show files identical to an official release as verified, never flagged ([Vendor Checksums](#vendor-checksums)) |
+| `_CHECKSUMS_` | `true` | show files identical to an official release as verified, their score held down ([Vendor Checksums](#vendor-checksums)) |
 | `_MHR_USER_`, `_MHR_PASS_` | empty | MHR account, used when the page sends none |
 | `_ML_` | `true` | ML second opinion |
-| `_WHITELIST_URL_`, `_BLACKLIST_URL_`, `_ML_MODEL_URL_` | this repository | where the lists and the model come from (the model may be a local file) |
+| `_WHITELIST_URL_`, `_BLACKLIST_URL_`, `_ML_MODEL_URL_` | this repository | where the lists and the model come from (each may be a local file) |
 | `_MHR_URL_` | `https://hash.cymru.com/v2/submitHashes` | MHR endpoint |
-| `_CHECKSUMS_URL_`, `_WP_CORE_CHECKSUMS_URL_`, `_WP_PLUGIN_CHECKSUMS_URL_` | this repository, `api.wordpress.org`, `downloads.wordpress.org` | where the vendor checksums come from (`checksums.txt` may be a local file) |
+| `_CHECKSUMS_URL_`, `_WP_CORE_CHECKSUMS_URL_`, `_WP_PLUGIN_CHECKSUMS_URL_` | this repository, `api.wordpress.org`, `downloads.wordpress.org` | where the vendor checksums come from; the WordPress ones are templates with `{version}`, `{locale}`, `{slug}` (each may be a local file) |
 | `TIME_LIMIT` | `3600` | seconds a request may run |
 | `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |
 | `MHR_BATCH` | `1000` | hashes per MHR request |
@@ -529,17 +529,17 @@ By default, both lists are fetched from:
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt`
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt`
 
-You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Each scan downloads them once when it starts and keeps them in its own PHP session (cookie `SUSSYFINDER`) for `LIST_CACHE_SECONDS`, so the batches that follow reuse them. They stay on the server, so the browser can't substitute its own blacklist; without a session the batches download them again. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
+You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Each scan downloads them once when it starts and keeps them, as text, in its own PHP session (cookie `SUSSYFINDER`) for `LIST_CACHE_SECONDS`, so the batches that follow reuse them; a download that failed is kept as empty, so it isn't retried every batch. They stay on the server, so the browser can't substitute its own blacklist; without a session the batches download them again. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
 
 > **Note:** The provided whitelist is harvested from common frameworks and libraries. It is up to you to trust or modify it. For blacklist contributions, please provide source files when creating a pull request.
 
 ## Vendor Checksums
 
-Most false positives are vendor code: framework and CMS files that legitimately use `eval`, `exec`, `base64_decode` or dynamic calls. Rules and the model judge content, so they can't tell those apart from a shell; a checksum can. A file whose MD5 equals the one an official release ships at that path gets a **VERIFIED** badge naming the release and is never flagged, whatever its score, unless the blacklist or MHR names it. It is still analysed and scored, so it stays visible.
+Most false positives are vendor code: framework and CMS files that legitimately use `eval`, `exec`, `base64_decode` or dynamic calls. Rules and the model judge content, so they can't tell those apart from a shell; a checksum can. A file whose MD5 equals the one an official release ships at that path gets a **VERIFIED** badge naming the release, beside its other badges and matched tokens. Its threat score is held below half the anomaly bar: it saturates as $4 \cdot s/(s+4)$ of what its content scored ($s$), so a verified file is never flagged or critical, and verified files keep their order among themselves (7 becomes 2.55, 466 becomes 3.97). Its statistical triggers (entropy, dates, owner) don't count either, since its bytes are the vendor's. The blacklist and MHR still win: either lifts the file to 100. The badge's tooltip shows what the content scored.
 
 The sources, in the order they are checked:
 
-* **WordPress core**: each install is found by walking up to `wp-includes/version.php`, whose `$wp_version` and `$wp_local_package` pick that version's checksums from `api.wordpress.org` (falling back to `en_US`).
+* **WordPress core**: each install is found by walking up to `wp-includes/version.php`, whose `$wp_version` and `$wp_local_package` pick that version's checksums from `api.wordpress.org` (falling back to `en_US`). These APIs return JSON, read with `json_decode()` (PHP 5.2+, like the MHR lookup); an older PHP skips them and uses `checksums.txt` alone.
 * **wordpress.org plugins**: for a file under `wp-content/plugins/<slug>/`, the plugin's `Version:` header picks its checksums from `downloads.wordpress.org`. A premium plugin isn't there (a 404, asked once per scan) and is scanned as usual. Themes have no official checksums.
 * **`checksums.txt`** in this repository: release files of 57 platforms (Drupal, Joomla, Magento, PrestaShop, Laravel, Symfony and more), built by `test/run checksums --write` from the releases in the test corpora. It lists only the release files the scanner comes near flagging (flagged, or a threat score of at least 4): 14,217 files, 1.24 MB, so it downloads quickly; every other release file isn't flagged anyway. A file's path must end the way it does in the release (`…/vendor/laravel/framework/src/Illuminate/…`), so the release can be installed anywhere.
 
@@ -547,7 +547,7 @@ Why this can't hide a shell: injecting a shell into a vendor file changes its MD
 
 What it doesn't cover: modified files, custom themes and code, premium plugins, and release versions no list has hashed; those are scanned as usual. What it does trust: an official release that was itself backdoored (hijacked or sold plugins have shipped malware). The badge names the release, so such a file is easy to look up.
 
-The checksums are downloaded once per scan and kept in the scan's session, like the hash lists. A host that doesn't answer is warned about once, and the scan carries on without that source. Turn it off with `_CHECKSUMS_` set to `false`, or point `_CHECKSUMS_URL_` at a local copy of `checksums.txt` on an offline host.
+Both WordPress sources are rows of `$checksumSources` in `main.php`'s configuration: a marker file that identifies an install, where the version (and locale) are read, the manifest URL and the label. A platform that publishes per-file MD5s in the same JSON shape needs only another row. The checksums are downloaded once per scan and kept in the scan's session, like the hash lists. A host that doesn't answer is warned about once, and the scan carries on without that source. Turn it off with `_CHECKSUMS_` set to `false`, or point the URLs at local copies on an offline host.
 
 ## Screenshots
 

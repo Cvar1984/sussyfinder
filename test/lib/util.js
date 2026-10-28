@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 
 const sha1 = s => crypto.createHash('sha1').update(s).digest('hex');
+const md5 = s => crypto.createHash('md5').update(s).digest('hex');
 
 const groupBy = (list, key) => {
     const m = new Map();
@@ -16,4 +17,4 @@ const rates = (mal, ben, hit) => ({ tp: mal.filter(hit).length, fp: ben.filter(h
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-module.exports = { sha1, groupBy, pct, rates, sleep };
+module.exports = { sha1, md5, groupBy, pct, rates, sleep };
