@@ -13,9 +13,10 @@ const { loadCorpora, corpus } = require('../lib/corpora');
 const { tempDir } = require('../lib/cleanup');
 const { sleep } = require('../lib/util');
 const { findChrome, spawnManaged, openPage } = require('../lib/browser');
+const { phpString } = require('../lib/php');
 
 const VIEWPORT = { width: 1400, height: 1000 }, DPR = 2;
-let DATA;
+let DATA, VERIFIED; // VERIFIED: the WordPress file a local checksums.txt lists
 // The open page's helpers, set by run()
 let send, js, waitFor, mouse, click, pressEscape, setViewport, dialogs, errors;
 
@@ -34,13 +35,18 @@ function buildSandbox(box) {
     let page = fs.readFileSync(MAIN, 'utf8');
     // No hash lists (the sandbox may be offline), set the way main.php's settings are overridden
     if (!page.startsWith('<?php')) throw new Error('main.php no longer starts with <?php');
-    page = "<?php define('_WHITELIST_', false); define('_BLACKLIST_', false);" + page.slice('<?php'.length);
+    // Vendor checksums from a local list naming one copied WordPress file
+    const checksums = path.join(box, 'checksums.txt');
+    page = "<?php define('_WHITELIST_', false); define('_BLACKLIST_', false); define('_CHECKSUMS_URL_', " + phpString(checksums) + ");" + page.slice('<?php'.length);
     fs.writeFileSync(path.join(box, 'www', 'main.php'), page);
     const corpora = loadCorpora();
     fs.cpSync(path.join(corpus('blackarch-webshells', corpora).dir, 'php'), path.join(DATA, 'shells'), { recursive: true });
     const wp = path.join(corpus('wordpress-7.2-alpha', corpora).dir, 'wp-includes');
     fs.mkdirSync(path.join(DATA, 'wp'));
     fs.readdirSync(wp).filter(f => f.endsWith('.php')).forEach(f => fs.copyFileSync(path.join(wp, f), path.join(DATA, 'wp', f)));
+    VERIFIED = fs.readdirSync(path.join(DATA, 'wp')).sort()[0];
+    const md5 = require('crypto').createHash('md5').update(fs.readFileSync(path.join(DATA, 'wp', VERIFIED))).digest('hex');
+    fs.writeFileSync(checksums, `${md5} wordpress wp/${VERIFIED}\n`);
     const xss = path.join(DATA, "a');alert(1);('.php");
     fs.writeFileSync(xss, '<?php eval($_GET[1]);');
     // distinct dates so the timeline has several buckets
@@ -132,6 +138,16 @@ async function testZoomAndResize() {
     check('charts resize with the window', await js(`_charts.every(c => c.canvas.width === Math.round(c.canvas.clientWidth * ${DPR}) && c.w === c.canvas.clientWidth)`), await js('_charts[0].canvas.clientWidth + "px"'));
 }
 
+async function testVerified() {
+    const d = await js(`(() => { const d = analyzedData.find(d => d.verified); return d ? { path: d.path, verified: d.verified, isAnomaly: d.isAnomaly } : null; })()`);
+    check('a file on the checksum list scans as verified and is not flagged', !!d && d.path.endsWith('/wp/' + VERIFIED) && d.isAnomaly === false
+        && /^wordpress release file wp\//.test(d.verified), JSON.stringify(d));
+    check('only that file is verified', await js('analyzedData.filter(d => d.verified).length') === 1);
+    await js(`(() => { document.getElementById('searchInput').value = ${JSON.stringify(VERIFIED)}; applySearch(); return true; })()`); await sleep(200);
+    check('its row shows the VERIFIED badge', await js(`[...document.querySelectorAll('#result tr[data-path]')].some(r => r.innerHTML.includes('VERIFIED'))`));
+    await js(`(() => { document.getElementById('searchInput').value = ''; applySearch(); return true; })()`); await sleep(200);
+}
+
 async function testHostileFileName() {
     await js(`(() => { document.getElementById('searchInput').value = 'alert'; applySearch(); return true; })()`); await sleep(200);
     const link = await js(`(() => { const el = document.querySelector('#result .file-link'); if (!el) return null; el.scrollIntoView({block: 'center'}); const r = el.getBoundingClientRect(); return { x: r.left + 5, y: r.top + 5, text: el.textContent }; })()`);
@@ -192,6 +208,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
         await testHoverLinking();
         await testFilters();
         await testZoomAndResize();
+        await testVerified();
         await testHostileFileName();
         check('no JavaScript errors on the page', errors.length === 0, errors.join(' | ').slice(0, 300));
         console.log(fails ? fails + ' FAILED' : 'all passed');

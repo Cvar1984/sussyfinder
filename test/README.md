@@ -29,7 +29,7 @@ test/
 ├── README.md           this index
 ├── commands/           one file per command; each declares its name, help, options and run()
 │   ├── index.js        the command list, in the order test/run shows it
-│   ├── setup.js  unit.js  bench.js  matrix.js  ui.js  train.js  all.js
+│   ├── setup.js  unit.js  bench.js  matrix.js  ui.js  train.js  checksums.js  all.js
 ├── lib/                what the commands share; no command-line handling
 │   ├── cli.js          parses test/run's arguments, prints help, cleans up
 │   ├── paths.js        where everything is

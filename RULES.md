@@ -55,7 +55,10 @@ one self-contained file, no dependencies. `README.md` documents the maths
 - **Server** (`scanReadablePaths`) reads each file once, hashes it
   (`md5($content)`), skips whitelisted files, and returns a feature row per file:
   `path, size, mtime, ctime, owner, entropy, total_tokens, matched_tokens, md5,
-  is_blacklisted, is_htaccess, duplicate_of, error, is_unreadable`.
+  is_blacklisted, is_htaccess, duplicate_of, verified, error, is_unreadable`.
+  `verified` (the release a file is byte-identical to, or false) is set by
+  `actionProcess()` through `checksumVerified()`, not during extraction, so
+  the corpora's cached rows never depend on the network.
   Stat calls (`filectime`/`fileowner`) happen **before** a blacklist unlink.
 - **Detection primitives:** `getFileTokens` (token_get_all, minus literal text
   inside `"..."`, backticks and heredocs: old tokenizers emit that text as
@@ -134,7 +137,9 @@ one self-contained file, no dependencies. `README.md` documents the maths
 - **Downloads** all go through `httpRequest()`: verified TLS (the blacklist
   deletes files), a fresh cURL handle per request, else PHP streams; it
   returns the status and body. Hash lists are kept in the scan's own session
-  (`hashList()`), never taken from the browser.
+  (`hashList()`), never taken from the browser; so are the vendor checksum
+  manifests (`checksumManifest()`), including the empty one for a manifest
+  that 404s, so a premium plugin costs one request per scan.
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it
   returns a clear error. A `json_decode` fallback was deliberately not added:
   legacy builds have no HTTPS, so it could never run.
@@ -151,6 +156,7 @@ test/run bench --tokens   # + per-token webshell vs benign counts, for tuning we
 test/run matrix           # every PHP version x php.ini profile in Docker + page/AJAX check
 test/run ui               # the page in headless Chrome (CHROME_BIN)
 test/run all              # unit + bench + ui
+test/run checksums --write # rebuild checksums.txt after retraining or changing the rules
 ```
 
 The baseline is whatever `test/run bench` prints on the current commit: run
@@ -363,6 +369,36 @@ revisiting one.
   injected shells didn't earn the `ML_FEATURE_VERSION` bump (older installs
   then refuse the model). `@callback_exec` covers the common case in the rules
   at no feature churn. The injected blind spot is closed by per-unit scoring.
+- **Vendor checksums** (`checksumVerified()`, `checksums.txt`, `test/run
+  checksums`): a file byte-identical to an official release's file at that
+  path is VERIFIED and never flagged unless the blacklist or MHR names it. The
+  owner's alternative idea, shipping the trainer to learn on the live site, was
+  rejected: the site can't label its own files, so a shell already there (or
+  look-alikes an attacker plants) would be learned as normal. Decisions:
+  - **Mark, don't hide.** Unlike the whitelist, a verified file is still
+    analysed, scored and listed with a badge naming the release: an official
+    release can itself be backdoored, and the badge makes that checkable.
+  - **MD5**, because PHP 4.3 has no `hash()`. Matching an existing file's MD5
+    needs a second preimage, out of reach; MD5 collisions need both files made
+    by the attacker, which doesn't help here.
+  - **Path-bound.** WordPress core/plugins by path inside the install;
+    `checksums.txt` by path suffix at a directory boundary (`/src/A.php`
+    matches `…/vendor/acme/lib/src/A.php`, not `…/xsrc/A.php`), so a vendor
+    tool copied to another place isn't vouched for there.
+  - **checksums.txt lists only release files that are flagged or score >= 4**
+    (14,217 files, 1.24 MB). All release files would be ~398k / 38 MB,
+    too much to download per scan; >= 4 instead of >= 8 leaves margin for a
+    real site's statistics. Rebuild after a model or rule change. An MD5 that
+    also occurs in a webshell corpus or blacklist.txt is never listed (163
+    release files are, e.g. libraries bundled in shell kits).
+  - Only WordPress publishes per-file checksums (core and wordpress.org
+    plugins; no themes). Joomla publishes package hashes only, Drupal and
+    Magento nothing per file, so the rest come from our own corpora.
+  - The WordPress endpoints were unreachable from the development container
+    (egress-blocked), so the parsers are tested against fixtures in the
+    documented formats (escaped slashes, md5 lists, upper case) in
+    test/php/selfcheck.php. They are deliberately lenient: an entry they
+    can't read only means that file gets scanned.
 - After making important decision dump it here
 
 ## Style

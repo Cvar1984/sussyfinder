@@ -57,6 +57,7 @@ function settingDefault($name, $value)
 settingDefault('_WHITELIST_', true);    // skip files whose MD5 is on the known-good list
 settingDefault('_BLACKLIST_', true);    // delete files whose MD5 is on the known-bad list
 settingDefault('_MHR_', true);          // Team Cymru Malware Hash Registry lookups
+settingDefault('_CHECKSUMS_', true);    // show files identical to an official release as verified, never flagged
 settingDefault('_ML_', true);           // ML second opinion; false skips its feature extraction (~40% less analysis time)
 settingDefault('_MHR_USER_', '');       // MHR account; the page can also send one
 settingDefault('_MHR_PASS_', '');
@@ -65,6 +66,9 @@ settingDefault('_MHR_PASS_', '');
 settingDefault('_REPO_RAW_', 'https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/');
 settingDefault('_WHITELIST_URL_', _REPO_RAW_ . 'whitelist.txt');
 settingDefault('_BLACKLIST_URL_', _REPO_RAW_ . 'blacklist.txt');
+settingDefault('_CHECKSUMS_URL_', _REPO_RAW_ . 'checksums.txt'); // may also be a local file
+settingDefault('_WP_CORE_CHECKSUMS_URL_', 'https://api.wordpress.org/core/checksums/1.0/');
+settingDefault('_WP_PLUGIN_CHECKSUMS_URL_', 'https://downloads.wordpress.org/plugin-checksums/');
 settingDefault('_ML_MODEL_URL_', _REPO_RAW_ . 'ml-model.json');
 settingDefault('_MHR_URL_', 'https://hash.cymru.com/v2/submitHashes');
 
@@ -1316,6 +1320,7 @@ function featureRow($path, $fields)
         'is_htaccess'    => false,
         'has_php'        => null,
         'duplicate_of'   => false,
+        'verified'       => false, // set by actionProcess(): checksumVerified()
         'error'          => null,
         'is_unreadable'  => true,
     );
@@ -1598,6 +1603,348 @@ function blacklist($refresh = false)
     return _BLACKLIST_ ? hashList(_BLACKLIST_URL_, $refresh) : array();
 }
 
+// Vendor checksums. A file byte-identical to the one an official release ships
+// at that path is the vendor's code: it is shown as verified and never flagged,
+// unless a hash list or MHR names it. The proof is the file's own MD5, which an
+// attacker can't make match without a second preimage: injecting a shell
+// changes the hash, and a planted file isn't in the release. Sources:
+// WordPress core and wordpress.org plugins from WordPress's checksum APIs
+// (every version and locale), and checksums.txt, built from the releases in
+// the test corpora (test/run checksums --write) for the files the scanner
+// would otherwise come near flagging. Anything else is scanned as usual.
+
+/**
+ * The manifests loaded in this request, by key. A reference, so the unit
+ * checks can seed one without the network.
+ *
+ * @return array key => manifest
+ */
+function &checksumManifests()
+{
+    static $manifests = array();
+    return $manifests;
+}
+
+/**
+ * A manifest by key: $parser applied to the download of $url. Kept for the
+ * request and, when sessions work, for LIST_CACHE_SECONDS across a scan's
+ * batches. One that can't be fetched is kept as empty too, so a premium
+ * plugin (no wordpress.org checksums) costs one request per scan, not one
+ * per batch.
+ *
+ * @param string $key
+ * @param string $url an http(s) URL or a local file
+ * @param string $parser function name: body => manifest
+ * @param bool $refresh download it again even when a copy is kept
+ * @return array
+ */
+function checksumManifest($key, $url, $parser, $refresh = false)
+{
+    $cache = &checksumManifests();
+    if (isset($cache[$key]) && !$refresh) {
+        return $cache[$key];
+    }
+    $session = listSessionStart();
+    $kept = $session && isset($_SESSION['sussy_checksums'][$key]) ? $_SESSION['sussy_checksums'][$key] : null;
+    if (!$refresh && is_array($kept) && time() - $kept['time'] < LIST_CACHE_SECONDS) {
+        $cache[$key] = $kept['map'];
+    } else {
+        $body = checksumFetch($url);
+        $cache[$key] = $body === false ? array() : call_user_func($parser, $body);
+        if ($session) {
+            $kept = isset($_SESSION['sussy_checksums']) ? $_SESSION['sussy_checksums'] : array();
+            foreach ($kept as $old => $entry) { // older scans' plugins
+                if (time() - $entry['time'] >= LIST_CACHE_SECONDS) {
+                    unset($kept[$old]);
+                }
+            }
+            $kept[$key] = array('time' => time(), 'map' => $cache[$key]);
+            $_SESSION['sussy_checksums'] = $kept;
+        }
+    }
+    if ($session) {
+        session_write_close();
+    }
+    return $cache[$key];
+}
+
+/**
+ * Download a manifest. A 404 is silent (no checksums for that plugin or
+ * version); a host that doesn't answer is warned about once per request and
+ * then not asked again.
+ *
+ * @param string $url an http(s) URL or a local file
+ * @return string|false
+ */
+function checksumFetch($url)
+{
+    static $down = array();
+    if (!preg_match('#^https?://([^/]+)#i', $url, $m)) {
+        return is_readable($url) ? file_get_contents($url) : false; // a local copy, e.g. offline
+    }
+    $host = strtolower($m[1]);
+    if (isset($down[$host])) {
+        return false;
+    }
+    $response = httpRequest($url);
+    if ($response === false) {
+        $down[$host] = true;
+        return false;
+    }
+    if ($response['status'] == 404) {
+        return false;
+    }
+    if ($response['status'] < 200 || $response['status'] > 299) {
+        trigger_error('Could not fetch ' . $url . ' (HTTP ' . $response['status'] . ')', E_USER_WARNING);
+        return false;
+    }
+    return $response['body'];
+}
+
+/**
+ * A JSON string key as a path: \/ and \\ unescaped. Anything stranger is left
+ * as it is, which only means that file doesn't match and gets scanned.
+ *
+ * @param string $text
+ * @return string
+ */
+function jsonPathKey($text)
+{
+    return str_replace(array('\\/', '\\\\'), array('/', '\\'), $text);
+}
+
+/**
+ * api.wordpress.org/core/checksums: {"checksums":{"wp-admin\/about.php":"<md5>",...}}.
+ * Read with a pattern because json_decode() is PHP 5.2+.
+ *
+ * @param string $body
+ * @return array relative path => list of md5s
+ */
+function parseWordPressCoreChecksums($body)
+{
+    $map = array();
+    preg_match_all('/"((?:[^"\\\\]|\\\\.)+)"\s*:\s*"([0-9a-fA-F]{32})"/', $body, $m, PREG_SET_ORDER);
+    foreach ($m as $entry) {
+        $map[jsonPathKey($entry[1])] = array(strtolower($entry[2]));
+    }
+    return $map;
+}
+
+/**
+ * downloads.wordpress.org/plugin-checksums: {"files":{"akismet.php":{"md5":"<md5>","sha256":...},...}},
+ * where "md5" is a list when the release zip and the SVN tag differ.
+ *
+ * @param string $body
+ * @return array relative path => list of md5s
+ */
+function parseWordPressPluginChecksums($body)
+{
+    $map = array();
+    preg_match_all('/"((?:[^"\\\\]|\\\\.)+)"\s*:\s*\{([^{}]*)\}/', $body, $m, PREG_SET_ORDER);
+    foreach ($m as $entry) {
+        if (preg_match('/"md5"\s*:\s*(\[[^\]]*\]|"[0-9a-fA-F]{32}")/', $entry[2], $md5) && preg_match_all('/[0-9a-fA-F]{32}/', $md5[1], $sums)) {
+            $map[jsonPathKey($entry[1])] = array_map('strtolower', $sums[0]);
+        }
+    }
+    return $map;
+}
+
+/**
+ * checksums.txt: "<md5> <release family> <path inside the release>" per line.
+ *
+ * @param string $body
+ * @return array md5 => list of "family path"
+ */
+function parseChecksumList($body)
+{
+    $map = array();
+    foreach (explode("\n", $body) as $line) {
+        $parts = explode(' ', trim($line), 3);
+        if (count($parts) == 3 && preg_match('/^[0-9a-f]{32}$/', $parts[0])) {
+            $map[$parts[0]][] = $parts[1] . ' ' . $parts[2];
+        }
+    }
+    return $map;
+}
+
+/**
+ * @param bool $refresh see checksumManifest() (a new scan)
+ * @return array checksums.txt, md5 => list of "family path"
+ */
+function checksumList($refresh = false)
+{
+    return _CHECKSUMS_ ? checksumManifest('list:' . _CHECKSUMS_URL_, _CHECKSUMS_URL_, 'parseChecksumList', $refresh) : array();
+}
+
+/**
+ * The WordPress install a file is in, found by walking up to the directory
+ * that holds wp-includes/version.php; remembered per directory.
+ *
+ * @param string $filePath
+ * @return array|false array('root', 'version', 'locale')
+ */
+function wordpressInstall($filePath)
+{
+    static $byDir = array();
+    $dir = dirname($filePath);
+    $visited = array();
+    $found = false;
+    while (true) {
+        if (isset($byDir[$dir])) {
+            $found = $byDir[$dir];
+            break;
+        }
+        $visited[] = $dir;
+        if (@is_file($dir . '/wp-includes/version.php') && @is_dir($dir . '/wp-admin')) {
+            $found = wordpressVersion($dir);
+            break;
+        }
+        $parent = dirname($dir);
+        if ($parent === $dir) {
+            break;
+        }
+        $dir = $parent;
+    }
+    foreach ($visited as $seen) {
+        $byDir[$seen] = $found;
+    }
+    return $found;
+}
+
+/**
+ * The version and locale wp-includes/version.php declares.
+ *
+ * @param string $root
+ * @return array|false array('root', 'version', 'locale')
+ */
+function wordpressVersion($root)
+{
+    $code = @file_get_contents($root . '/wp-includes/version.php');
+    if (!is_string($code) || !preg_match('/\$wp_version\s*=\s*[\'"]([0-9A-Za-z.\-]+)[\'"]/', $code, $v)) {
+        return false;
+    }
+    $locale = preg_match('/\$wp_local_package\s*=\s*[\'"]([A-Za-z_]+)[\'"]/', $code, $l) ? $l[1] : 'en_US';
+    return array('root' => $root, 'version' => $v[1], 'locale' => $locale);
+}
+
+/**
+ * A plugin's version: the "Version:" header of the top-level .php that has a
+ * "Plugin Name:" header, read like WordPress's get_file_data() (first 8 KB).
+ *
+ * @param string $pluginDir
+ * @return string|false
+ */
+function wordpressPluginVersion($pluginDir)
+{
+    static $versions = array();
+    if (isset($versions[$pluginDir])) {
+        return $versions[$pluginDir];
+    }
+    $versions[$pluginDir] = false;
+    $dh = @opendir($pluginDir);
+    if (!$dh) {
+        return false;
+    }
+    while (($name = readdir($dh)) !== false) {
+        if (strtolower(substr($name, -4)) != '.php' || !@is_file($pluginDir . '/' . $name)) {
+            continue;
+        }
+        $fp = @fopen($pluginDir . '/' . $name, 'rb');
+        if (!$fp) {
+            continue;
+        }
+        $version = pluginHeaderVersion(fread($fp, 8192));
+        fclose($fp);
+        if ($version !== false) {
+            $versions[$pluginDir] = $version;
+            break;
+        }
+    }
+    closedir($dh);
+    return $versions[$pluginDir];
+}
+
+/**
+ * The "Version:" of a plugin file header, if the header names a plugin.
+ *
+ * @param string $head the file's first bytes
+ * @return string|false
+ */
+function pluginHeaderVersion($head)
+{
+    $field = '/^(?:[ \t]*<\?php)?[ \t\/*#@]*%s:(.*)$/mi';
+    if (!preg_match(sprintf($field, 'Plugin Name'), $head) || !preg_match(sprintf($field, 'Version'), $head, $m)) {
+        return false;
+    }
+    $version = trim(preg_replace('/\s*(?:\*\/|\?>).*/', '', $m[1]));
+    return preg_match('/^[0-9A-Za-z.\-_+]+$/', $version) ? $version : false;
+}
+
+/**
+ * WordPress core checksums for a version, in its locale, else en_US (most
+ * files are the same in every locale).
+ *
+ * @param string $version
+ * @param string $locale
+ * @return array relative path => list of md5s
+ */
+function wordpressCoreChecksums($version, $locale)
+{
+    $url = _WP_CORE_CHECKSUMS_URL_ . '?version=' . rawurlencode($version) . '&locale=';
+    $map = checksumManifest('wp-core:' . $version . ':' . $locale, $url . rawurlencode($locale), 'parseWordPressCoreChecksums');
+    if (!$map && $locale != 'en_US') {
+        $map = checksumManifest('wp-core:' . $version . ':en_US', $url . 'en_US', 'parseWordPressCoreChecksums');
+    }
+    return $map;
+}
+
+/**
+ * Whether a file is byte-identical to an official release's file at that
+ * path.
+ *
+ * @param string $filePath
+ * @param string $md5 the file's MD5
+ * @return string|false the release, e.g. "WordPress 6.6.2 core", or false
+ */
+function checksumVerified($filePath, $md5)
+{
+    if (!_CHECKSUMS_ || strlen($md5) != 32) {
+        return false;
+    }
+    $path = str_replace('\\', '/', $filePath);
+    $wp = wordpressInstall($filePath);
+    if ($wp !== false) {
+        $rel = substr($path, strlen(str_replace('\\', '/', $wp['root'])) + 1);
+        $core = wordpressCoreChecksums($wp['version'], $wp['locale']);
+        if (isset($core[$rel]) && in_array($md5, $core[$rel])) {
+            return 'WordPress ' . $wp['version'] . ' core';
+        }
+        if (preg_match('#^wp-content/plugins/([^/]+)/(.+)$#', $rel, $p)) {
+            $version = wordpressPluginVersion($wp['root'] . '/wp-content/plugins/' . $p[1]);
+            if ($version !== false) {
+                $files = checksumManifest('wp-plugin:' . $p[1] . ':' . $version,
+                    _WP_PLUGIN_CHECKSUMS_URL_ . rawurlencode($p[1]) . '/' . rawurlencode($version) . '.json', 'parseWordPressPluginChecksums');
+                if (isset($files[$p[2]]) && in_array($md5, $files[$p[2]])) {
+                    return 'WordPress.org plugin ' . $p[1] . ' ' . $version;
+                }
+            }
+        }
+    }
+    // checksums.txt matches a path that ends with the file's place in its
+    // release, wherever the release is installed (vendor/laravel/framework/...)
+    $list = checksumList();
+    if (isset($list[$md5])) {
+        foreach ($list[$md5] as $entry) {
+            $space = strpos($entry, ' ');
+            $rel = substr($entry, $space + 1);
+            if ($path === $rel || substr($path, -strlen($rel) - 1) === '/' . $rel) {
+                return substr($entry, 0, $space) . ' release file ' . $rel;
+            }
+        }
+    }
+    return false;
+}
+
 /**
  * Download the ML model (ml-model.json) and check it fits this main.php.
  * Returns the JSON text to embed in the page, or 'null' with a warning when
@@ -1681,6 +2028,7 @@ function actionScan()
 {
     whitelist(true);
     blacklist(true);
+    checksumList(true);
     $result = getSortedByPattern(inputValue('dir', getcwd()), $GLOBALS['pattern']);
     return array(
         'readable'     => array_map('rawurlencode', $result['file_readable']),
@@ -1709,6 +2057,7 @@ function actionProcess()
         if ($row['is_blacklisted']) {
             $rows[$i]['error'] = unlinkWithReason($row['path']);
         }
+        $rows[$i]['verified'] = $row['is_unreadable'] ? false : checksumVerified($row['path'], $row['md5']);
         $rows[$i]['path'] = rawurlencode($row['path']);
         $rows[$i]['duplicate_of'] = false;
     }
@@ -2719,9 +3068,18 @@ if (isset($_POST['ajax_action'])) {
 
             // Which scored rows are anomalies at a Z-threshold: cheap, so moving the
             // threshold control reruns only this
+            // A file the server proved byte-identical to an official release
+            // (checksumVerified(): d.verified names it) is the vendor's code, so
+            // it is never flagged, whatever it contains, unless a hash list or
+            // MHR names it.
+            function isVerifiedClean(d) {
+                return !!d.verified && !d.is_blacklisted && d.mhr_hit !== true;
+            }
+
             function flagAnomalies(rows, threshold) {
                 return rows.map(d => {
                     if (d.is_unreadable) return { ...d, isAnomaly: true, mlOnly: false };
+                    if (isVerifiedClean(d)) return { ...d, isAnomaly: false, mlOnly: false };
                     // is_htaccess and duplicate_of are informational categories (still
                     // shown via their own badges/stat cards) but aren't content signals
                     // by themselves — an .htaccess file or a byte-identical duplicate
@@ -2768,7 +3126,7 @@ if (isset($_POST['ajax_action'])) {
             }
 
             function isCritical(d) {
-                return d.threatScore >= CRITICAL_SCORE || d.is_blacklisted;
+                return (d.threatScore >= CRITICAL_SCORE && !isVerifiedClean(d)) || d.is_blacklisted;
             }
 
             // A status badge in the results; label is HTML, title plain text
@@ -3058,6 +3416,10 @@ if (isset($_POST['ajax_action'])) {
                             color = '#f72f2f';
                             badge = badgeHtml('MHR HIT (' + escapeHtml(String(d.mhr_detection_rate)) + '%)', '#cc0000');
                             status = escapeHtml(d.error ? shortenUnlinkError(d.error) : ('last seen ' + (d.mhr_last_seen || 'unknown')));
+                        } else if (isVerifiedClean(d)) {
+                            color = '#9fd89f';
+                            badge = badgeHtml('VERIFIED', '#2e7d32', 'Byte-identical to ' + d.verified + ', so not flagged');
+                            status = escapeHtml(d.verified);
                         } else if (d.threatScore >= CRITICAL_SCORE) {
                             color = '#dddbdb';
                             badge = badgeHtml('CRITICAL (' + d.threatScore.toFixed(1) + ')', '#990000');
@@ -3221,6 +3583,7 @@ if (isset($_POST['ajax_action'])) {
                 const blacklisted = data.filter(d => d.is_blacklisted).length;
                 const duplicates = data.filter(d => d.duplicate_of !== false).length;
                 const htaccess = data.filter(d => d.is_htaccess).length;
+                const verified = data.filter(isVerifiedClean).length;
                 const anomalies = data.filter(d => d.isAnomaly).length;
                 const criticalCount = data.filter(isCritical).length;
 
@@ -3254,7 +3617,7 @@ if (isset($_POST['ajax_action'])) {
                 }
 
                 grid.innerHTML = `
-                    ${makeCard('Total Files', data.length, `${readable.length} readable, ${unreadable} unreadable`, 'info', 'all')}
+                    ${makeCard('Total Files', data.length, `${readable.length} readable, ${unreadable} unreadable, ${verified} verified`, 'info', 'all')}
                     ${makeCard('Critical Threats', criticalCount, `${anomalies} total anomalies flagged`, criticalCount > 0 ? 'danger' : 'success', 'critical')}
                     ${makeCard('Blacklisted', blacklisted, `${duplicates} duplicates, ${htaccess} .htaccess`, 'warning', 'blacklisted')}
                     ${makeCard('Average Size', `${(avgSize / 1024).toFixed(1)} KB`, `Min ${(minSize / 1024).toFixed(1)} | Max ${(maxSize / 1024).toFixed(1)}`, 'info', 'all')}
@@ -3262,7 +3625,7 @@ if (isset($_POST['ajax_action'])) {
                     ${makeCard('Modification Range', formatDate(minMtime), `to ${formatDate(maxMtime)}`, 'info', 'all')}
                 `;
 
-                const topSusp = valid.slice().sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0)).slice(0, 5);
+                const topSusp = valid.filter(d => !isVerifiedClean(d)).sort((a, b) => (b.threatScore || 0) - (a.threatScore || 0)).slice(0, 5);
 
                 let suspHtml = '<h4>Top Threat Score Files</h4>';
                 if (topSusp.length === 0) {
@@ -3814,7 +4177,7 @@ if (isset($_POST['ajax_action'])) {
                                     const hAll = (k.files.length / maxCount) * H, hShown = (shown.length / maxCount) * H;
                                     ctx.fillStyle = '#3a3a3a';
                                     ctx.fillRect(x, b.bottom - hAll, w, hAll);
-                                    const top = shown.reduce((m, d) => Math.max(m, d.threatScore || 0), 0);
+                                    const top = shown.reduce((m, d) => isVerifiedClean(d) ? m : Math.max(m, d.threatScore || 0), 0);
                                     ctx.fillStyle = scoreColor(top);
                                     ctx.fillRect(x, b.bottom - hShown, w, hShown);
                                     if (_chartHover !== null && k.files.some(d => d.path === _chartHover)) {
@@ -3865,7 +4228,7 @@ if (isset($_POST['ajax_action'])) {
                             const ctx = c.ctx, b = area(c);
                             if (topFor !== _shownVersion) { // a hover redraw reuses it
                                 topFor = _shownVersion;
-                                top = valid.filter(d => passesTableFilters(d))
+                                top = valid.filter(d => passesTableFilters(d) && !isVerifiedClean(d))
                                     .sort((a, z) => (z.threatScore || 0) - (a.threatScore || 0)).slice(0, 12);
                             }
                             if (!top.length) {
@@ -3943,7 +4306,8 @@ if (isset($_POST['ajax_action'])) {
 
                             drawDots(c, sorted.map((d, i) => {
                                 let color = '#4a8bc2';
-                                if (d.threatScore >= CRITICAL_SCORE) color = '#ff4444';
+                                if (isVerifiedClean(d)) color = '#4a8bc2';
+                                else if (d.threatScore >= CRITICAL_SCORE) color = '#ff4444';
                                 else if (d.threatScore >= ANOMALY_SCORE) color = '#ffaa00';
                                 else if ((d.entropy || 0) > HIGH_ENTROPY) color = '#9b59b6';
                                 return { x: b.left + (i / Math.max(1, sorted.length - 1)) * W, y: sy(d.entropy || 0), d: d, color: color };

@@ -4,7 +4,8 @@
 // output): structural signals for each snippet in $SUSSY_CASES, the
 // listing of the fixture directory $SUSSY_FIXTURE, and ml-model.json
 // validation. Set by the prelude (test/lib/php.js phpJob): $SUSSY_MAIN,
-// $SUSSY_CASES, $SUSSY_FIXTURE, $SUSSY_MODELS. Must stay PHP 4.3-safe.
+// $SUSSY_CASES, $SUSSY_FIXTURE, $SUSSY_MODELS, $SUSSY_CHECKSUM_FIXTURE. Must stay PHP
+// 4.3-safe.
 define('SUSSY_LIB', true);
 include $SUSSY_MAIN;
 
@@ -55,4 +56,31 @@ foreach ($probes as $probe) {
     $unitProbes[] = array('count' => count($units), 'firstIsWhole' => $units[0] === mlFeatures($sig, $maxLine, $entropy));
 }
 
-echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes));
+// Vendor checksums (checksumVerified()) on $SUSSY_CHECKSUM_FIXTURE: a WordPress
+// install (de_DE) with a plugin and a vendor library. The manifests are seeded
+// in the APIs' own formats (escaped slashes, an md5 list, upper case), so
+// nothing here touches the network.
+$cs = $SUSSY_CHECKSUM_FIXTURE . '/site';
+$coreMd5 = md5_file($cs . '/wp-login.php');
+$pluginMd5 = md5_file($cs . '/wp-content/plugins/demo/inc/x.php');
+$vendorMd5 = md5_file($cs . '/vendor/acme/lib/src/A.php');
+$manifests = &checksumManifests();
+$manifests['wp-core:6.6.2:de_DE'] = parseWordPressCoreChecksums('{"checksums":{"wp-login.php":"' . strtoupper($coreMd5) . '","wp-admin\\/about.php":"' . str_repeat('0', 32) . '"}}');
+$manifests['wp-plugin:demo:1.2'] = parseWordPressPluginChecksums('{"plugin":"demo","version":"1.2","source":"https:\\/\\/x\\/","files":{"inc\\/x.php":{"md5":["' . str_repeat('f', 32) . '","' . $pluginMd5 . '"],"sha256":["a","b"]},"demo.php":{"md5":"' . str_repeat('e', 32) . '","sha256":"c"}}}');
+$manifests['list:' . _CHECKSUMS_URL_] = parseChecksumList($vendorMd5 . " acme src/A.php\nnot a checksum line\n");
+$checksums = array(
+    'install' => wordpressInstall($cs . '/wp-content/plugins/demo/inc/x.php'),
+    'core' => $manifests['wp-core:6.6.2:de_DE'],
+    'plugin' => $manifests['wp-plugin:demo:1.2'],
+    'header' => array(pluginHeaderVersion(file_get_contents($cs . '/wp-content/plugins/demo/demo.php')), pluginHeaderVersion("<?php\n// Version: 9\n")),
+    'verified' => array(
+        checksumVerified($cs . '/wp-login.php', $coreMd5),                     // core file
+        checksumVerified($cs . '/wp-login.php', md5('changed')),               // core file, modified
+        checksumVerified($cs . '/wp-content/plugins/demo/inc/x.php', $pluginMd5), // plugin file
+        checksumVerified($cs . '/vendor/acme/lib/src/A.php', $vendorMd5),      // release file in place
+        checksumVerified($SUSSY_CHECKSUM_FIXTURE . '/elsewhere/A.php', $vendorMd5), // same bytes, wrong place
+        checksumVerified($cs . '/vendor/acme/lib/xsrc/A.php', $vendorMd5),     // suffix not at a directory
+    ),
+);
+
+echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes, 'checksums' => $checksums));
