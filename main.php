@@ -2913,7 +2913,7 @@ if (isset($_POST['ajax_action'])) {
 
         <div id="searchHelp" class="search-help">
             <table>
-                <tr><td><code onclick="searchFor(this.textContent)">eval base64</code></td><td>both (in the path or a matched token)</td>
+                <tr><td><code onclick="searchFor(this.textContent)">eval base64</code></td><td>both (in the path or a matched token); <code>(eval OR assert) -vendor</code> groups</td>
                     <td><code onclick="searchFor(this.textContent)">eval OR assert</code></td><td>either one</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">eval -vendor</code></td><td>leave out what matches <code>vendor</code></td>
                     <td><code onclick="searchFor(this.textContent)">"wp-content/uploads"</code></td><td>exact text, spaces included</td></tr>
@@ -2925,7 +2925,7 @@ if (isset($_POST['ajax_action'])) {
                     <td><code onclick="searchFor(this.textContent)">size:>100k entropy:>5.5</code></td><td>size (k, m, g), entropy</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">tokens:<20 hits:3..10</code></td><td>tokens; matched tokens; <code>a..b</code> is a range</td>
                     <td><code onclick="searchFor(this.textContent)">date:7d</code></td><td>changed in the last 7 days (also <code>h</code>, <code>w</code>)</td></tr>
-                <tr><td><code>near:"/path/to/file.php"</code></td><td>files in its folder, or changed within an hour of it (the 🧭 on a row)</td>
+                <tr><td><code>near:"/path/to/file.php"</code> <code onclick="searchFor(this.textContent)">near:is:blacklisted~6h</code></td><td>files in the folder of that file, or of any file a query finds, or changed within an hour of one (<code>~30m</code>, <code>~6h</code>, <code>~2d</code> sets the window); the 🧭 on a row</td>
                     <td><code>dir:"/path/to/folder"</code> <code onclick="searchFor(this.textContent)">date:2025-06-15T14..2025-06-15T16</code></td><td>exactly that folder; a time range (hour or minute)</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">date:2025-06 date:>=2025-01-01</code></td><td>a year, month or day; before or after it</td>
                     <td><code onclick="searchFor(this.textContent)">is:critical -is:verified</code></td><td>anomaly, critical, blacklisted, verified, duplicate, htaccess, unreadable, gone, mhr, ml, mlonly, rare, entropy</td></tr>
@@ -3627,6 +3627,45 @@ if (isset($_POST['ajax_action'])) {
                 return exact ? s => s === v : s => s.includes(v);
             }
 
+            // A query inside a term (a (group), near:'s targets) as a test of a row
+            function subSearch(query, tokensOnly, what) {
+                const c = compileSearch(query, tokensOnly);
+                if (c.errors.length) throw what + c.errors.join('; ');
+                return c.match || (() => true);
+            }
+
+            /**
+             * near:'s test. Its value names the targets: one scanned file's path,
+             * else a query (near:is:blacklisted, near:(ext:php is:critical)). A
+             * file is near when it is in a target's folder or changed within
+             * NEAR_HOURS of one (an intruder's other files usually are); ~6h,
+             * ~30m, ~2d, ~1w after the value sets that window.
+             */
+            function nearTest(value, tokensOnly) {
+                const w = /^(.*?)~(\d+(?:\.\d+)?)([mhdw])$/i.exec(value);
+                const span = w ? w[2] * { m: 60, h: 3600, d: 86400, w: 604800 }[w[3].toLowerCase()] : NEAR_HOURS * 3600;
+                const what = (w ? w[1] : value).trim(), lower = what.toLowerCase();
+                let targets = analyzedData.filter(d => lowerPath(d) === lower);
+                if (!targets.length) {
+                    if (what === '' || /^\/[^\s:]*$/.test(what)) throw 'near: no scanned file is ' + what;
+                    targets = analyzedData.filter(subSearch(what, tokensOnly, 'near: '));
+                }
+                if (!targets.length) throw 'near: no file matches ' + what;
+                const dirs = new Set(targets.map(d => dirOf(lowerPath(d))));
+                const times = targets.map(d => d.mtime).filter(t => t).sort((a, b) => a - b);
+                // Is a time within span of one of the targets' (binary search)
+                const close = t => {
+                    let lo = 0, hi = times.length - 1;
+                    while (lo <= hi) {
+                        const mid = (lo + hi) >> 1;
+                        if (Math.abs(times[mid] - t) <= span) return true;
+                        if (times[mid] < t) lo = mid + 1; else hi = mid - 1;
+                    }
+                    return false;
+                };
+                return d => dirs.has(dirOf(lowerPath(d))) || (!!d.mtime && close(d.mtime));
+            }
+
             // One search term (field, value) as a test of a row; throws a message
             function searchTerm(field, value, isRegex, tokensOnly) {
                 if (field === null) {
@@ -3640,14 +3679,7 @@ if (isset($_POST['ajax_action'])) {
                 }
                 if (SEARCH_TEXT[field]) { const t = textTest(value, isRegex, false), get = SEARCH_TEXT[field]; return d => get(d).some(t); }
                 if (SEARCH_EXACT[field]) { const t = textTest(value, isRegex, !isRegex), get = SEARCH_EXACT[field]; return d => t(get(d)); }
-                if (field === 'near') {
-                    // The files around one: in its folder, or changed within
-                    // NEAR_HOURS of it (an intruder's other files usually are)
-                    const v = value.toLowerCase(), target = analyzedData.find(d => lowerPath(d) === v);
-                    if (!target) throw 'near: no scanned file is ' + value;
-                    const dir = dirOf(v), t = target.mtime;
-                    return d => dirOf(lowerPath(d)) === dir || (!!t && !!d.mtime && Math.abs(d.mtime - t) <= NEAR_HOURS * 3600);
-                }
+                if (field === 'near') return nearTest(value, tokensOnly);
                 if (field === 'date') {
                     const recent = /^(\d+(?:\.\d+)?)([hdw])$/i.exec(value);
                     if (recent) {
@@ -3670,7 +3702,7 @@ if (isset($_POST['ajax_action'])) {
              */
             function compileSearch(query, tokensOnly) {
                 const groups = [], errors = [];
-                const re = /(-)?(?:([a-z]+):)?("(?:[^"\\]|\\.)*"?|\/(?:[^\/\\\s]|\\.)+\/(?=\s|$)|\S+)/gi;
+                const re = /(-)?(?:([a-z]+):)?(\((?:[^()"]|"(?:[^"\\]|\\.)*")*\)?|"(?:[^"\\]|\\.)*"?|\/(?:[^\/\\\s]|\\.)+\/(?=\s|$)|\S+)(~[\d.]+[a-z])?/gi;
                 let m, or = false;
                 while ((m = re.exec(query))) {
                     if (m[0] === 'OR' || m[0] === '|') { or = groups.length > 0; continue; }
@@ -3680,10 +3712,13 @@ if (isset($_POST['ajax_action'])) {
                     if (!known) { raw = m[2] + ':' + raw; field = null; } // "c:\x" is text
                     let value = raw;
                     if (raw[0] === '"') value = raw.replace(/^"|"$/g, '').replace(/\\(.)/g, '$1');
+                    else if (raw[0] === '(' && (field === null || field === 'near')) value = raw.replace(/^\(|\)$/g, '');
+                    if (m[4]) value += m[4];
                     else if (raw.length > 2 && raw[0] === '/' && raw[raw.length - 1] === '/' && field !== 'date' && field !== 'near') { value = raw.slice(1, -1); isRegex = true; }
                     if (value === '') continue;
                     try {
-                        const test = searchTerm(field, value, isRegex, tokensOnly);
+                        // A bare (group) is a query of its own: (eval OR assert) -vendor
+                        const test = raw[0] === '(' && field === null ? subSearch(value, tokensOnly, '') : searchTerm(field, value, isRegex, tokensOnly);
                         const term = m[1] ? d => !test(d) : test;
                         if (or) groups[groups.length - 1].push(term);
                         else groups.push([term]);

@@ -33,11 +33,12 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
     | `path:` `name:` `token:` `ext:` `md5:` `owner:` `dup:` | one property: path, file name, matched token, last extension, hash, owner id, a duplicate's original |
     | `score:>=15` `rules:>8` `ml:>80` `size:>100k` `entropy:>5.5` `tokens:<20` `hits:3..10` | numbers, with `>`, `>=`, `<`, `<=` or a range `a..b`; `ml` is in % |
     | `date:7d`, `date:2025-06`, `date:>=2025-01-01`, `date:2025-06-15T14..2025-06-15T16` | changed in the last 7 days (`h`, `w` too); in a year, month, day, hour or minute; after or before it; a range |
-    | `near:"/path/to/shell.php"`, `dir:"/path/to/folder"` | files in that file's folder or changed within an hour of it; files in exactly that folder |
+    | `near:"/path/to/shell.php"`, `near:is:blacklisted`, `near:(is:critical ext:php)~6h` | files in the folder of that file, or of any file the query finds, or changed within an hour of one of them (`~30m`, `~6h`, `~2d`, `~1w` sets the window); `-near:…` is everything else |
+    | `dir:"/path/to/folder"`, `(eval OR assert) -vendor` | files in exactly that folder; parentheses group |
     | `is:critical -is:verified` | `anomaly` `critical` `blacklisted` `verified` `duplicate` `htaccess` `unreadable` `gone` `mhr` `ml` `mlonly` `rare` `entropy` |
 
     A term that doesn't make sense (a broken regex, `score:>x`) outlines the box in red and its tooltip says why.
-  * The 🧭 on a row lists the files near it, newest first, with the file itself outlined: whatever else is in its folder or changed within an hour of it. Click it on a blacklisted file to see what else the intruder dropped or touched (`near:"…"` in the search box; combine it with `-is:verified` or `ext:php`).
+  * The 🧭 on a row lists the files near it, newest first, with the file itself outlined: whatever else is in its folder or changed within an hour of it. Click it on a blacklisted file to see what else the intruder dropped or touched (`near:"…"` in the search box; combine it with `-is:verified` or `ext:php`). For all of them at once, search `near:is:blacklisted -is:blacklisted -is:verified`: everything around every blacklisted file, minus those files and official release files.
   * One-click copy of results (with full details)
   * Click a file path to copy it; the 📋 icon copies its MD5 hash
   * Linked charts: drag a box on the Threat Matrix or Entropy chart, or click a timeline bar, to select those files (Ctrl/⌘ adds more); the table then shows only the selection, and Esc clears it. Charts fade whatever the table's filters hide, hovering a file in a chart highlights its table row (and the other way round), and the Threat Matrix zooms with the wheel, pans with Shift+drag and resets on double-click

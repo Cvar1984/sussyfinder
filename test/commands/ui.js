@@ -264,6 +264,17 @@ async function testSearch() {
     const xss = await js('analyzedData.find(d => d.path.includes("alert(1)")).path');
     await same('near:' + JSON.stringify(xss), `d => d.path.slice(0, d.path.lastIndexOf("/")) === ${JSON.stringify(xss.slice(0, xss.lastIndexOf('/')))} ||
         Math.abs(d.mtime - analyzedData.find(x => x.path === ${JSON.stringify(xss)}).mtime) <= 3600`);
+    // near: of every file a query finds: in any of their folders, or changed
+    // within the window of any of them
+    const near = (targets, span) => `d => { const T = analyzedData.filter(${targets}), dir = p => p.slice(0, p.lastIndexOf("/"));
+        return T.some(t => dir(t.path) === dir(d.path) || (t.mtime && d.mtime && Math.abs(t.mtime - d.mtime) <= ${span})); }`;
+    await same('near:is:verified', near('d => !!d.verified', 3600));
+    await same('near:("alert(1)" OR name:class-wp-error)', near('d => d.path.includes("alert(1)") || d.path.split("/").pop().includes("class-wp-error")', 3600));
+    await same('near:(name:/^class-/ ext:php)~1m', near('d => /^class-.*\\.php$/i.test(d.path.split("/").pop())', 60));
+    await same('-near:is:verified', `d => !(${near('d => !!d.verified', 3600)})(d)`);
+    await same('(token:eval OR token:system) -ext:inc', 'd => (d.matched_tokens || []).some(t => /eval|system/i.test(t)) && !/\\.inc$/i.test(d.path)');
+    await js(`document.getElementById('searchInput').value = 'near:is:mhr'; applySearch(); true`);
+    check('near: with no target says so', await js(`/near: no file matches is:mhr/.test(document.getElementById('searchInput').title)`));
     // A row's compass: the files near it, newest first, the file itself marked
     await js('clearFilters(); document.getElementById("searchInput").value = ""; applySearch(); true');
     await js(`document.querySelector('#result tr[data-path] .near-btn[data-near=' + JSON.stringify(${JSON.stringify(target)}) + ']').click(); true`); await sleep(300);

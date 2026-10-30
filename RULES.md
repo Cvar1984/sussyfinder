@@ -155,8 +155,10 @@ one self-contained file, no dependencies. `README.md` documents the maths
 - **Search** (`compileSearch()`): the query is compiled once per change into
   one test per row (`searchMatcher()`); `passesTableFilters()` only calls it.
   A new field goes in `SEARCH_TEXT` / `SEARCH_EXACT` / `SEARCH_NUMBERS` /
-  `SEARCH_FLAGS` and in the `#searchHelp` table. `near:` looks its file up in
-  `analyzedData`, so the compiled query is also rebuilt when that changes. An unknown `field:` is plain
+  `SEARCH_FLAGS` and in the `#searchHelp` table. `near:` (`nearTest()`) takes a
+  scanned file's path or else a query of targets (compiled recursively, as is
+  a bare `(group)`), looked up in `analyzedData`, so the compiled query is
+  also rebuilt when that changes. An unknown `field:` is plain
   text (`c:\x`). Bad terms are left out and named in the box's tooltip.
   Other code that sets a search writes a query (`is:blacklisted`,
   `path:"..."`), never a magic value.
