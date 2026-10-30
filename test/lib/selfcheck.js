@@ -176,6 +176,10 @@ function check(out, models) {
     if (!/\/site$/.test(cs.root || '')) failures.push(`checksumRoot: want .../site, got ${JSON.stringify(cs.root)}`);
     const want = checksumWant(cs.json === true);
     if (JSON.stringify(cs.verified) !== JSON.stringify(want)) failures.push(`checksumVerified: want ${JSON.stringify(want)}, got ${JSON.stringify(cs.verified)}`);
+    // Download cache: stored text, a kept 404 (null), not cached (false), the
+    // same two through fetchText(), 2 files cleared, then gone
+    const cacheWant = ['abc\n', null, false, 'abc\n', false, 2, false];
+    if (JSON.stringify(out.cache) !== JSON.stringify(cacheWant)) failures.push(`download cache: want ${JSON.stringify(cacheWant)}, got ${JSON.stringify(out.cache)}`);
     return failures;
 }
 
@@ -193,7 +197,7 @@ async function run({ work, php, repo, phpWork = work, name = 'selfcheck' }) {
     const job = phpJob(path.join(work, name + '.php'), path.join(repo, path.relative(ROOT, JOB)), prep.vars(path.join(repo, 'main.php'), phpWork));
     try {
         const out = jobJson(await php(inPhp(job)));
-        return { php: out.php, failures: check(out, prep.models), summary: `${CASES.length} detector cases, listing, ${prep.models.names.length} model files, ${UNIT_PROBES.length} unit probes, ${checksumWant(true).length} checksum probes` };
+        return { php: out.php, failures: check(out, prep.models), summary: `${CASES.length} detector cases, listing, ${prep.models.names.length} model files, ${UNIT_PROBES.length} unit probes, ${checksumWant(true).length} checksum probes, download cache` };
     } catch (e) {
         return { php: '?', failures: ['the PHP self-check produced no JSON: ' + e.message.split('\n')[0]] };
     }

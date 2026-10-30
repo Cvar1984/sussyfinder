@@ -7,6 +7,9 @@
 // $SUSSY_CASES, $SUSSY_FIXTURE, $SUSSY_MODELS, $SUSSY_CHECKSUM_FIXTURE. Must stay PHP
 // 4.3-safe.
 define('SUSSY_LIB', true);
+// The download cache in a fresh temporary folder (/work is read-only in containers)
+$cacheDir = (function_exists('sys_get_temp_dir') ? sys_get_temp_dir() : '/tmp') . '/sussy-cache-' . getmypid();
+define('CACHE_DIR', $cacheDir);
 // Vendor checksums read local stand-ins for their downloads
 define('_CHECKSUMS_URL_', $SUSSY_CHECKSUM_FIXTURE . '/checksums.txt');
 define('_WP_CORE_CHECKSUMS_URL_', $SUSSY_CHECKSUM_FIXTURE . '/manifests/core-{version}-{locale}.json');
@@ -77,4 +80,19 @@ $checksums = array(
     ),
 );
 
-echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes, 'checksums' => $checksums));
+// The download cache: kept downloads and 404s come back, fetchText() answers
+// from it without the network (example.invalid can't resolve), clearing empties it
+cacheStore('https://example.invalid/list.txt', "abc\n");
+cacheStore('https://example.invalid/missing.json', null);
+$cache = array(
+    cacheLoad('https://example.invalid/list.txt'),
+    cacheLoad('https://example.invalid/missing.json'),
+    cacheLoad('https://example.invalid/never.txt'),
+    fetchText('https://example.invalid/list.txt'),
+    fetchText('https://example.invalid/missing.json', true),
+    cacheClear(),
+    cacheLoad('https://example.invalid/list.txt'),
+);
+@rmdir($cacheDir);
+
+echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes, 'checksums' => $checksums, 'cache' => $cache));

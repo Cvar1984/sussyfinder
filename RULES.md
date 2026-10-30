@@ -146,9 +146,16 @@ one self-contained file, no dependencies. `README.md` documents the maths
   (cURL's `CURLOPT_ENCODING`; streams only with `gzdecode()`, PHP 5.4+).
   `fetchText()` is the one way to get a list, manifest or model: an http(s)
   URL or a local file, a 404 optionally quiet, a host that didn't answer not
-  asked again in that request. **Nothing is cached between requests**
-  (owner's call): each batch downloads what it needs, once per request
-  (`hashList()`, `checksumManifest()` keep it for that request only).
+  asked again in that request. **Download cache** (owner's call: "cache, but
+  deletable"): `fetchText()` keeps each http(s) download, and a 404, as a
+  file in `CACHE_DIR` (`sussyfinder-cache` next to `main.php`, not the shared
+  temp folder, where another hosting account could plant a blacklist) until
+  `cacheClear()` deletes it: the page's **Refresh lists** button
+  (`clear_cache`) or removing the folder. Written to a temp file and renamed,
+  so a parallel batch never reads half a file. Network failures are never
+  cached. No writable `CACHE_DIR`: every request downloads again. A session
+  cache was tried and dropped: a 1.2 MB list in the session cost every batch
+  ~30 MB and ~150 ms, and it could not be cleared on demand.
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it
   returns a clear error. A `json_decode` fallback was deliberately not added:
   legacy builds have no HTTPS, so it could never run.
@@ -431,6 +438,30 @@ revisiting one.
   rescore and redraw every 3 s used to block the page and the next request,
   so the list and the bar trailed what had arrived.
 - After making important decision dump it here
+
+## Known limits (notes, not fixed yet)
+
+From the architecture audit; numbers measured on the test corpora.
+
+- **Browser memory and rendering (H2).** The page keeps every feature row:
+  ~1.8 KB of JSON each on average (470k cached rows), mostly the hex ML
+  bitmaps (`ml_features`, `ml_units`), so ~0.8 GB for a 450k-file site before
+  compression. The default filter is "all" and `renderTable()` builds one
+  HTML string for every row (the live list appends them all too). This, not
+  the server, is the ceiling for big sites. Plan: score ML when a batch
+  arrives and drop the bitmaps (nothing needs them after scoring, not even
+  the threshold control); paginate or virtualize the table; default to the
+  anomalies filter above some file count.
+- **Phase 2 is sequential (M3).** `processChunk()` keeps one request in
+  flight, so a scan's time is about batches x round trip. The server holds no
+  per-scan state, so 2-4 concurrent batches would be safe. Keep the order of
+  results (duplicate_of takes the first file with an MD5 in scan order) and
+  the bisect retry of a failed batch.
+- **Phase 1 lists everything in one request (M4).** 453,627 files took ~10 s
+  and all paths sit in memory; a host with a short max_execution_time and
+  set_time_limit disabled can't list a big tree at all. Plan: page the
+  listing (per top-level directory, or a resumable cursor) and start phase 2
+  on the first page.
 
 ## Style
 

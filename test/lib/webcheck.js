@@ -49,6 +49,9 @@ function webCheck(t) {
     const fixtureOk = !!fixtureScan && fixtureScan.total === LISTING_WANT.length &&
         JSON.stringify(joined.map(j => j.name).sort()) === JSON.stringify(LISTING_WANT) &&
         joined.every(j => j.path.startsWith('/work/fixture/'));
+    // The Refresh button's action answers even when there is no cache (/var/www/html is read-only here)
+    const cleared = json(curl(['--data', 'ajax_action=clear_cache']));
+    const clearOk = !!cleared && typeof cleared.cleared === 'number' && typeof cleared.summary === 'string';
     // A browser that takes gzip gets it, when the host can (zlib); either way the same JSON
     let gzip = 'n/a';
     try {
@@ -60,9 +63,9 @@ function webCheck(t) {
     } catch (e) { gzip = 'BROKEN'; }
     const csrfOk = !!noHeader && noHeader.error === 'forbidden';
     return {
-        ok: jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk && gzip !== 'BROKEN',
+        ok: jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk && clearOk && gzip !== 'BROKEN',
         text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'} (${gzip}), fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
-            `process ${procOk ? 'OK' : 'FAIL'}, CSRF check ${csrfOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : ''),
+            `process ${procOk ? 'OK' : 'FAIL'}, clear cache ${clearOk ? 'OK' : 'FAIL'}, CSRF check ${csrfOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : ''),
     };
 }
 

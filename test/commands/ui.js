@@ -158,6 +158,15 @@ async function testVerified() {
     await js(`(() => { document.getElementById('searchInput').value = ''; applySearch(); return true; })()`); await sleep(200);
 }
 
+// The Refresh button clears the server's download cache. The page then offers a
+// reload; confirm() is answered "no" in the page, so no dialog opens.
+async function testRefreshDownloads() {
+    await js(`window._asked = null; window.confirm = q => { window._asked = q; return false; }; document.getElementById('refreshDownloads').click(); true`);
+    check('Refresh lists clears the download cache and offers a reload', await waitFor('window._asked !== null', 10000) &&
+        /^Deleted \d+ cached download/.test(await js('window._asked')) && /download\(s\) kept in|No download cache/.test(await js("document.getElementById('refreshDownloads').title")),
+        await js('window._asked'));
+}
+
 async function testHostileFileName() {
     await js(`(() => { document.getElementById('searchInput').value = 'alert'; applySearch(); return true; })()`); await sleep(200);
     const link = await js(`(() => { const el = document.querySelector('#result .file-link'); if (!el) return null; el.scrollIntoView({block: 'center'}); const r = el.getBoundingClientRect(); return { x: r.left + 5, y: r.top + 5, text: el.textContent }; })()`);
@@ -220,6 +229,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
         await testZoomAndResize();
         await testVerified();
         await testHostileFileName();
+        await testRefreshDownloads();
         check('no JavaScript errors on the page', errors.length === 0, errors.join(' | ').slice(0, 300));
         console.log(fails ? fails + ' FAILED' : 'all passed');
         return fails ? 1 : 0;

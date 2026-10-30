@@ -510,6 +510,7 @@ define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
 | `_MHR_URL_` | `https://hash.cymru.com/v2/submitHashes` | MHR endpoint |
 | `_CHECKSUMS_URL_`, `_WP_CORE_CHECKSUMS_URL_`, `_WP_PLUGIN_CHECKSUMS_URL_` | this repository, `api.wordpress.org`, `downloads.wordpress.org` | where the vendor checksums come from; the WordPress ones are templates with `{version}`, `{locale}`, `{slug}` (each may be a local file) |
 | `TIME_LIMIT` | `3600` | seconds a request may run |
+| `CACHE_DIR` | `sussyfinder-cache` next to `main.php` | where downloaded lists, checksums and the model are kept until deleted (`''`, or a folder PHP can't write: no cache) |
 | `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |
 | `MHR_BATCH` | `1000` | hashes per MHR request |
 | `LONG_LINE_BYTES`, `HALT_PAYLOAD_BYTES` | `5000`, `1024` | thresholds of the `@long_line` and `@halt_payload` signals |
@@ -528,7 +529,7 @@ By default, both lists are fetched from:
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/whitelist.txt`
 * `https://raw.githubusercontent.com/Cvar1984/sussyfinder/main/blacklist.txt`
 
-You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Nothing is cached: every batch of a scan downloads the lists it needs again (gzip-compressed when the host's cURL or PHP 5.4+ can decode it: whitelist, blacklist and `checksums.txt` are 0.6 MB a batch instead of 1.5 MB), so each batch uses the lists as they are now. A bigger chunk size means fewer downloads; on a host that should not fetch them at all, point the URL settings at local copies. They stay on the server, so the browser can't substitute its own blacklist. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
+You can turn either list off by setting `_WHITELIST_` or `_BLACKLIST_` to `false` (see [Configuration](#configuration)). Downloads are kept in a cache folder, `sussyfinder-cache` next to `main.php` (`CACHE_DIR`), until it is cleared, so batches and later scans don't download them again. **Refresh lists**, next to the Scan button, deletes the cache, so the next scan pulls the latest lists and checksums, and offers to reload the page for the latest ML model; deleting the folder does the same. Its tooltip says what is cached and since when. Without a writable `CACHE_DIR` every batch downloads the lists again. Downloads ask for gzip where the host's cURL or PHP 5.4+ can decode it (whitelist, blacklist and `checksums.txt`: 0.6 MB instead of 1.5 MB). On a host that should not fetch them at all, point the URL settings at local copies. They stay on the server, so the browser can't substitute its own blacklist. Downloads use verified TLS, because the blacklist deletes files: a host without a CA bundle gets a warning and scans without the lists rather than trusting an unverified source.
 
 > **Note:** The provided whitelist is harvested from common frameworks and libraries. It is up to you to trust or modify it. For blacklist contributions, please provide source files when creating a pull request.
 
@@ -546,7 +547,7 @@ Why this can't hide a shell: injecting a shell into a vendor file changes its MD
 
 What it doesn't cover: modified files, custom themes and code, premium plugins, and release versions no list has hashed; those are scanned as usual. What it does trust: an official release that was itself backdoored (hijacked or sold plugins have shipped malware). The badge names the release, so such a file is easy to look up.
 
-Both WordPress sources are rows of `$checksumSources` in `main.php`'s configuration: a marker file that identifies an install, where the version (and locale) are read, the manifest URL and the label. A platform that publishes per-file MD5s in the same JSON shape needs only another row. The checksums are downloaded by each batch that needs them, like the hash lists. A host that doesn't answer is warned about once, and the scan carries on without that source. Turn it off with `_CHECKSUMS_` set to `false`, or point the URLs at local copies on an offline host.
+Both WordPress sources are rows of `$checksumSources` in `main.php`'s configuration: a marker file that identifies an install, where the version (and locale) are read, the manifest URL and the label. A platform that publishes per-file MD5s in the same JSON shape needs only another row. The checksums are cached like the hash lists, a missing one (a premium plugin's 404) too, until **Refresh lists** clears them. A host that doesn't answer is warned about once, and the scan carries on without that source. Turn it off with `_CHECKSUMS_` set to `false`, or point the URLs at local copies on an offline host.
 
 ## Screenshots
 

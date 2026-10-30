@@ -72,6 +72,10 @@ settingDefault('_WP_PLUGIN_CHECKSUMS_URL_', 'https://downloads.wordpress.org/plu
 settingDefault('_ML_MODEL_URL_', _REPO_RAW_ . 'ml-model.json');
 settingDefault('_MHR_URL_', 'https://hash.cymru.com/v2/submitHashes');
 
+// Downloaded lists, checksums and the ML model are kept here until deleted (the page's
+// "Refresh lists" button, or removing the folder); '' or a folder PHP can't write: no cache
+settingDefault('CACHE_DIR', dirname(__FILE__) . '/sussyfinder-cache');
+
 settingDefault('TIME_LIMIT', 3600);          // seconds a request may run
 settingDefault('HTTP_CONNECT_TIMEOUT', 10);  // seconds
 settingDefault('HTTP_TIMEOUT', 30);          // seconds
@@ -1539,10 +1543,134 @@ function httpRequest($url, $body = null, $headers = array())
 }
 
 /**
+ * The download cache folder (CACHE_DIR), created on first use; false when
+ * there is none (CACHE_DIR '' or a folder PHP can't write), and then every
+ * request downloads what it needs. Next to main.php by default, not in the
+ * system temp folder: on shared hosting another account could plant a
+ * blacklist there.
+ *
+ * @return string|false
+ */
+function cacheDir()
+{
+    static $dir = null;
+    if ($dir === null) {
+        $dir = false;
+        if (CACHE_DIR !== '' && (@is_dir(CACHE_DIR) || @mkdir(CACHE_DIR, 0755)) && @is_writable(CACHE_DIR)) {
+            $dir = rtrim(CACHE_DIR, '/\\');
+        }
+    }
+    return $dir;
+}
+
+/**
+ * A cached download: its text, null when it was kept as missing (a 404),
+ * false when it isn't cached.
+ *
+ * @param string $url
+ * @return string|null|false
+ */
+function cacheLoad($url)
+{
+    $dir = cacheDir();
+    if ($dir === false) {
+        return false;
+    }
+    $file = $dir . '/' . md5($url);
+    if (@is_file($file . '.missing')) {
+        return null;
+    }
+    $text = @is_file($file . '.cache') ? @file_get_contents($file . '.cache') : false;
+    return is_string($text) ? $text : false;
+}
+
+/**
+ * Keep a download (null: keep it as missing). Written to a temporary file
+ * and renamed, so a batch running alongside never reads half of it.
+ *
+ * @param string $url
+ * @param string|null $text
+ * @return void
+ */
+function cacheStore($url, $text)
+{
+    $dir = cacheDir();
+    if ($dir === false) {
+        return;
+    }
+    $file = $dir . '/' . md5($url) . ($text === null ? '.missing' : '.cache');
+    $tmp = $dir . '/' . md5($url) . '.' . getmypid() . '.tmp';
+    $fp = @fopen($tmp, 'wb');
+    if (!$fp) {
+        return;
+    }
+    $ok = $text === null || fwrite($fp, $text) === strlen($text);
+    fclose($fp);
+    if ($ok && !@rename($tmp, $file)) { // Windows won't rename over a file
+        @unlink($file);
+        $ok = @rename($tmp, $file);
+    }
+    if (!$ok) {
+        @unlink($tmp);
+    }
+}
+
+/**
+ * Delete every cached download, so the next request pulls the latest lists,
+ * checksums and model.
+ *
+ * @return int files deleted
+ */
+function cacheClear()
+{
+    $dir = cacheDir();
+    $dh = $dir === false ? false : @opendir($dir);
+    $deleted = 0;
+    while ($dh && ($name = readdir($dh)) !== false) {
+        if (preg_match('/\.(cache|missing|tmp)$/', $name) && @unlink($dir . '/' . $name)) {
+            $deleted++;
+        }
+    }
+    if ($dh) {
+        closedir($dh);
+    }
+    return $deleted;
+}
+
+/**
+ * What the cache holds, for the Refresh button's tooltip.
+ *
+ * @return string
+ */
+function cacheSummary()
+{
+    $dir = cacheDir();
+    if ($dir === false) {
+        return 'No download cache (CACHE_DIR is empty or not writable): every request downloads the lists';
+    }
+    $count = 0;
+    $oldest = 0;
+    $dh = @opendir($dir);
+    while ($dh && ($name = readdir($dh)) !== false) {
+        if (preg_match('/\.(cache|missing)$/', $name)) {
+            $count++;
+            $time = @filemtime($dir . '/' . $name);
+            $oldest = $oldest && $oldest < $time ? $oldest : $time;
+        }
+    }
+    if ($dh) {
+        closedir($dh);
+    }
+    return $count . ' download(s) kept in ' . $dir . ($count ? ' since ' . date('Y-m-d H:i', $oldest) : '') .
+        '. Click to delete them, so the latest lists, checksums and model are downloaded.';
+}
+
+/**
  * A text from an http(s) URL or a local file (a copy on an offline host).
  * false when it can't be had, with a warning, except for a 404 when
- * $missingOk (no checksums for that plugin or version). A host that doesn't
- * answer isn't asked again in this request.
+ * $missingOk (no checksums for that plugin or version). A download, or a
+ * 404, is kept in the cache (cacheDir()) until it is cleared; a host that
+ * doesn't answer isn't asked again in this request.
  *
  * @param string $url
  * @param bool $missingOk
@@ -1560,29 +1688,35 @@ function fetchText($url, $missingOk = false)
         }
         return false;
     }
+    $cached = cacheLoad($url);
+    if ($cached !== false) {
+        return $cached === null ? false : $cached;
+    }
     $host = strtolower($m[1]);
     if (isset($down[$host])) {
         return false;
     }
     $response = httpRequest($url);
-    if ($response === false) {
+    if ($response === false) { // not cached: asked again next request
         $down[$host] = true;
         return false;
     }
     if ($response['status'] == 404 && $missingOk) {
+        cacheStore($url, null);
         return false;
     }
     if ($response['status'] < 200 || $response['status'] > 299) {
         trigger_error('Could not fetch ' . $url . ' (HTTP ' . $response['status'] . ')', E_USER_WARNING);
         return false;
     }
+    cacheStore($url, $response['body']);
     return $response['body'];
 }
 
 /**
  * A hash list as md5 => true (empty when it can't be fetched): one MD5 per
- * line of a download, made once per request and kept nowhere else, so every
- * batch sees the list as it is now.
+ * line of a download (fetchText(), so cached until the cache is cleared),
+ * parsed once per request.
  *
  * @param string $url
  * @return array
@@ -1974,6 +2108,17 @@ function actionProcess()
 }
 
 /**
+ * Delete the download cache (the page's Refresh button): the next batch
+ * downloads the lists again, and the page, reloaded, the model.
+ *
+ * @return array
+ */
+function actionClearCache()
+{
+    return array('cleared' => cacheClear(), 'summary' => cacheSummary());
+}
+
+/**
  * Look a batch of hashes up in the Malware Hash Registry.
  *
  * @return array
@@ -2067,7 +2212,8 @@ function dispatchAjax()
     if (!isset($_SERVER['HTTP_X_SUSSY_REQUEST'])) {
         ajaxRespond(ajaxError('forbidden', 'Missing X-Sussy-Request header'));
     }
-    $actions = array('scan' => 'actionScan', 'process' => 'actionProcess', 'mhr_check' => 'actionMhrCheck', 'mhr_unlink' => 'actionMhrUnlink');
+    $actions = array('scan' => 'actionScan', 'process' => 'actionProcess', 'mhr_check' => 'actionMhrCheck', 'mhr_unlink' => 'actionMhrUnlink',
+        'clear_cache' => 'actionClearCache');
     $mhrActions = array('mhr_check' => true, 'mhr_unlink' => true);
     $action = inputValue('ajax_action', '');
     if (!isset($actions[$action])) {
@@ -2536,6 +2682,7 @@ if (isset($_POST['ajax_action'])) {
                 <input type="text" name="dir" class="dir-input" value="<?php echo htmlspecialchars(getcwd()); ?>" title="Directory to scan" onkeydown="if (event.key === 'Enter') { startChunkedScan(); }">
                 <input type="number" id="chunkSizeInput" class="chunk-input" value="500" step="50" title="Files processed per AJAX request">
                 <button type="button" class="btn-primary" onclick="startChunkedScan()" title="Chunked scan — safe for large directories">Scan</button>
+                <button type="button" id="refreshDownloads" onclick="refreshDownloads()" title="<?php echo htmlspecialchars(cacheSummary()); ?>">Refresh lists</button>
             </div>
         </nav>
 
@@ -4445,6 +4592,20 @@ if (isset($_POST['ajax_action'])) {
                         showScanProgress(allFeatures.length, totalFiles, idx + 1, chunks.length);
                         return processChunk(chunks, idx + 1, allFeatures, totalFiles, chunkSize);
                     });
+            }
+
+            // Delete the server's download cache (cacheClear()): the next scan pulls
+            // the latest lists and checksums; the model comes with the page, so a
+            // reload loads the latest one
+            function refreshDownloads() {
+                postAction({ ajax_action: 'clear_cache' })
+                    .then(function (data) {
+                        reportServerWarnings(data);
+                        document.getElementById('refreshDownloads').title = data.summary || '';
+                        if (confirm('Deleted ' + data.cleared + ' cached download(s): the next scan downloads the latest lists. ' +
+                            'Reload the page now to load the latest ML model too? (Results on screen are cleared.)')) location.reload();
+                    })
+                    .catch(function (err) { logWarning('Could not clear the download cache: ' + err.message, 'error'); });
             }
 
             function cancelChunkedScan() {
