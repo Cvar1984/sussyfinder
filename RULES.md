@@ -158,7 +158,9 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `SEARCH_FLAGS` and in the `#searchHelp` table. `near:` (`nearTest()`) takes a
   scanned file's path or else a query of targets (compiled recursively, as is
   a bare `(group)`), looked up in `analyzedData`, so the compiled query is
-  also rebuilt when that changes. An unknown `field:` is plain
+  also rebuilt when that changes. It matches by folder and by mtime or ctime,
+  skipping a time window crowded by more than `NEAR_CROWD` of all files
+  (noted in `_searchNotes`, shown in the box's tooltip). An unknown `field:` is plain
   text (`c:\x`). Bad terms are left out and named in the box's tooltip.
   Other code that sets a search writes a query (`is:blacklisted`,
   `path:"..."`), never a magic value.

@@ -275,6 +275,41 @@ async function testSearch() {
     await same('(token:eval OR token:system) -ext:inc', 'd => (d.matched_tokens || []).some(t => /eval|system/i.test(t)) && !/\\.inc$/i.test(d.path)');
     await js(`document.getElementById('searchInput').value = 'near:is:mhr'; applySearch(); true`);
     check('near: with no target says so', await js(`/near: no file matches is:mhr/.test(document.getElementById('searchInput').title)`));
+    // near: on made-up rows like a real intrusion: a deploy 700 files share,
+    // a shell whose mtime was backdated into it (its ctime can't be), a file
+    // dropped beside it, and three files edited at that ctime and set back to
+    // the deploy's mtime. The deploy's time is too common to mean anything.
+    await js(`(() => {
+        window._realRows = analyzedData;
+        const T0 = 1.7e9, T1 = T0 + 30 * 86400;
+        const row = (path, mtime, ctime, extra) => Object.assign({ path, mtime, ctime, md5: path, size: 100, entropy: 4, total_tokens: 10, suspCount: 0,
+            matched_tokens: [], threatScore: 0, ruleScore: 0, mlScore: null, mlPoints: 0, isAnomaly: false, mlOnly: false, duplicate_of: false, verified: false,
+            is_blacklisted: false, is_htaccess: false, is_unreadable: false, rareOwner: false, owner: 1, date: '', zScores: { susp: 0, ctime: 0, mtime: 0, entropy: 0, size: 0, tokens: 0 } }, extra);
+        const rows = [];
+        for (let i = 0; i < 700; i++) rows.push(row('/site/core/f' + i + '.php', T0, T0));
+        for (let i = 0; i < 100; i++) rows.push(row('/site/old/g' + i + '.php', T0 - 86400 * (i + 2), T0 - 86400 * (i + 2)));
+        rows.push(row('/site/up/shell.php', T0, T1, { is_blacklisted: true, isAnomaly: true, threatScore: 100 }));
+        rows.push(row('/site/up/x.jpg.php', T0 - 5e6, T0 - 5e6));
+        for (let i = 0; i < 3; i++) rows.push(row('/site/core/edited' + i + '.php', T0, T1 + 600 * i));
+        analyzedData = rows;
+        document.getElementById('severityFilter').value = currentFilterMode = 'anomalies';
+        return true;
+    })()`);
+    await js(`document.getElementById('searchInput').value = 'near:is:blacklisted'; applySearch(); true`);
+    const found = await js('JSON.stringify(analyzedData.filter(d => shouldShowFile(d)).map(d => d.path).sort())');
+    check('near:is:blacklisted finds the dropped and edited files by ctime, not the deploy the shell\'s mtime hides in', found ===
+        JSON.stringify(['/site/core/edited0.php', '/site/core/edited1.php', '/site/core/edited2.php', '/site/up/shell.php', '/site/up/x.jpg.php']), found);
+    check('it says it left the crowded time out', await js(`/near: left out 1 time\\(s\\) shared by more than 200 files/.test(document.getElementById('searchInput').title)`));
+    check('typing near: shows all files, not only anomalies', await js('currentFilterMode === "all"'));
+    await js(`document.getElementById('severityFilter').value = 'anomalies'; applySeverityFilter(); document.getElementById('searchInput').value = 'site'; applySearch(); true`);
+    check('a search the filter hides says how many and offers them', await js(`/^804 more file\\(s\\) match the search but are hidden by the "Only Anomalies" filter/.test(document.getElementById('hiddenMatches').textContent.trim())`));
+    await js('document.querySelector("#hiddenMatches button").click(); true');
+    check('"Show them" switches to All Files', await js('currentFilterMode === "all" && !document.getElementById("hiddenMatches")'));
+    // The compass on a file the first page of the table doesn't reach
+    await js('searchNear("/site/core/f650.php"); true'); await sleep(200);
+    check('the 🧭 draws the table down to its file and marks it', await js(`_rowByPath.has('/site/core/f650.php') && _rowByPath.get('/site/core/f650.php').classList.contains('row-near')`),
+        await tableRows() + ' rows drawn');
+    await js('analyzedData = _realRows; clearFilters(); true');
     // A row's compass: the files near it, newest first, the file itself marked
     await js('clearFilters(); document.getElementById("searchInput").value = ""; applySearch(); true');
     await js(`document.querySelector('#result tr[data-path] .near-btn[data-near=' + JSON.stringify(${JSON.stringify(target)}) + ']').click(); true`); await sleep(300);

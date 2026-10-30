@@ -3637,10 +3637,35 @@ if (isset($_POST['ajax_action'])) {
             /**
              * near:'s test. Its value names the targets: one scanned file's path,
              * else a query (near:is:blacklisted, near:(ext:php is:critical)). A
-             * file is near when it is in a target's folder or changed within
-             * NEAR_HOURS of one (an intruder's other files usually are); ~6h,
-             * ~30m, ~2d, ~1w after the value sets that window.
+             * file is near when it is in a target's folder, or its mtime or ctime
+             * is within NEAR_HOURS of a target's mtime or ctime (an intruder's
+             * other files usually are); ~6h, ~30m, ~2d, ~1w after the value sets
+             * that window. ctime counts because a planted file's mtime is often
+             * backdated with touch, which can't set ctime, and a file the
+             * intruder edited and set back to its old mtime still got a new ctime.
+             * A time shared by more than NEAR_CROWD of all files (a deploy, an
+             * update, a restore or migration, which gives every file one ctime)
+             * says nothing about the target and is left out, with a note.
              */
+            const NEAR_CROWD = { share: 0.05, files: 200 };
+            // Every file's mtime and ctime, sorted, for counting how many fall in
+            // a window; worked out once per set of rows
+            let _timesOf = null, _times = null;
+            function sortedTimes() {
+                if (_timesOf !== analyzedData) {
+                    _timesOf = analyzedData;
+                    _times = new Float64Array(analyzedData.length * 2);
+                    analyzedData.forEach((d, i) => { _times[2 * i] = d.mtime || 0; _times[2 * i + 1] = d.ctime || 0; });
+                    _times.sort();
+                }
+                return _times;
+            }
+            // How many values of a sorted array lie in [lo, hi]
+            function countBetween(a, lo, hi) {
+                const first = x => { let l = 0, h = a.length; while (l < h) { const m = (l + h) >> 1; if (a[m] < x) l = m + 1; else h = m; } return l; };
+                return first(hi + 1e-9) - first(lo);
+            }
+
             function nearTest(value, tokensOnly) {
                 const w = /^(.*?)~(\d+(?:\.\d+)?)([mhdw])$/i.exec(value);
                 const span = w ? w[2] * { m: 60, h: 3600, d: 86400, w: 604800 }[w[3].toLowerCase()] : NEAR_HOURS * 3600;
@@ -3650,9 +3675,23 @@ if (isset($_POST['ajax_action'])) {
                     if (what === '' || /^\/[^\s:]*$/.test(what)) throw 'near: no scanned file is ' + what;
                     targets = analyzedData.filter(subSearch(what, tokensOnly, 'near: '));
                 }
-                if (!targets.length) throw 'near: no file matches ' + what;
+                if (!targets.length) {
+                    throw 'near: no file matches ' + what + (/blacklist|mhr/i.test(what)
+                        ? ' (a blacklisted or MHR-flagged file is deleted when found, so it is only in the scan that found it)' : '');
+                }
                 const dirs = new Set(targets.map(d => dirOf(lowerPath(d))));
-                const times = targets.map(d => d.mtime).filter(t => t).sort((a, b) => a - b);
+                const all = sortedTimes(), crowd = Math.max(NEAR_CROWD.files, analyzedData.length * NEAR_CROWD.share);
+                const within = t => countBetween(all, t - span, t + span);
+                const times = [];
+                let crowded = 0;
+                targets.forEach(d => [d.mtime, d.ctime].forEach(t => {
+                    if (!t) return;
+                    if (within(t) > crowd) crowded++;
+                    else times.push(t);
+                }));
+                times.sort((a, b) => a - b);
+                if (crowded) _searchNotes.push('near: left out ' + crowded + ' time(s) shared by more than ' + Math.round(crowd) +
+                    ' files (a deploy, update or restore), matching by folder' + (times.length ? ' and the other times' : '') + ' only');
                 // Is a time within span of one of the targets' (binary search)
                 const close = t => {
                     let lo = 0, hi = times.length - 1;
@@ -3663,7 +3702,7 @@ if (isset($_POST['ajax_action'])) {
                     }
                     return false;
                 };
-                return d => dirs.has(dirOf(lowerPath(d))) || (!!d.mtime && close(d.mtime));
+                return d => dirs.has(dirOf(lowerPath(d))) || (!!d.mtime && close(d.mtime)) || (!!d.ctime && close(d.ctime));
             }
 
             // One search term (field, value) as a test of a row; throws a message
@@ -3700,6 +3739,7 @@ if (isset($_POST['ajax_action'])) {
              * the query is empty, errors: [message] }; a term that doesn't compile
              * is left out and reported.
              */
+            let _searchNotes = [];
             function compileSearch(query, tokensOnly) {
                 const groups = [], errors = [];
                 const re = /(-)?(?:([a-z]+):)?(\((?:[^()"]|"(?:[^"\\]|\\.)*")*\)?|"(?:[^"\\]|\\.)*"?|\/(?:[^\/\\\s]|\\.)+\/(?=\s|$)|\S+)(~[\d.]+[a-z])?/gi;
@@ -3741,22 +3781,40 @@ if (isset($_POST['ajax_action'])) {
                 if (key !== _searchKey || _searchData !== analyzedData) {
                     _searchKey = key;
                     _searchData = analyzedData;
+                    _searchNotes = [];
                     const c = compileSearch(currentSearch, searchTokensOnly);
                     _searchMatch = c.match;
                     const input = document.getElementById('searchInput');
                     input.classList.toggle('search-error', c.errors.length > 0);
-                    input.title = c.errors.length ? c.errors.join('\n') : SEARCH_TITLE;
+                    input.title = c.errors.concat(_searchNotes).join('\n') || SEARCH_TITLE;
                 }
                 return _searchMatch;
             }
             const SEARCH_TITLE = 'Search paths and tokens. Press / to jump here; ? lists the syntax.';
 
             function passesTableFilters(d) {
+                return passesSeverity(d) && passesSearch(d);
+            }
+
+            function passesSeverity(d) {
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && !isCritical(d)) return false;
                 if (currentFilterMode === 'obfuscated' && (d.entropy <= HIGH_ENTROPY || d.is_unreadable)) return false;
+                return true;
+            }
+
+            function passesSearch(d) {
                 const match = searchMatcher();
                 return !match || match(d);
+            }
+
+            // Searching near: means looking at the files around something, which
+            // are mostly not flagged: the severity filter (often "Only Anomalies"
+            // after a big scan) would hide exactly those, so it goes to All Files
+            function nearShowsAll() {
+                if (currentFilterMode !== 'all' && /(^|[\s(-])near:/i.test(currentSearch)) {
+                    document.getElementById('severityFilter').value = currentFilterMode = 'all';
+                }
             }
 
             function toggleSearchHelp() {
@@ -3778,6 +3836,8 @@ if (isset($_POST['ajax_action'])) {
                 _chartSelection = null;
                 document.getElementById('searchInput').value = currentSearch = 'near:' + quoteQuery(path);
                 renderTable(analyzedData);
+                // The table draws a page at a time; draw down to the file
+                while (!_rowByPath.has(path) && _tableDrawn < _tableRows.length) showMoreRows();
                 const tr = _rowByPath.get(path);
                 if (tr) {
                     tr.classList.add('row-near');
@@ -4031,10 +4091,17 @@ if (isset($_POST['ajax_action'])) {
 
                 _tableRows = filtered;
                 _tableDrawn = 0;
+                // Files the search finds that the severity filter hides, so an
+                // empty or short result says why
+                const hidden = currentFilterMode === 'all' || !currentSearch.trim() ? 0
+                    : data.filter(d => (!_chartSelection || _chartSelection.has(d.path)) && passesSearch(d) && !passesSeverity(d)).length;
                 _rowByPath = new Map();
                 _linkedRow = null;
-                document.getElementById('result').innerHTML = filtered.length === 0
-                    ? '<tr><td style="color:#888;text-align:center;padding:15px;">No files match the current search or filters.</td></tr>' : '';
+                const filterName = document.getElementById('severityFilter').selectedOptions[0].textContent;
+                document.getElementById('result').innerHTML = (hidden ? `<tr id="hiddenMatches"><td style="color:#ffaa00;text-align:center;padding:8px;">
+                        ${hidden} more file(s) match the search but are hidden by the "${escapeHtml(filterName)}" filter.
+                        <button type="button" onclick="document.getElementById('severityFilter').value = 'all'; applySeverityFilter();">Show them</button></td></tr>` : '') +
+                    (filtered.length === 0 ? '<tr><td style="color:#888;text-align:center;padding:15px;">No files match the current search or filters.</td></tr>' : '');
                 showMoreRows();
                 syncCharts(data);
             }
@@ -4131,6 +4198,7 @@ if (isset($_POST['ajax_action'])) {
                 clearTimeout(_searchTimer);
                 currentSearch = document.getElementById('searchInput').value;
                 searchTokensOnly = document.getElementById('searchTokensOnly').checked;
+                nearShowsAll();
                 renderTable(analyzedData);
             }
 
