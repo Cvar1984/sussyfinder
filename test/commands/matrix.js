@@ -13,7 +13,7 @@ For each PHP version under each php.ini profile, starts a php:<version>-apache
 container (or a PHTest legacy build) with the repository mounted read-only,
 then runs what bench does there, plus a web check: the page and its inline
 JS, scan, process (paths round-trip byte for byte, a missing file comes back
-as a warning) and the CSRF check. Ends with a table of all of them and lists
+as a "gone" row) and the CSRF check. Ends with a table of all of them and lists
 files that match differently than on the newest PHP.
 
 Profiles:
