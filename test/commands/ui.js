@@ -211,9 +211,54 @@ async function testPagedParallel(port, reference) {
     check('still one copy after moving the threshold', await js('rawFileData === analyzedData && lastScanFeatures === analyzedData'));
     await js('document.getElementById("severityFilter").value = "all"; applySeverityFilter(); true'); await sleep(200);
     const total = await js('analyzedData.filter(d => shouldShowFile(d)).length');
-    check('table draws TABLE_PAGE_ROWS rows with a "Show more" button', await tableRows() === 50 && await js('!!document.getElementById("showMoreRows")'), total + ' files');
-    await js('document.querySelector("#showMoreRows button").click(); true'); await sleep(200);
-    check('"Show more" adds the next rows', await tableRows() === Math.min(100, total));
+    await js('window.scrollTo(0, 0); renderTable(analyzedData); true'); await sleep(300);
+    const first = await tableRows();
+    check('table draws TABLE_PAGE_ROWS rows at a time', first >= 50 && first < total && first % 50 === 0 && await js('!!document.getElementById("showMoreRows")'), first + ' of ' + total + ' drawn');
+    const steps = [];
+    for (let i = 0; i < 40 && await js('!!document.getElementById("showMoreRows")'); i++) {
+        await js('document.getElementById("showMoreRows").scrollIntoView({block: "end"}); true'); await sleep(250);
+        steps.push(await tableRows());
+    }
+    check('scrolling to the end draws the next rows until all are shown (infinite scroll)', await tableRows() === total &&
+        steps.every((n, i) => i === 0 || n >= steps[i - 1]), steps.join(' '));
+    await js('window.scrollTo(0, 0); true');
+}
+
+// The search box's query language against the same predicates written out,
+// "/" from anywhere, and Escape
+async function testSearch() {
+    await js('document.getElementById("severityFilter").value = "all"; applySeverityFilter(); true');
+    const same = async (query, predicate) => {
+        const r = await js(`(() => { document.getElementById('searchInput').value = ${JSON.stringify(query)}; applySearch();
+            const got = analyzedData.filter(d => shouldShowFile(d)).length, want = analyzedData.filter(${predicate}).length;
+            return { got, want, error: document.getElementById('searchInput').classList.contains('search-error') }; })()`);
+        check(`search ${query}`, r.got === r.want && r.got > 0 && r.got < await js('analyzedData.length') && !r.error, r.got + ' files');
+    };
+    const has = 'd => (d.matched_tokens || []).some(t => t.toLowerCase().includes("eval"))';
+    await same('eval', `d => d.path.toLowerCase().includes("eval") || (${has})(d)`);
+    await same('ext:php -is:critical -token:eval', `d => /\\.php$/i.test(d.path) && !isCritical(d) && !(${has})(d)`);
+    await same('token:eval OR token:system', 'd => (d.matched_tokens || []).some(t => /eval|system/i.test(t))');
+    await same('score:>=15', 'd => d.threatScore >= 15');
+    await same('score:8..15 size:>2k', 'd => d.threatScore >= 8 && d.threatScore < 15 && d.size > 2048');
+    await same('/\\/wp-[a-z]+\\.php$/', 'd => /\\/wp-[a-z]+\\.php$/i.test(d.path) || (d.matched_tokens || []).some(t => /\\/wp-[a-z]+\\.php$/i.test(t))');
+    await same('name:/^class-/ ext:php', 'd => /^class-/i.test(d.path.split("/").pop()) && /\\.php$/i.test(d.path)');
+    await same('"alert(1)"', 'd => d.path.includes("alert(1)")');
+    await same('date:2024', 'd => d.mtime >= new Date(2024, 0, 1) / 1000 && d.mtime < new Date(2025, 0, 1) / 1000');
+    await same('is:verified', 'd => !!d.verified');
+    await js(`document.getElementById('searchInput').value = '/(/ score:>x'; applySearch(); true`);
+    check('a broken regex or number marks the search box and says why', await js(`document.getElementById('searchInput').classList.contains('search-error') &&
+        /regular expression/.test(document.getElementById('searchInput').title) && /isn.t a number/.test(document.getElementById('searchInput').title)`));
+    // "/" from the page jumps to the box without typing a slash; Escape clears it, then leaves it
+    await js(`document.getElementById('searchInput').value = ''; applySearch(); document.activeElement.blur(); true`);
+    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: '/', code: 'Slash', text: '/', windowsVirtualKeyCode: 191 });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: '/', code: 'Slash', windowsVirtualKeyCode: 191 });
+    check('"/" focuses the search box', await js('document.activeElement.id === "searchInput" && document.activeElement.value === ""'));
+    await send('Input.insertText', { text: 'eval' }); await sleep(400);
+    check('typing there searches', await js('currentSearch === "eval"'));
+    await pressEscape();
+    check('Escape clears the search', await js('document.getElementById("searchInput").value === "" && currentSearch === ""'));
+    await pressEscape();
+    check('Escape again leaves the box', await js('document.activeElement.id !== "searchInput"'));
 }
 
 async function testHostileFileName() {
@@ -279,6 +324,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
         await testZoomAndResize();
         await testVerified();
         await testHostileFileName();
+        await testSearch();
         await testRefreshDownloads();
         await testPagedParallel(port, reference);
         check('no JavaScript errors on the page', errors.length === 0, errors.join(' | ').slice(0, 300));

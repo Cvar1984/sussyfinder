@@ -23,7 +23,19 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 
   * Sort by modification time, suspicious token count, Z-score, or residual
   * Filter to show only anomalies (a scan of more than 10,000 files starts on this filter)
-  * The table draws 500 rows at a time with a **Show more** button; search, filters, sorting, the charts and Copy cover every row
+  * The table draws 500 rows at a time and the next ones as you scroll down (infinite scroll); search, filters, sorting, the charts and Copy cover every row
+  * Search: press <kbd>/</kbd> anywhere to jump to the search box (<kbd>Esc</kbd> clears it). Words must all match, in the path or a matched token; the **?** button lists the rest:
+
+    | Query | Finds |
+    |---|---|
+    | `eval base64`, `eval OR assert`, `eval -vendor` | both words, either one, `eval` but not `vendor` |
+    | `"wp-content/uploads"`, `/\.(jpe?g\|png)$/` | exact text with spaces; a regular expression |
+    | `path:` `name:` `token:` `ext:` `md5:` `owner:` `dup:` | one property: path, file name, matched token, last extension, hash, owner id, a duplicate's original |
+    | `score:>=15` `rules:>8` `ml:>80` `size:>100k` `entropy:>5.5` `tokens:<20` `hits:3..10` | numbers, with `>`, `>=`, `<`, `<=` or a range `a..b`; `ml` is in % |
+    | `date:7d`, `date:2025-06`, `date:>=2025-01-01` | changed in the last 7 days (`h`, `w` too); in a year, month or day; after or before it |
+    | `is:critical -is:verified` | `anomaly` `critical` `blacklisted` `verified` `duplicate` `htaccess` `unreadable` `gone` `mhr` `ml` `mlonly` `rare` `entropy` |
+
+    A term that doesn't make sense (a broken regex, `score:>x`) outlines the box in red and its tooltip says why.
   * One-click copy of results (with full details)
   * Click a file path to copy it; the 📋 icon copies its MD5 hash
   * Linked charts: drag a box on the Threat Matrix or Entropy chart, or click a timeline bar, to select those files (Ctrl/⌘ adds more); the table then shows only the selection, and Esc clears it. Charts fade whatever the table's filters hide, hovering a file in a chart highlights its table row (and the other way round), and the Threat Matrix zooms with the wheel, pans with Shift+drag and resets on double-click
@@ -468,7 +480,7 @@ test/run all              # unit + bench + ui, with a summary: run before a comm
   * `minimal`: no `json_encode`, no `json_decode` and no cURL (as on PHP < 5.2)
 
   Each also gets a page/AJAX check. It ends with a table and lists files that match differently than on the newest PHP. `test/run setup --docker` pulls the images.
-* `test/run ui`: drives the page in headless Chrome with real mouse and keyboard events. It covers chart selection, hover linking, filters, the threshold control, zoom, HiDPI sizing and resizing, and checks that a file named `a');alert(1);('.php` runs no script and that a file on a local checksum list scans as verified. A second scan with tiny listing pages, three batches at once, fake busy (503) and failing (500) replies and a cancel-and-rescan must find exactly what a plain scan found. It scans a temporary copy of the samples with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips when there is none (`--require-browser` makes that a failure).
+* `test/run ui`: drives the page in headless Chrome with real mouse and keyboard events. It covers chart selection, hover linking, filters, the threshold control, zoom, HiDPI sizing and resizing, and checks that a file named `a');alert(1);('.php` runs no script and that a file on a local checksum list scans as verified. It runs search queries against the same conditions written out, and checks <kbd>/</kbd> and <kbd>Esc</kbd> and the infinite scroll. A second scan with tiny listing pages, three batches at once, fake busy (503) and failing (500) replies and a cancel-and-rescan must find exactly what a plain scan found. It scans a temporary copy of the samples with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips when there is none (`--require-browser` makes that a failure).
 * `test/run perf`: times a scan through the real page in headless Chrome and measures the browser memory its results take, on a copy of whole benign releases (`--files`, `--latency`, `--define MAX_PARALLEL=1`, `--main` for an older `main.php`).
 * `test/run train`: see [Accuracy](#accuracy).
 * `test/run checksums`: builds `checksums.txt` from the benign corpora (see [Vendor Checksums](#vendor-checksums)); `--write` saves it. Rerun it after retraining the model or changing the rules, since which release files come near the anomaly bar depends on both.
@@ -515,7 +527,7 @@ define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
 | `TIME_LIMIT` | `3600` | seconds a request may run |
 | `LIST_PAGE_FILES` | `20000` | files per listing request; a page also ends after 40% of `max_execution_time` (1–10 s). `0`: the whole list in one request |
 | `MAX_PARALLEL` | `3` | batches analysed at once, at most; `1` sends one at a time |
-| `TABLE_PAGE_ROWS` | `500` | rows the table draws at a time; `0`: all |
+| `TABLE_PAGE_ROWS` | `500` | rows the table draws at a time, the next ones as you scroll; `0`: all at once |
 | `ANOMALIES_ONLY_ABOVE` | `10000` | a scan of more files starts on the "Only Anomalies" filter; `0`: never |
 | `CACHE_DIR` | a `sussyfinder-…` folder in the system temp folder | where downloaded lists, checksums and the model are kept until deleted (`''`: no cache) |
 | `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |

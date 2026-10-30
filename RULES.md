@@ -148,6 +148,13 @@ one self-contained file, no dependencies. `README.md` documents the maths
   root they are listed at their real path anyway; outside, warned), which
   also rules out loops. Anything unscannable is reported with
   `trigger_error()`, not skipped silently.
+- **Search** (`compileSearch()`): the query is compiled once per change into
+  one test per row (`searchMatcher()`); `passesTableFilters()` only calls it.
+  A new field goes in `SEARCH_TEXT` / `SEARCH_EXACT` / `SEARCH_NUMBERS` /
+  `SEARCH_FLAGS` and in the `#searchHelp` table. An unknown `field:` is plain
+  text (`c:\x`). Bad terms are left out and named in the box's tooltip.
+  Other code that sets a search writes a query (`is:blacklisted`,
+  `path:"..."`), never a magic value.
 - **Charts** share one selection (`_chartSelection`, a Set of paths) and one
   hover (`_chartHover`). `shouldShowFile()` = `passesTableFilters()` + that
   selection, and it's what both the table and the charts use (charts fade

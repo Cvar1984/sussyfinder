@@ -2478,7 +2478,34 @@ if (isset($_POST['ajax_action'])) {
             }
 
             .toolbar .search-input {
-                width: 160px;
+                width: 260px;
+            }
+
+            .toolbar .search-input.search-error {
+                outline: 1px solid #ff4444;
+            }
+
+            .search-help {
+                display: none;
+                width: 90%;
+                margin: -8px auto 15px;
+                padding: 8px 12px;
+                background: #242424;
+                border: 1px solid #3a3a3a;
+                border-radius: 8px;
+                font-size: 12px;
+                color: #bbb;
+            }
+
+            .search-help td {
+                padding: 2px 8px 2px 0;
+                vertical-align: top;
+            }
+
+            .search-help code {
+                color: #ffaa00;
+                cursor: pointer;
+                white-space: nowrap;
             }
 
             .toolbar .z-input {
@@ -2850,13 +2877,33 @@ if (isset($_POST['ajax_action'])) {
 
             <label>Z‑threshold: <input type="number" id="zThreshold" class="z-input" value="3.5" step="0.1" onchange="applyThreshold()"></label>
 
-            <label>🔍 <input type="text" id="searchInput" class="search-input" placeholder="e.g. eval or .php" oninput="applySearchSoon()"></label>
+            <label>🔍 <input type="text" id="searchInput" class="search-input" placeholder="Search ( / )  e.g. eval -vendor score:>15" title="Search paths and tokens. Press / to jump here; ? lists the syntax." oninput="applySearchSoon()" onkeydown="if (event.key === 'Enter') applySearch();" spellcheck="false" autocomplete="off"></label>
+            <button type="button" class="search-help-btn" onclick="toggleSearchHelp()" title="Search syntax">?</button>
 
             <label><input type="checkbox" id="searchTokensOnly" onchange="applySearch()"> Tokens only</label>
 
             <button type="button" onclick="toggleInsights()">Insights</button>
             <button type="button" onclick="toggleCharts()">Charts</button>
             <button type="button" onclick="clearFilters()">Clear</button>
+        </div>
+
+        <div id="searchHelp" class="search-help">
+            <table>
+                <tr><td><code onclick="searchFor(this.textContent)">eval base64</code></td><td>both (in the path or a matched token)</td>
+                    <td><code onclick="searchFor(this.textContent)">eval OR assert</code></td><td>either one</td></tr>
+                <tr><td><code onclick="searchFor(this.textContent)">eval -vendor</code></td><td>leave out what matches <code>vendor</code></td>
+                    <td><code onclick="searchFor(this.textContent)">"wp-content/uploads"</code></td><td>exact text, spaces included</td></tr>
+                <tr><td><code onclick="searchFor(this.textContent)">/\.(jpe?g|png|gif)$/</code></td><td>regular expression</td>
+                    <td><code onclick="searchFor(this.textContent)">path:uploads name:index</code></td><td>path, or file name only</td></tr>
+                <tr><td><code onclick="searchFor(this.textContent)">token:eval ext:php</code></td><td>a matched token; last extension</td>
+                    <td><code onclick="searchFor(this.textContent)">md5:d41d8 owner:33 dup:index</code></td><td>hash, owner id, original of a duplicate</td></tr>
+                <tr><td><code onclick="searchFor(this.textContent)">score:>=15 ml:>80</code></td><td>threat score, ML % (also <code>rules:</code>)</td>
+                    <td><code onclick="searchFor(this.textContent)">size:>100k entropy:>5.5</code></td><td>size (k, m, g), entropy</td></tr>
+                <tr><td><code onclick="searchFor(this.textContent)">tokens:<20 hits:3..10</code></td><td>tokens; matched tokens; <code>a..b</code> is a range</td>
+                    <td><code onclick="searchFor(this.textContent)">date:7d</code></td><td>changed in the last 7 days (also <code>h</code>, <code>w</code>)</td></tr>
+                <tr><td><code onclick="searchFor(this.textContent)">date:2025-06 date:>=2025-01-01</code></td><td>a year, month or day; before or after it</td>
+                    <td><code onclick="searchFor(this.textContent)">is:critical -is:verified</code></td><td>anomaly, critical, blacklisted, verified, duplicate, htaccess, unreadable, gone, mhr, ml, mlonly, rare, entropy</td></tr>
+            </table>
         </div>
 
         <div id="insightsPanel" class="dashboard-panel">
@@ -3458,32 +3505,193 @@ if (isset($_POST['ajax_action'])) {
                 return (!_chartSelection || _chartSelection.has(d.path)) && passesTableFilters(d);
             }
 
-            // The search term lowercased, '' for none; worked out once per change, not per row
-            let _searchKey = null, _searchLower = '';
-            function searchTerm() {
-                if (currentSearch !== _searchKey) {
-                    _searchKey = currentSearch;
-                    _searchLower = currentSearch.trim() ? currentSearch.toLowerCase() : '';
+            // ── Search ─────────────────────────────────────────────────────────
+            // The search box's query, compiled once per change into one test per
+            // row (the syntax is listed in #searchHelp). Words must all match;
+            // OR between two takes either; -word leaves matches out; "quoted
+            // text" is one phrase; /regex/ is a regular expression; field:value
+            // looks at one property. A word without a field matches the path or a
+            // matched token (only tokens with "Tokens only"). Case is ignored.
+            const SEARCH_FLAGS = {
+                anomaly: d => d.isAnomaly, critical: d => isCritical(d), blacklisted: d => d.is_blacklisted, verified: d => !!d.verified,
+                duplicate: d => d.duplicate_of !== false, htaccess: d => d.is_htaccess, unreadable: d => d.is_unreadable && !d.gone,
+                gone: d => !!d.gone, mhr: d => !!d.mhr_hit, ml: d => d.mlPoints > 0, mlonly: d => d.mlOnly, rare: d => d.rareOwner,
+                entropy: d => !d.is_unreadable && d.entropy > HIGH_ENTROPY,
+            };
+            // Lowercased once per row (rows are rebuilt whenever they are rescored)
+            const lowerPath = d => d._pathLower !== undefined ? d._pathLower : (d._pathLower = d.path.toLowerCase());
+            const lowerTokens = d => d._tokensLower || (d._tokensLower = (d.matched_tokens || []).map(t => t.toLowerCase()));
+            const SEARCH_TEXT = {
+                path: d => [lowerPath(d)],
+                name: d => [lowerPath(d).slice(lowerPath(d).lastIndexOf('/') + 1)],
+                token: lowerTokens,
+                md5: d => [d.md5 || ''],
+                dup: d => d.duplicate_of === false ? [] : [d.duplicate_of.toLowerCase()],
+            };
+            const SEARCH_EXACT = {
+                ext: d => { const n = lowerPath(d), dot = n.lastIndexOf('.'); return dot > n.lastIndexOf('/') ? n.slice(dot + 1) : ''; },
+                owner: d => String(d.owner),
+            };
+            const SEARCH_NUMBERS = {
+                score: d => d.threatScore, rules: d => d.ruleScore, ml: d => d.mlScore === null || d.mlScore === undefined ? null : d.mlScore * 100,
+                size: d => d.size, entropy: d => d.entropy, tokens: d => d.total_tokens, hits: d => d.suspCount,
+            };
+            const SEARCH_ALIASES = { tok: 'token', t: 'token', file: 'name', hash: 'md5', mtime: 'date', modified: 'date', threat: 'score' };
+
+            // "x", "x..y", ">x", ">=x", "<x", "<=x", "=x" as a test of a number;
+            // unit maps a suffix (100k) or a date to numbers, as [start, end)
+            function rangeTest(value, unit) {
+                const m = /^(>=|<=|>|<|=)?(.+?)(?:\.\.(.+))?$/.exec(value);
+                if (!m) return null;
+                const a = unit(m[2]), b = m[3] !== undefined ? unit(m[3]) : null;
+                if (!a || (m[3] !== undefined && !b)) return null;
+                if (b) return x => x >= a[0] && x < b[1];
+                switch (m[1]) {
+                    case '>': return x => x >= a[1];
+                    case '>=': return x => x >= a[0];
+                    case '<': return x => x < a[0];
+                    case '<=': return x => x < a[1];
+                    default: return x => x >= a[0] && x < a[1];
                 }
-                return _searchLower;
+            }
+            // A number as the range it stands for: 15 is [15, 15], 100k [102400, 102400]
+            function numberUnit(text) {
+                const m = /^(-?\d+(?:\.\d+)?)([kmg])?b?$/i.exec(text);
+                if (!m) return null;
+                const n = parseFloat(m[1]) * Math.pow(1024, ' kmg'.indexOf((m[2] || ' ').toLowerCase()));
+                return [n, n + 1e-9];
+            }
+            // A date as the period it names, in Unix seconds: 2025, 2025-06, 2025-06-15
+            function dateUnit(text) {
+                const m = /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/.exec(text);
+                if (!m) return null;
+                const y = +m[1], mo = m[2] ? m[2] - 1 : 0, day = m[3] ? +m[3] : 1;
+                const start = new Date(y, mo, day), end = m[3] ? new Date(y, mo, day + 1) : m[2] ? new Date(y, mo + 1, 1) : new Date(y + 1, 0, 1);
+                return [start.getTime() / 1000, end.getTime() / 1000];
             }
 
+            // A /regex/ or text as a test of one lowercased string
+            function textTest(value, isRegex, exact) {
+                if (isRegex) {
+                    const re = new RegExp(value, 'i');
+                    return s => re.test(s);
+                }
+                const v = value.toLowerCase();
+                return exact ? s => s === v : s => s.includes(v);
+            }
+
+            // One search term (field, value) as a test of a row; throws a message
+            function searchTerm(field, value, isRegex, tokensOnly) {
+                if (field === null) {
+                    const t = textTest(value, isRegex, false);
+                    return tokensOnly ? d => lowerTokens(d).some(t) : d => t(lowerPath(d)) || lowerTokens(d).some(t);
+                }
+                if (field === 'is') {
+                    const flag = SEARCH_FLAGS[value.toLowerCase()];
+                    if (!flag) throw 'is:' + value + ' isn\u2019t known (try ' + Object.keys(SEARCH_FLAGS).join(', ') + ')';
+                    return flag;
+                }
+                if (SEARCH_TEXT[field]) { const t = textTest(value, isRegex, false), get = SEARCH_TEXT[field]; return d => get(d).some(t); }
+                if (SEARCH_EXACT[field]) { const t = textTest(value, isRegex, !isRegex), get = SEARCH_EXACT[field]; return d => t(get(d)); }
+                if (field === 'date') {
+                    const recent = /^(\d+(?:\.\d+)?)([hdw])$/i.exec(value);
+                    if (recent) {
+                        const since = Date.now() / 1000 - recent[1] * { h: 3600, d: 86400, w: 604800 }[recent[2].toLowerCase()];
+                        return d => d.mtime >= since;
+                    }
+                    const t = rangeTest(value, dateUnit);
+                    if (!t) throw 'date:' + value + ' isn\u2019t a date (2025, 2025-06, 2025-06-15, >=2025-01, 7d)';
+                    return d => !!d.mtime && t(d.mtime);
+                }
+                const t = rangeTest(value, numberUnit), get = SEARCH_NUMBERS[field];
+                if (!t) throw field + ':' + value + ' isn\u2019t a number or range (15, >15, <=0.5, 8..15' + (field === 'size' ? ', >100k' : '') + ')';
+                return d => { const x = get(d); return x !== null && x !== undefined && t(x); };
+            }
+
+            /**
+             * Compile a search query. Returns { match: row => bool, or null when
+             * the query is empty, errors: [message] }; a term that doesn't compile
+             * is left out and reported.
+             */
+            function compileSearch(query, tokensOnly) {
+                const groups = [], errors = [];
+                const re = /(-)?(?:([a-z]+):)?("(?:[^"\\]|\\.)*"?|\/(?:[^\/\\\s]|\\.)+\/(?=\s|$)|\S+)/gi;
+                let m, or = false;
+                while ((m = re.exec(query))) {
+                    if (m[0] === 'OR' || m[0] === '|') { or = groups.length > 0; continue; }
+                    let field = m[2] ? m[2].toLowerCase() : null, raw = m[3], isRegex = false;
+                    field = field && (SEARCH_ALIASES[field] || field);
+                    const known = field === null || field === 'is' || field === 'date' || SEARCH_TEXT[field] || SEARCH_EXACT[field] || SEARCH_NUMBERS[field];
+                    if (!known) { raw = m[2] + ':' + raw; field = null; } // "c:\x" is text
+                    let value = raw;
+                    if (raw[0] === '"') value = raw.replace(/^"|"$/g, '').replace(/\\(.)/g, '$1');
+                    else if (raw.length > 2 && raw[0] === '/' && raw[raw.length - 1] === '/' && field !== 'date') { value = raw.slice(1, -1); isRegex = true; }
+                    if (value === '') continue;
+                    try {
+                        const test = searchTerm(field, value, isRegex, tokensOnly);
+                        const term = m[1] ? d => !test(d) : test;
+                        if (or) groups[groups.length - 1].push(term);
+                        else groups.push([term]);
+                    } catch (e) {
+                        errors.push(typeof e === 'string' ? e : 'Not a valid regular expression: /' + value + '/');
+                    }
+                    or = false;
+                }
+                return {
+                    match: groups.length ? d => groups.every(g => g.some(t => t(d))) : null,
+                    errors: errors,
+                };
+            }
+
+            // The compiled current search, rebuilt only when the query changes
+            let _searchKey = null, _searchMatch = null;
+            function searchMatcher() {
+                const key = searchTokensOnly + ' ' + currentSearch;
+                if (key !== _searchKey) {
+                    _searchKey = key;
+                    const c = compileSearch(currentSearch, searchTokensOnly);
+                    _searchMatch = c.match;
+                    const input = document.getElementById('searchInput');
+                    input.classList.toggle('search-error', c.errors.length > 0);
+                    input.title = c.errors.length ? c.errors.join('\n') : SEARCH_TITLE;
+                }
+                return _searchMatch;
+            }
+            const SEARCH_TITLE = 'Search paths and tokens. Press / to jump here; ? lists the syntax.';
+
             function passesTableFilters(d) {
-                if (currentSearch === '__BLACKLIST__') return d.is_blacklisted === true;
                 if (currentFilterMode === 'anomalies' && !d.isAnomaly) return false;
                 if (currentFilterMode === 'critical' && !isCritical(d)) return false;
                 if (currentFilterMode === 'obfuscated' && (d.entropy <= HIGH_ENTROPY || d.is_unreadable)) return false;
-
-                const term = searchTerm();
-                if (!term) return true;
-                // Lowercased once per row (rows are rebuilt whenever they are rescored)
-                if (d._pathLower === undefined) {
-                    d._pathLower = d.path.toLowerCase();
-                    d._tokensLower = (d.matched_tokens || []).map(t => t.toLowerCase());
-                }
-                if (!searchTokensOnly && d._pathLower.includes(term)) return true;
-                return d._tokensLower.some(t => t.includes(term));
+                const match = searchMatcher();
+                return !match || match(d);
             }
+
+            function toggleSearchHelp() {
+                const help = document.getElementById('searchHelp');
+                help.style.display = help.style.display === 'block' ? 'none' : 'block';
+            }
+
+            // An example in the syntax list, clicked: search for it
+            function searchFor(query) {
+                document.getElementById('searchInput').value = query;
+                applySearch();
+                document.getElementById('searchInput').focus();
+            }
+
+            // "/" anywhere but in a text field jumps to the search box; Escape
+            // there clears it, then leaves it
+            document.addEventListener('keydown', function (e) {
+                const el = document.activeElement, typing = el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));
+                if (e.key === '/' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                    e.preventDefault();
+                    const input = document.getElementById('searchInput');
+                    input.focus();
+                    input.select();
+                } else if (e.key === 'Escape' && el && el.id === 'searchInput') {
+                    if (el.value) { el.value = ''; applySearch(); } else el.blur();
+                }
+            });
 
             // ── Unified warning panel ──────────────────────────────────────────
             // Every failed action, warning, and error — client or server side —
@@ -3717,13 +3925,19 @@ if (isset($_POST['ajax_action'])) {
                 syncCharts(data);
             }
 
-            // The table draws TABLE_PAGE_ROWS rows at a time: a big site's
+            // The table draws TABLE_PAGE_ROWS rows at a time, and the next ones
+            // as the end of the table scrolls near (infinite scroll; the button
+            // is for a browser without IntersectionObserver): a big site's
             // hundreds of thousands at once would stall the browser. Search,
             // filters, sorting, the charts and Copy still cover every row.
             let _tableRows = [], _tableDrawn = 0;
+            const _moreObserver = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver(function (entries) {
+                if (entries.some(e => e.isIntersecting)) showMoreRows();
+            }, { rootMargin: '800px 0px' });
             function showMoreRows() {
                 const more = document.getElementById('showMoreRows');
                 if (more) more.remove();
+                if (_moreObserver) _moreObserver.disconnect();
                 const next = TABLE_PAGE_ROWS > 0 ? Math.min(_tableRows.length, _tableDrawn + TABLE_PAGE_ROWS) : _tableRows.length;
                 const result = document.getElementById('result');
                 result.insertAdjacentHTML('beforeend', _tableRows.slice(_tableDrawn, next).map(rowHtml).join(''));
@@ -3732,7 +3946,8 @@ if (isset($_POST['ajax_action'])) {
                 _tableDrawn = next;
                 if (next < _tableRows.length) {
                     result.insertAdjacentHTML('beforeend', `<tr id="showMoreRows"><td style="text-align:center;padding:10px;color:#aaa;">
-                        Showing ${next} of ${_tableRows.length} files. <button type="button" onclick="showMoreRows()">Show ${Math.min(TABLE_PAGE_ROWS, _tableRows.length - next)} more</button></td></tr>`);
+                        Showing ${next} of ${_tableRows.length} files; scroll for more. <button type="button" onclick="showMoreRows()">Show ${Math.min(TABLE_PAGE_ROWS, _tableRows.length - next)} more</button></td></tr>`);
+                    if (_moreObserver) _moreObserver.observe(document.getElementById('showMoreRows'));
                 }
             }
 
@@ -3936,7 +4151,7 @@ if (isset($_POST['ajax_action'])) {
                 if (type === 'critical') {
                     currentFilterMode = 'critical';
                 } else if (type === 'blacklisted') {
-                    currentSearch = '__BLACKLIST__';
+                    document.getElementById('searchInput').value = currentSearch = 'is:blacklisted';
                     currentFilterMode = 'all';
                 } else if (type === 'anomaly') {
                     currentFilterMode = 'anomalies';
@@ -3948,8 +4163,7 @@ if (isset($_POST['ajax_action'])) {
             }
 
             function filterByPath(path) {
-                document.getElementById('searchInput').value = path;
-                currentSearch = path;
+                document.getElementById('searchInput').value = currentSearch = 'path:"' + path.replace(/["\\]/g, '\\$&') + '"';
                 searchTokensOnly = false;
                 document.getElementById('searchTokensOnly').checked = false;
                 currentFilterMode = 'all';
