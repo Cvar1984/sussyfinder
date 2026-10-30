@@ -22,7 +22,7 @@ foreach (explode("\0", file_get_contents($SUSSY_CASES)) as $src) {
 }
 
 $GLOBALS['phpWarnings'] = array();
-$listing = listFiles($SUSSY_FIXTURE, $pattern, '', 0);
+$listing = listFiles($SUSSY_FIXTURE, $pattern, '', 0, 0);
 $names = array();
 foreach ($listing['file_readable'] as $file) {
     $names[] = rawurlencode(basename($file));
@@ -34,7 +34,7 @@ $paged = array();
 $after = '';
 $pages = 0;
 do {
-    $page = listFiles($SUSSY_FIXTURE, $pattern, $after, 1);
+    $page = listFiles($SUSSY_FIXTURE, $pattern, $after, 1, 10);
     $paged = array_merge($paged, $page['file_readable'], $page['file_not_readable']);
     $after = $page['next'];
 } while ($after !== null && ++$pages < 100);
@@ -43,7 +43,7 @@ sort($paged);
 sort($full);
 $inside = true;
 foreach (array('..', '../..', '%2Fetc', '%2E%2E%2F%2E%2E', 'out', 'out/etc', 'sub/../..', 'zzz') as $cursor) {
-    $page = listFiles($SUSSY_FIXTURE, $pattern, $cursor, 1);
+    $page = listFiles($SUSSY_FIXTURE, $pattern, $cursor, 1, 10);
     foreach (array_merge($page['file_readable'], $page['file_not_readable']) as $file) {
         $inside = $inside && strpos($file, realpath($SUSSY_FIXTURE) . '/') === 0;
     }

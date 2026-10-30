@@ -654,7 +654,7 @@ function listSeconds()
 
 /**
  * List the files under $path whose name matches $pattern, a page at a time.
- * A page ends after $maxFiles files or listSeconds(), whichever comes first,
+ * A page ends after $maxFiles files or $seconds, whichever comes first,
  * so a big tree is listed in several requests however short the host's time
  * limit, and the server keeps nothing between them: 'next' names where the
  * next page starts. It is only ever compared with the names a directory
@@ -664,10 +664,11 @@ function listSeconds()
  * @param string $pattern complete regex, matched against each file's name
  * @param string $after the previous page's 'next', '' for the first page
  * @param int $maxFiles files per page, 0 for every file in one
+ * @param int $seconds when a page ends at the latest (with $maxFiles > 0)
  * @return array 'file_readable' (newest first) and 'file_not_readable' path
  *  lists, and 'next', null after the last page
  */
-function listFiles($path, $pattern, $after, $maxFiles)
+function listFiles($path, $pattern, $after, $maxFiles, $seconds)
 {
     $page = array('file_readable' => array(), 'file_not_readable' => array());
     $root = realpath($path);
@@ -680,7 +681,7 @@ function listFiles($path, $pattern, $after, $maxFiles)
         return $page + array('next' => null);
     }
     $page += array('root' => str_replace(DIRECTORY_SEPARATOR, '/', $root), 'pattern' => $pattern, 'max' => $maxFiles,
-        'deadline' => time() + listSeconds(), 'count' => 0, 'handled' => 0, 'last' => '');
+        'deadline' => time() + $seconds, 'count' => 0, 'handled' => 0, 'last' => '');
     $done = listWalk($page['root'], '', $after === '' ? array() : array_map('rawurldecode', explode('/', $after)), $page);
     @array_multisort(array_map('filemtime', $page['file_readable']), SORT_DESC, $page['file_readable']);
     return array('file_readable' => $page['file_readable'], 'file_not_readable' => $page['file_not_readable'],
@@ -2149,7 +2150,8 @@ function mhrCredentials()
 /**
  * List one page of the files to analyse (phase 1; listFiles()): the page
  * starts phase 2 on it while asking for the next one ("after" = this reply's
- * "next"), until "next" is null. A big site has hundreds of thousands, so each
+ * "next"), until "next" is null. "limit" and "seconds" can make a page
+ * smaller than LIST_PAGE_FILES and listSeconds(), not larger. A big site has hundreds of thousands, so each
  * path isn't sent whole: "dirs" holds every directory of the page once, and
  * "readable" / "not_readable" are flat [dir index, name, dir index, name, ...]
  * lists, joined by the page as dirs[i] + '/' + name. Directories keep "/"
@@ -2160,7 +2162,13 @@ function mhrCredentials()
  */
 function actionScan()
 {
-    $result = listFiles(inputValue('dir', getcwd()), $GLOBALS['pattern'], (string) inputValue('after', ''), LIST_PAGE_FILES);
+    // The page asks for smaller, shorter pages after one got no answer (a
+    // host or proxy that cuts long requests off); never larger than set here
+    $max = (int) inputValue('limit', 0);
+    $max = $max > 0 && (LIST_PAGE_FILES <= 0 || $max < LIST_PAGE_FILES) ? $max : LIST_PAGE_FILES;
+    $seconds = (int) inputValue('seconds', 0);
+    $seconds = $seconds > 0 ? min($seconds, listSeconds()) : listSeconds();
+    $result = listFiles(inputValue('dir', getcwd()), $GLOBALS['pattern'], (string) inputValue('after', ''), $max, $seconds);
     $dirs = array();
     $index = array();
     $lists = array('readable' => $result['file_readable'], 'not_readable' => $result['file_not_readable']);
@@ -2765,6 +2773,21 @@ if (isset($_POST['ajax_action'])) {
             }
 
             /* Copy MD5 button */
+            .near-btn {
+                cursor: pointer;
+                margin-left: 4px;
+                font-size: 11px;
+                opacity: 0.7;
+            }
+
+            .near-btn:hover {
+                opacity: 1;
+            }
+
+            #result tr.row-near td {
+                outline: 1px solid #ffaa00;
+            }
+
             .copy-hash-btn {
                 cursor: pointer;
                 color: #4a8bc2;
@@ -2846,6 +2869,7 @@ if (isset($_POST['ajax_action'])) {
             'const mhrEnabled = ' . jsonEncode((bool) _MHR_) . ";\n" .
             'const MHR_BATCH = ' . jsonEncode(MHR_BATCH) . ";\n" .
             'const MAX_PARALLEL = ' . jsonEncode(max(1, (int) MAX_PARALLEL)) . ";\n" .
+            'const LIST_PAGE = ' . jsonEncode(array('files' => LIST_PAGE_FILES > 0 ? (int) LIST_PAGE_FILES : 20000, 'seconds' => listSeconds())) . ";\n" .
             'const TABLE_PAGE_ROWS = ' . jsonEncode((int) TABLE_PAGE_ROWS) . ";\n" .
             'const ANOMALIES_ONLY_ABOVE = ' . jsonEncode((int) ANOMALIES_ONLY_ABOVE) . ";\n" .
             'const serverWarnings = ' . jsonEncode(array_values($GLOBALS['phpWarnings'])) . ";</script>\n";
@@ -2901,6 +2925,8 @@ if (isset($_POST['ajax_action'])) {
                     <td><code onclick="searchFor(this.textContent)">size:>100k entropy:>5.5</code></td><td>size (k, m, g), entropy</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">tokens:<20 hits:3..10</code></td><td>tokens; matched tokens; <code>a..b</code> is a range</td>
                     <td><code onclick="searchFor(this.textContent)">date:7d</code></td><td>changed in the last 7 days (also <code>h</code>, <code>w</code>)</td></tr>
+                <tr><td><code>near:"/path/to/file.php"</code></td><td>files in its folder, or changed within an hour of it (the 🧭 on a row)</td>
+                    <td><code>dir:"/path/to/folder"</code> <code onclick="searchFor(this.textContent)">date:2025-06-15T14..2025-06-15T16</code></td><td>exactly that folder; a time range (hour or minute)</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">date:2025-06 date:>=2025-01-01</code></td><td>a year, month or day; before or after it</td>
                     <td><code onclick="searchFor(this.textContent)">is:critical -is:verified</code></td><td>anomaly, critical, blacklisted, verified, duplicate, htaccess, unreadable, gone, mhr, ml, mlonly, rare, entropy</td></tr>
             </table>
@@ -3414,8 +3440,8 @@ if (isset($_POST['ajax_action'])) {
             }
 
             // Every AJAX call goes through here: fields is {name: value}, the result
-            // the parsed JSON. It fails with a TypeError when the request never got
-            // an answer, an HttpError for any other status than 200, and a
+            // the parsed JSON. It fails with a NoAnswer when the request got no
+            // answer, an HttpError for any other status than 200, and a
             // SyntaxError when a 200 reply isn't JSON (e.g. a host's security rule
             // answered with an HTML page). The custom header is the server's CSRF
             // check (another site can't send it).
@@ -3423,11 +3449,24 @@ if (isset($_POST['ajax_action'])) {
                 var body = new URLSearchParams();
                 Object.keys(fields).forEach(function (name) { body.set(name, fields[name]); });
                 return fetch('', { method: 'POST', body: body, headers: { 'X-Sussy-Request': '1' } })
+                    .catch(function (err) { throw new NoAnswer(err); })
                     .then(function (r) {
-                        if (r.ok) return r.json();
+                        if (r.ok) return r.json().catch(function (err) {
+                            // A reply cut off mid-body is no answer either
+                            throw err instanceof SyntaxError ? err : new NoAnswer(err);
+                        });
                         throw new HttpError(r.status, r.headers.get('Retry-After'));
                     });
             }
+
+            // The connection failed, was reset or was cut off: Chrome says
+            // TypeError ("Failed to fetch"), Firefox TypeError or, for a reset
+            // (NS_ERROR_NET_RESET), AbortError ("The operation was aborted")
+            function NoAnswer(cause) {
+                this.name = 'NoAnswer';
+                this.message = 'no answer from the server (' + (cause && cause.message ? cause.message : 'connection failed') + ')';
+            }
+            NoAnswer.prototype = Object.create(Error.prototype);
 
             function HttpError(status, retryAfter) {
                 this.name = 'HttpError';
@@ -3437,11 +3476,11 @@ if (isset($_POST['ajax_action'])) {
             }
             HttpError.prototype = Object.create(Error.prototype);
 
-            // The host is busy, not the batch at fault: the account's process or
-            // request limit (429, 503, 508 on CloudLinux), a proxy in front of PHP
-            // (502, 504), or no answer at all. Retried whole, later, never split.
+            // The host says it is busy, not that the batch is at fault: the
+            // account's process or request limit (429, 503, 508 on CloudLinux) or
+            // a proxy in front of PHP (502, 504). Retried whole, later.
             function isOverloaded(err) {
-                return err instanceof TypeError || (err instanceof HttpError && [429, 502, 503, 504, 508].indexOf(err.status) !== -1);
+                return err instanceof HttpError && [429, 502, 503, 504, 508].indexOf(err.status) !== -1;
             }
 
             // Paths arrive percent-encoded (byte-exact even when not valid UTF-8);
@@ -3454,10 +3493,11 @@ if (isset($_POST['ajax_action'])) {
             // onclick="f('...')": the browser undoes HTML escaping before running
             // inline JS, so a file name could break out of the string literal
             document.addEventListener('click', function (e) {
-                var el = e.target.closest ? e.target.closest('[data-copy], [data-vt], [data-filter-path]') : null;
+                var el = e.target.closest ? e.target.closest('[data-copy], [data-vt], [data-near], [data-filter-path]') : null;
                 if (!el) return;
                 if (el.hasAttribute('data-copy')) copyText(el.getAttribute('data-copy'));
                 else if (el.hasAttribute('data-vt')) checkVT(el.getAttribute('data-vt'));
+                else if (el.hasAttribute('data-near')) searchNear(el.getAttribute('data-near'));
                 else filterByPath(el.getAttribute('data-filter-path'));
             });
 
@@ -3530,12 +3570,15 @@ if (isset($_POST['ajax_action'])) {
             };
             const SEARCH_EXACT = {
                 ext: d => { const n = lowerPath(d), dot = n.lastIndexOf('.'); return dot > n.lastIndexOf('/') ? n.slice(dot + 1) : ''; },
+                dir: d => dirOf(lowerPath(d)),
                 owner: d => String(d.owner),
             };
             const SEARCH_NUMBERS = {
                 score: d => d.threatScore, rules: d => d.ruleScore, ml: d => d.mlScore === null || d.mlScore === undefined ? null : d.mlScore * 100,
                 size: d => d.size, entropy: d => d.entropy, tokens: d => d.total_tokens, hits: d => d.suspCount,
             };
+            const dirOf = path => path.slice(0, path.lastIndexOf('/'));
+            const NEAR_HOURS = 1;
             const SEARCH_ALIASES = { tok: 'token', t: 'token', file: 'name', hash: 'md5', mtime: 'date', modified: 'date', threat: 'score' };
 
             // "x", "x..y", ">x", ">=x", "<x", "<=x", "=x" as a test of a number;
@@ -3561,13 +3604,17 @@ if (isset($_POST['ajax_action'])) {
                 const n = parseFloat(m[1]) * Math.pow(1024, ' kmg'.indexOf((m[2] || ' ').toLowerCase()));
                 return [n, n + 1e-9];
             }
-            // A date as the period it names, in Unix seconds: 2025, 2025-06, 2025-06-15
+            // A date as the period it names, in Unix seconds, local time: 2025,
+            // 2025-06, 2025-06-15, 2025-06-15T14 (an hour), 2025-06-15T14:05 (a minute)
             function dateUnit(text) {
-                const m = /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?$/.exec(text);
-                if (!m) return null;
-                const y = +m[1], mo = m[2] ? m[2] - 1 : 0, day = m[3] ? +m[3] : 1;
-                const start = new Date(y, mo, day), end = m[3] ? new Date(y, mo, day + 1) : m[2] ? new Date(y, mo + 1, 1) : new Date(y + 1, 0, 1);
-                return [start.getTime() / 1000, end.getTime() / 1000];
+                const m = /^(\d{4})(?:-(\d{1,2}))?(?:-(\d{1,2}))?(?:T(\d{1,2})(?::(\d{1,2}))?)?$/i.exec(text);
+                if (!m || (m[4] !== undefined && m[3] === undefined)) return null;
+                const p = [+m[1], m[2] ? m[2] - 1 : 0, m[3] ? +m[3] : 1, m[4] ? +m[4] : 0, m[5] ? +m[5] : 0];
+                const last = m[5] !== undefined ? 4 : m[4] !== undefined ? 3 : m[3] !== undefined ? 2 : m[2] !== undefined ? 1 : 0;
+                const end = p.slice();
+                end[last]++;
+                const at = q => new Date(q[0], q[1], q[2], q[3], q[4]).getTime() / 1000;
+                return [at(p), at(end)];
             }
 
             // A /regex/ or text as a test of one lowercased string
@@ -3593,6 +3640,14 @@ if (isset($_POST['ajax_action'])) {
                 }
                 if (SEARCH_TEXT[field]) { const t = textTest(value, isRegex, false), get = SEARCH_TEXT[field]; return d => get(d).some(t); }
                 if (SEARCH_EXACT[field]) { const t = textTest(value, isRegex, !isRegex), get = SEARCH_EXACT[field]; return d => t(get(d)); }
+                if (field === 'near') {
+                    // The files around one: in its folder, or changed within
+                    // NEAR_HOURS of it (an intruder's other files usually are)
+                    const v = value.toLowerCase(), target = analyzedData.find(d => lowerPath(d) === v);
+                    if (!target) throw 'near: no scanned file is ' + value;
+                    const dir = dirOf(v), t = target.mtime;
+                    return d => dirOf(lowerPath(d)) === dir || (!!t && !!d.mtime && Math.abs(d.mtime - t) <= NEAR_HOURS * 3600);
+                }
                 if (field === 'date') {
                     const recent = /^(\d+(?:\.\d+)?)([hdw])$/i.exec(value);
                     if (recent) {
@@ -3621,11 +3676,11 @@ if (isset($_POST['ajax_action'])) {
                     if (m[0] === 'OR' || m[0] === '|') { or = groups.length > 0; continue; }
                     let field = m[2] ? m[2].toLowerCase() : null, raw = m[3], isRegex = false;
                     field = field && (SEARCH_ALIASES[field] || field);
-                    const known = field === null || field === 'is' || field === 'date' || SEARCH_TEXT[field] || SEARCH_EXACT[field] || SEARCH_NUMBERS[field];
+                    const known = field === null || field === 'is' || field === 'date' || field === 'near' || SEARCH_TEXT[field] || SEARCH_EXACT[field] || SEARCH_NUMBERS[field];
                     if (!known) { raw = m[2] + ':' + raw; field = null; } // "c:\x" is text
                     let value = raw;
                     if (raw[0] === '"') value = raw.replace(/^"|"$/g, '').replace(/\\(.)/g, '$1');
-                    else if (raw.length > 2 && raw[0] === '/' && raw[raw.length - 1] === '/' && field !== 'date') { value = raw.slice(1, -1); isRegex = true; }
+                    else if (raw.length > 2 && raw[0] === '/' && raw[raw.length - 1] === '/' && field !== 'date' && field !== 'near') { value = raw.slice(1, -1); isRegex = true; }
                     if (value === '') continue;
                     try {
                         const test = searchTerm(field, value, isRegex, tokensOnly);
@@ -3643,12 +3698,14 @@ if (isset($_POST['ajax_action'])) {
                 };
             }
 
-            // The compiled current search, rebuilt only when the query changes
-            let _searchKey = null, _searchMatch = null;
+            // The compiled current search, rebuilt only when the query or the
+            // rows change (near: looks its file up among them)
+            let _searchKey = null, _searchData = null, _searchMatch = null;
             function searchMatcher() {
                 const key = searchTokensOnly + ' ' + currentSearch;
-                if (key !== _searchKey) {
+                if (key !== _searchKey || _searchData !== analyzedData) {
                     _searchKey = key;
+                    _searchData = analyzedData;
                     const c = compileSearch(currentSearch, searchTokensOnly);
                     _searchMatch = c.match;
                     const input = document.getElementById('searchInput');
@@ -3670,6 +3727,27 @@ if (isset($_POST['ajax_action'])) {
             function toggleSearchHelp() {
                 const help = document.getElementById('searchHelp');
                 help.style.display = help.style.display === 'block' ? 'none' : 'block';
+            }
+
+            // Text as one search value: quoted, so spaces and colons in it stay its own
+            function quoteQuery(text) {
+                return '"' + text.replace(/["\\]/g, '\\$&') + '"';
+            }
+
+            // A row's 🧭: the files near it, newest first, the file itself marked.
+            // Every filter is cleared so nothing near it is hidden.
+            function searchNear(path) {
+                document.getElementById('severityFilter').value = currentFilterMode = 'all';
+                document.getElementById('sortSelect').value = currentSort = 'mtime';
+                document.getElementById('searchTokensOnly').checked = searchTokensOnly = false;
+                _chartSelection = null;
+                document.getElementById('searchInput').value = currentSearch = 'near:' + quoteQuery(path);
+                renderTable(analyzedData);
+                const tr = _rowByPath.get(path);
+                if (tr) {
+                    tr.classList.add('row-near');
+                    tr.scrollIntoView({ block: 'center' });
+                }
             }
 
             // An example in the syntax list, clicked: search for it
@@ -3891,7 +3969,8 @@ if (isset($_POST['ajax_action'])) {
                     md5Btn = `<span class="copy-hash-btn" data-copy="${escapeHtml(d.md5)}" title="Copy MD5 hash">📋</span>`;
                     vtBadge = `<span class="vt-badge" data-vt="${escapeHtml(d.md5)}" title="check on VirusTotal">VT</span>`;
                 }
-                let mainLine = badge + fileLink + md5Btn + vtBadge;
+                const nearBtn = `<span class="near-btn" data-near="${escapeHtml(d.path)}" title="Files near this one: in the same folder, or changed within ${NEAR_HOURS} h of it">🧭</span>`;
+                let mainLine = badge + fileLink + md5Btn + vtBadge + nearBtn;
                 if (status) mainLine += ' (' + status + ')';
 
                 return `<tr data-path="${escapeHtml(d.path)}">
@@ -4163,7 +4242,7 @@ if (isset($_POST['ajax_action'])) {
             }
 
             function filterByPath(path) {
-                document.getElementById('searchInput').value = currentSearch = 'path:"' + path.replace(/["\\]/g, '\\$&') + '"';
+                document.getElementById('searchInput').value = currentSearch = 'path:' + quoteQuery(path);
                 searchTokensOnly = false;
                 document.getElementById('searchTokensOnly').checked = false;
                 currentFilterMode = 'all';
@@ -4829,6 +4908,7 @@ if (isset($_POST['ajax_action'])) {
                 var scan = _scan = {
                     dir: dir, chunkSize: getChunkSize(),
                     after: '', listing: false, listDone: false, listed: 0, listRetries: 0,
+                    pageFiles: LIST_PAGE.files, pageSeconds: LIST_PAGE.seconds,
                     chunks: [], sent: 0,      // batches listed, and how many have gone out
                     results: new Map(),       // batch index => its rows, until applied
                     applied: 0,               // batches applied, in order
@@ -4866,7 +4946,7 @@ if (isset($_POST['ajax_action'])) {
             function listNextPage(scan) {
                 scan.listing = true;
                 scan.inFlight++;
-                postAction({ ajax_action: 'scan', dir: scan.dir, after: scan.after })
+                postAction({ ajax_action: 'scan', dir: scan.dir, after: scan.after, limit: scan.pageFiles, seconds: scan.pageSeconds })
                     .then(function (data) {
                         if (scan !== _scan) return;
                         reportServerWarnings(data);
@@ -4877,6 +4957,13 @@ if (isset($_POST['ajax_action'])) {
                     })
                     .catch(function (err) {
                         if (scan !== _scan) return;
+                        // Cut off: the host or a proxy in front of it ends long
+                        // requests, so ask for pages half as big and half as long
+                        if (err instanceof NoAnswer && scan.listRetries < 8) {
+                            scan.pageFiles = Math.max(Math.min(100, scan.pageFiles), Math.floor(scan.pageFiles / 2));
+                            scan.pageSeconds = Math.max(1, Math.floor(scan.pageSeconds / 2));
+                            return hostBusy(scan, err, scan.listRetries++);
+                        }
                         if (isOverloaded(err) && scan.listRetries < 5) {
                             return hostBusy(scan, err, scan.listRetries++);
                         }
@@ -4932,12 +5019,13 @@ if (isset($_POST['ajax_action'])) {
 
             // One 'process' request for a batch of paths; resolves to its rows,
             // or [] when they couldn't be analysed (the reason is logged). A busy
-            // host gets the batch again later, whole. Any other failure usually
-            // means one path tripped something server-side (a WAF/security rule,
-            // an open_basedir restriction, a crash on one file) that failed the
-            // whole request, so the batch is split in half and each half retried,
-            // down to single files: a batch of 500 with one bad file costs a
-            // handful of requests instead of 500.
+            // host gets the batch again later, whole; so does one that gave no
+            // answer, once. Any other failure, or no answer twice, usually means
+            // one path tripped something server-side (a WAF/security rule, an
+            // open_basedir restriction, PHP crashing or killed on one file) that
+            // failed the whole request, so the batch is split in half and each
+            // half retried, down to single files: a batch of 500 with one bad
+            // file costs a handful of requests instead of 500.
             function processBatch(scan, paths, isNotReadable, attempt) {
                 return postAction({
                     ajax_action: 'process',
@@ -4959,11 +5047,12 @@ if (isset($_POST['ajax_action'])) {
                     })
                     .catch(function (err) {
                         if (scan !== _scan) return [];
-                        if (isOverloaded(err) && attempt < 5) {
+                        if ((isOverloaded(err) && attempt < 5) || (err instanceof NoAnswer && attempt < 1)) {
                             return hostBusy(scan, err, attempt).then(function () { return processBatch(scan, paths, isNotReadable, attempt + 1); });
                         }
                         if (paths.length === 1 || isOverloaded(err)) {
-                            logWarning((paths.length === 1 ? 'Skipped ' + decodePath(paths[0]) : 'Skipped ' + paths.length + ' files') + ' — ' + err.message, 'error');
+                            logWarning((paths.length === 1 ? 'Skipped ' + decodePath(paths[0]) : 'Skipped ' + paths.length + ' files') + ' — ' + err.message +
+                                (paths.length === 1 && err instanceof NoAnswer ? '; the server may crash or be stopped on this file' : ''), 'error');
                             return [];
                         }
                         var mid = Math.ceil(paths.length / 2);
@@ -4982,7 +5071,8 @@ if (isset($_POST['ajax_action'])) {
                 var ms = Math.min(30000, isNaN(seconds) ? 1000 * Math.pow(2, attempt) * (0.75 + Math.random() / 2) : seconds * 1000);
                 if (!scan.busyWarned) {
                     scan.busyWarned = true;
-                    logWarning('The host is busy (' + err.message + '): sending fewer requests at once and retrying.', 'warning');
+                    logWarning((err instanceof NoAnswer ? 'A request got ' + err.message : 'The host is busy (' + err.message + ')') +
+                        ': sending fewer requests at once, smaller listing pages, and retrying.', 'warning');
                 }
                 return new Promise(function (resolve) { setTimeout(resolve, ms); });
             }

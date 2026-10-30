@@ -24,7 +24,7 @@ foreach (array($SUSSY_SKIP, $SUSSY_STATE . '/done') as $list) {
 $rows = fopen($SUSSY_STATE . '/rows', 'a');
 $done = fopen($SUSSY_STATE . '/done', 'a');
 foreach ($SUSSY_DIRS as $dir) {
-    $listing = listFiles($dir, $pattern, '', 0);
+    $listing = listFiles($dir, $pattern, '', 0, 0);
     $seen = array();
     foreach ($listing['file_readable'] as $file) {
         if (isset($skip[$file])) {

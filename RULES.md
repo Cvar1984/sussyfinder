@@ -126,8 +126,12 @@ one self-contained file, no dependencies. `README.md` documents the maths
 - **The scan in the page** (`pumpScan()`): listing pages and `process`
   batches share `MAX_PARALLEL` request slots, starting at 1 (the first batch
   fills the download cache), +1 per 10 clean batches, halved on a busy
-  reply (`isOverloaded()`: 429/502/503/504/508 or no answer), which is
-  retried whole after a wait; any other failure bisects the batch. Results
+  reply (`isOverloaded()`: 429/502/503/504/508), which is retried whole
+  after a wait, or on no answer (`NoAnswer`: a failed, reset or cut-off
+  connection; Firefox reports a reset as AbortError), retried whole once,
+  then bisected like any other failure. A listing page with no answer is
+  asked for again with half the `limit` and `seconds` (the server never
+  goes above its own `LIST_PAGE_FILES` / `listSeconds()`). Results
   are applied in batch order. A row is passed through `withMlScore()` as it
   arrives: the ML score is stored and the bitmaps dropped, so scoring reads
   `mlScore`, never `ml_features`. When the scan ends `markDuplicates()` sets
@@ -151,7 +155,8 @@ one self-contained file, no dependencies. `README.md` documents the maths
 - **Search** (`compileSearch()`): the query is compiled once per change into
   one test per row (`searchMatcher()`); `passesTableFilters()` only calls it.
   A new field goes in `SEARCH_TEXT` / `SEARCH_EXACT` / `SEARCH_NUMBERS` /
-  `SEARCH_FLAGS` and in the `#searchHelp` table. An unknown `field:` is plain
+  `SEARCH_FLAGS` and in the `#searchHelp` table. `near:` looks its file up in
+  `analyzedData`, so the compiled query is also rebuilt when that changes. An unknown `field:` is plain
   text (`c:\x`). Bad terms are left out and named in the box's tooltip.
   Other code that sets a search writes a query (`is:blacklisted`,
   `path:"..."`), never a magic value.

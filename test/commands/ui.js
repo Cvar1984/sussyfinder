@@ -175,19 +175,27 @@ async function testRefreshDownloads() {
 const RESULT = 'JSON.stringify(analyzedData.map(d => [d.path, d.threatScore, d.isAnomaly, d.duplicate_of, d.verified, d.mlScore]).sort())';
 
 // paged.php, with a stand-in for fetch() that answers some batches the way a
-// busy host does (503) and one the way a crash on one file does (500), and
-// counts the requests running at once. Cancelling a scan and starting another
-// must leave nothing of the first. The result must equal main.php's plain scan.
+// busy host does (503) and one the way a crash on one file does (500), resets
+// the connection the way Firefox reports NS_ERROR_NET_RESET (AbortError) for a
+// listing page, a batch once, and every batch holding one file (the server
+// dying on it), and counts the requests running at once. Cancelling a scan
+// and starting another must leave nothing of the first. The result must equal
+// main.php's plain scan, but for the one file, which is named as skipped.
 async function testPagedParallel(port, reference) {
     await send('Page.navigate', { url: `http://127.0.0.1:${port}/paged.php` });
     await waitFor('document.readyState === "complete" && typeof startChunkedScan === "function"');
     await js(`(() => {
         const real = window.fetch;
-        window._io = { running: 0, most: 0, process: 0, busy: 0, failed: 0 };
+        window._io = { running: 0, most: 0, process: 0, busy: 0, failed: 0, reset: 0, list: 0, smaller: false };
+        const reset = () => { _io.reset++; return Promise.reject(new DOMException('The operation was aborted. ', 'AbortError')); };
         window.fetch = (url, opts) => {
             const action = opts.body.get('ajax_action');
-            if (action === 'process' && ++_io.process % 4 === 0) { _io.busy++; return Promise.resolve(new Response('<html>busy</html>', { status: 503, headers: { 'Retry-After': '0' } })); }
-            if (action === 'process' && _io.process === 6) { _io.failed++; return Promise.resolve(new Response('<html>error</html>', { status: 500 })); }
+            if (action === 'scan' && ++_io.list === 2) return reset();
+            if (action === 'scan' && _io.list > 2 && opts.body.get('seconds') < LIST_PAGE.seconds) _io.smaller = true;
+            const many = action === 'process' && opts.body.get('paths').includes(',');
+            if (action === 'process' && (opts.body.get('paths').includes('alert%281%29') || many && _io.process >= 2 && !_io.once && (_io.once = true))) return reset();
+            if (action === 'process' && ++_io.process % 4 === 0 && _io.process <= 40) { _io.busy++; return Promise.resolve(new Response('<html>busy</html>', { status: 503, headers: { 'Retry-After': '0' } })); }
+            if (many && _io.process >= 6 && !_io.failed) { _io.failed++; return Promise.resolve(new Response('<html>error</html>', { status: 500 })); }
             _io.running++; _io.most = Math.max(_io.most, _io.running);
             return real(url, opts).finally(() => { _io.running--; });
         };
@@ -197,12 +205,17 @@ async function testPagedParallel(port, reference) {
         return true;
     })()`);
     await waitFor('document.querySelectorAll("#result tr[data-path]").length > 0');
-    await js('cancelChunkedScan(); startChunkedScan(); true');
+    // Each failure above once more, in the new scan
+    await js('cancelChunkedScan(); Object.assign(_io, { list: 0, process: 0, once: false, failed: 0, most: 0 }); startChunkedScan(); true');
     check('paged, parallel scan with busy and failing replies finished', await waitFor('analyzedData.length > 0 && document.getElementById("ajaxProgress").style.display === "none"', 120000));
     const io = await js('_io');
-    check('same results as one listing page and one batch at a time', await js(RESULT) === reference, await js('analyzedData.length') + ' files');
-    check('several batches ran at once, busy replies were retried', io.most > 1 && io.most <= 3 && io.busy > 0 && io.failed === 1, JSON.stringify(io));
-    check('busy host reported once, no file skipped', await js(`_eventLog.filter(e => /host is busy/.test(e.message)).length === 1 && !_eventLog.some(e => /^Skipped/.test(e.message))`));
+    const without = list => JSON.stringify(JSON.parse(list).filter(r => !r[0].includes('alert(1)')));
+    check('same results as one listing page and one batch at a time', without(await js(RESULT)) === without(reference), await js('analyzedData.length') + ' files');
+    check('a reset listing page is asked for again, smaller', io.smaller);
+    check('the file the server dies on is skipped by name, nothing else', await js(`_eventLog.filter(e => /^Skipped/.test(e.message)).length === 1 &&
+        _eventLog.some(e => /^Skipped .*alert\\(1\\).*no answer from the server.*the server may crash/.test(e.message))`));
+    check('busy replies were retried, then several batches ran at once again', io.most > 1 && io.most <= 3 && io.busy > 0 && io.failed === 1, JSON.stringify(io));
+    check('busy host reported once', await js(`_eventLog.filter(e => /host is busy|got no answer/.test(e.message)).length === 1`));
     check('scan of more than ANOMALIES_ONLY_ABOVE files switched to "Only Anomalies"',
         await js('currentFilterMode === "anomalies" && document.getElementById("severityFilter").value === "anomalies"'));
     check('the page keeps one scored copy per file, without the ML bitmaps',
@@ -245,6 +258,18 @@ async function testSearch() {
     await same('"alert(1)"', 'd => d.path.includes("alert(1)")');
     await same('date:2024', 'd => d.mtime >= new Date(2024, 0, 1) / 1000 && d.mtime < new Date(2025, 0, 1) / 1000');
     await same('is:verified', 'd => !!d.verified');
+    const target = await js('analyzedData.find(d => d.path.endsWith("/wp/" + ' + JSON.stringify(VERIFIED) + ')).path');
+    await same('dir:' + JSON.stringify(target.slice(0, target.lastIndexOf('/'))), `d => d.path.startsWith(${JSON.stringify(target.slice(0, target.lastIndexOf('/') + 1))}) && !d.path.slice(${target.lastIndexOf('/') + 1}).includes('/')`);
+    await same('date:2024-03-01T00..2024-03-01T23', 'd => d.mtime >= new Date(2024, 2, 1, 0) / 1000 && d.mtime < new Date(2024, 2, 2, 0) / 1000');
+    const xss = await js('analyzedData.find(d => d.path.includes("alert(1)")).path');
+    await same('near:' + JSON.stringify(xss), `d => d.path.slice(0, d.path.lastIndexOf("/")) === ${JSON.stringify(xss.slice(0, xss.lastIndexOf('/')))} ||
+        Math.abs(d.mtime - analyzedData.find(x => x.path === ${JSON.stringify(xss)}).mtime) <= 3600`);
+    // A row's compass: the files near it, newest first, the file itself marked
+    await js('clearFilters(); document.getElementById("searchInput").value = ""; applySearch(); true');
+    await js(`document.querySelector('#result tr[data-path] .near-btn[data-near=' + JSON.stringify(${JSON.stringify(target)}) + ']').click(); true`); await sleep(300);
+    check('the 🧭 on a row searches near:"its path", sorted by time, and marks it', await js(`currentSearch === 'near:' + quoteQuery(${JSON.stringify(target)}) &&
+        currentSort === 'mtime' && document.querySelector('#result tr.row-near') === _rowByPath.get(${JSON.stringify(target)})`), await tableRows() + ' rows');
+    await js('clearFilters(); document.getElementById("sortSelect").value = currentSort = "threat"; renderTable(analyzedData); true');
     await js(`document.getElementById('searchInput').value = '/(/ score:>x'; applySearch(); true`);
     check('a broken regex or number marks the search box and says why', await js(`document.getElementById('searchInput').classList.contains('search-error') &&
         /regular expression/.test(document.getElementById('searchInput').title) && /isn.t a number/.test(document.getElementById('searchInput').title)`));
