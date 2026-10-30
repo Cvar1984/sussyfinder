@@ -148,12 +148,19 @@ one self-contained file, no dependencies. `README.md` documents the maths
   URL or a local file, a 404 optionally quiet, a host that didn't answer not
   asked again in that request. **Download cache** (owner's call: "cache, but
   deletable"): `fetchText()` keeps each http(s) download, and a 404, as a
-  file in `CACHE_DIR` (`sussyfinder-cache` next to `main.php`, not the shared
-  temp folder, where another hosting account could plant a blacklist) until
-  `cacheClear()` deletes it: the page's **Refresh lists** button
-  (`clear_cache`) or removing the folder. Written to a temp file and renamed,
-  so a parallel batch never reads half a file. Network failures are never
-  cached. No writable `CACHE_DIR`: every request downloads again. A session
+  file in `CACHE_DIR` until `cacheClear()` deletes it: the page's **Refresh
+  lists** button (`clear_cache`) or removing the folder. The default is
+  `sussyfinder-<hash of __FILE__>` in the system temp folder, found by
+  `tempDir()` in the compatibility section (`sys_get_temp_dir()` behind
+  `functionAvailable()`, then `upload_tmp_dir`, TMPDIR/TMP/TEMP, `/tmp`; only
+  a writable one, so open_basedir is respected). The temp folder is shared
+  with other hosting accounts, which could create the folder first and plant
+  a blacklist (deletes files) or whitelist (hides shells): `cacheDirIsOwn()`
+  only trusts a folder owned by the user PHP runs as (the owner of a probe
+  file written there) with no group/other write bit; it is created 0700.
+  Written to a temp file and renamed, so a parallel batch never reads half a
+  file. Network failures are never cached. No usable folder: every request
+  downloads again. A session
   cache was tried and dropped: a 1.2 MB list in the session cost every batch
   ~30 MB and ~150 ms, and it could not be cleared on demand.
 - **MHR** (Team Cymru) needs PHP 5.2+ (`json_decode`) and HTTPS; on older PHP it

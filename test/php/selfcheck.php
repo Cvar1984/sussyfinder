@@ -94,5 +94,13 @@ $cache = array(
     cacheLoad('https://example.invalid/list.txt'),
 );
 @rmdir($cacheDir);
+// The temp folder is found, and a cache folder other users can write to (one
+// another hosting account could have planted) is refused
+$openDir = $cacheDir . '-open';
+@mkdir($openDir);
+@chmod($openDir, 0777);
+$cache[] = is_string(tempDir()) && is_writable(tempDir());
+$cache[] = cacheDirIsOwn($openDir);
+@rmdir($openDir);
 
 echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes, 'checksums' => $checksums, 'cache' => $cache));

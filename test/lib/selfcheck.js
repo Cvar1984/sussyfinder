@@ -177,8 +177,9 @@ function check(out, models) {
     const want = checksumWant(cs.json === true);
     if (JSON.stringify(cs.verified) !== JSON.stringify(want)) failures.push(`checksumVerified: want ${JSON.stringify(want)}, got ${JSON.stringify(cs.verified)}`);
     // Download cache: stored text, a kept 404 (null), not cached (false), the
-    // same two through fetchText(), 2 files cleared, then gone
-    const cacheWant = ['abc\n', null, false, 'abc\n', false, 2, false];
+    // same two through fetchText(), 2 files cleared, then gone; a temp folder
+    // found; a folder others can write to refused
+    const cacheWant = ['abc\n', null, false, 'abc\n', false, 2, false, true, false];
     if (JSON.stringify(out.cache) !== JSON.stringify(cacheWant)) failures.push(`download cache: want ${JSON.stringify(cacheWant)}, got ${JSON.stringify(out.cache)}`);
     return failures;
 }

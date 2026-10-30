@@ -73,8 +73,9 @@ settingDefault('_ML_MODEL_URL_', _REPO_RAW_ . 'ml-model.json');
 settingDefault('_MHR_URL_', 'https://hash.cymru.com/v2/submitHashes');
 
 // Downloaded lists, checksums and the ML model are kept here until deleted (the page's
-// "Refresh lists" button, or removing the folder); '' or a folder PHP can't write: no cache
-settingDefault('CACHE_DIR', dirname(__FILE__) . '/sussyfinder-cache');
+// "Refresh lists" button, or removing the folder): a folder of this install's own in the
+// system temp folder (tempDir()); '' or no usable temp folder: no cache
+settingDefault('CACHE_DIR', tempDir() === false ? '' : tempDir() . '/sussyfinder-' . substr(md5(__FILE__), 0, 12));
 
 settingDefault('TIME_LIMIT', 3600);          // seconds a request may run
 settingDefault('HTTP_CONNECT_TIMEOUT', 10);  // seconds
@@ -276,6 +277,36 @@ function callIfAvailable($name)
     }
     $args = func_get_args();
     return call_user_func_array($name, array_slice($args, 1));
+}
+
+/**
+ * The system temporary folder, however this host exposes it:
+ * sys_get_temp_dir() (PHP 5.2.1+, and often in disable_functions), else
+ * upload_tmp_dir, the TMPDIR / TMP / TEMP environment, then /tmp or
+ * C:\Windows\Temp. Only a folder PHP can write counts (open_basedir can put
+ * /tmp out of reach).
+ *
+ * @return string|false
+ */
+function tempDir()
+{
+    static $dir = null;
+    if ($dir !== null) {
+        return $dir;
+    }
+    $candidates = array(functionAvailable('sys_get_temp_dir') ? sys_get_temp_dir() : '', ini_get('upload_tmp_dir'));
+    foreach (array('TMPDIR', 'TMP', 'TEMP') as $name) {
+        $candidates[] = functionAvailable('getenv') ? getenv($name) : '';
+    }
+    $candidates[] = DIRECTORY_SEPARATOR == '\\' ? 'C:\\Windows\\Temp' : '/tmp';
+    $dir = false;
+    foreach ($candidates as $candidate) {
+        if (is_string($candidate) && $candidate !== '' && @is_dir($candidate) && @is_writable($candidate)) {
+            $dir = rtrim($candidate, '/\\');
+            break;
+        }
+    }
+    return $dir;
 }
 
 callIfAvailable('ini_set', 'display_errors', '0');
@@ -1543,11 +1574,10 @@ function httpRequest($url, $body = null, $headers = array())
 }
 
 /**
- * The download cache folder (CACHE_DIR), created on first use; false when
- * there is none (CACHE_DIR '' or a folder PHP can't write), and then every
- * request downloads what it needs. Next to main.php by default, not in the
- * system temp folder: on shared hosting another account could plant a
- * blacklist there.
+ * The download cache folder (CACHE_DIR), created on first use, private
+ * (0700); false when there is none (CACHE_DIR '', a folder PHP can't write,
+ * or one that isn't this script's own), and then every request downloads
+ * what it needs.
  *
  * @return string|false
  */
@@ -1555,12 +1585,41 @@ function cacheDir()
 {
     static $dir = null;
     if ($dir === null) {
-        $dir = false;
-        if (CACHE_DIR !== '' && (@is_dir(CACHE_DIR) || @mkdir(CACHE_DIR, 0755)) && @is_writable(CACHE_DIR)) {
-            $dir = rtrim(CACHE_DIR, '/\\');
-        }
+        $path = rtrim(CACHE_DIR, '/\\');
+        $usable = $path !== '' && (@is_dir($path) || @mkdir($path, 0700)) && @is_writable($path);
+        $dir = $usable && cacheDirIsOwn($path) ? $path : false;
     }
     return $dir;
+}
+
+/**
+ * Whether a cache folder is this script's own. In a temp folder shared by
+ * every account on a host, another account could create it first and plant
+ * a blacklist (which deletes files) or a whitelist (which hides shells). So
+ * on POSIX it must belong to the user PHP runs as (the owner of a file
+ * written into it) and be closed to other users' writes. Windows has neither
+ * notion, so there it passes.
+ *
+ * @param string $path
+ * @return bool
+ */
+function cacheDirIsOwn($path)
+{
+    if (DIRECTORY_SEPARATOR == '\\') {
+        return true;
+    }
+    $probe = $path . '/owner-' . getmypid() . '.tmp';
+    $fp = @fopen($probe, 'wb');
+    if (!$fp) {
+        return false;
+    }
+    fclose($fp);
+    $own = @fileowner($probe) === @fileowner($path) && (@fileperms($path) & 0022) == 0;
+    @unlink($probe);
+    if (!$own) {
+        trigger_error('Not using the download cache ' . $path . ': another user owns it or can write to it', E_USER_WARNING);
+    }
+    return $own;
 }
 
 /**
