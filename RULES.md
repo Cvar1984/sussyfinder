@@ -101,7 +101,7 @@ one self-contained file, no dependencies. `README.md` documents the maths
   `X-Sussy-Request` header (the CSRF check); the page sends all of them
   through `postAction()`. Read request values with `inputValue()` /
   `postList()`, which undo magic quotes; never `$_POST` directly.
-- **AJAX:** POST `ajax_action` = `scan` | `process` | `mhr_check` | `mhr_unlink`.
+- **AJAX:** POST `ajax_action` = `scan` | `process` | `mhr_check` | `mhr_unlink` | `clear_cache`.
   Paths travel **`rawurlencode()`d in both directions** (`path`, scan lists,
   `mhr_unlink` results; the page works out `duplicate_of` from each row's md5),
   so names
@@ -115,18 +115,39 @@ one self-contained file, no dependencies. `README.md` documents the maths
   through `ajaxRespond()`, which folds in captured PHP warnings and encodes
   with `jsonEncode()` (UTF-8-safe), so the body is never empty, and gzips it
   when the browser accepts gzip (unless `zlib.output_compression` already
-  does). `scan` doesn't send whole paths: `dirs` lists each directory once
-  (`/` left unencoded) and `readable` / `not_readable` are flat
-  `[dir index, name, ...]` lists in scan order, joined by the page as
-  `dirs[i] + '/' + name` when a chunk is sent (453,627 files: 61 MB of JSON
-  before, 25 MB so, ~3 MB gzipped).
+  does). `scan` lists one page (`after` = the previous reply's `next`, until
+  `next` is null) and doesn't send whole paths: `dirs` lists each directory
+  of the page once (`/` left unencoded) and `readable` / `not_readable` are
+  flat `[dir index, name, ...]` lists, joined by the page as
+  `dirs[i] + '/' + name` when a batch is sent (453,627 files: 61 MB of JSON
+  as whole paths, 25 MB so, ~3 MB gzipped). A file `process` can't find any
+  more comes back as a `gone` row, not a warning: a retried batch may have
+  deleted it the first time.
+- **The scan in the page** (`pumpScan()`): listing pages and `process`
+  batches share `MAX_PARALLEL` request slots, starting at 1 (the first batch
+  fills the download cache), +1 per 10 clean batches, halved on a busy
+  reply (`isOverloaded()`: 429/502/503/504/508 or no answer), which is
+  retried whole after a wait; any other failure bisects the batch. Results
+  are applied in batch order. A row is passed through `withMlScore()` as it
+  arrives: the ML score is stored and the bitmaps dropped, so scoring reads
+  `mlScore`, never `ml_features`. When the scan ends `markDuplicates()` sets
+  `duplicate_of` (newest copy is the original, then path order: independent
+  of arrival order) and all rows are scored together, since the median/MAD
+  statistics need every file. The scored rows then are the scan's rows
+  (`rawFileData === analyzedData`): one copy per file. `_scan` is the
+  running scan; replies for any other are dropped (cancel, rescan).
 - **`mhr_unlink`** deletes only files whose *current* md5 MHR confirms in that
   same request. Never make it trust the browser's path list.
-- **Listing** (`getSortedByPattern` → `recursiveScan`): `$pattern` is one
-  complete regex matched against the file name (validated before use).
-  Regular files only (a FIFO would hang `md5_file`). Symlinked files are
-  listed; symlinked dirs are followed only inside the scan root. Anything
-  unscannable is reported with `trigger_error()`, not skipped silently.
+- **Listing** (`listFiles()` → `listWalk()`): `$pattern` is one complete
+  regex matched against the file name (validated before use). Names are
+  walked in byte order (`sort(SORT_STRING)`), so a page resumes after the
+  last path it handled; the server keeps no state, and the cursor is only
+  compared with names, never opened. A page ends at `LIST_PAGE_FILES` files
+  or `listSeconds()`. Regular files only (a FIFO would hang `md5_file`).
+  Symlinked files are listed; symlinked dirs are never followed (inside the
+  root they are listed at their real path anyway; outside, warned), which
+  also rules out loops. Anything unscannable is reported with
+  `trigger_error()`, not skipped silently.
 - **Charts** share one selection (`_chartSelection`, a Set of paths) and one
   hover (`_chartHover`). `shouldShowFile()` = `passesTableFilters()` + that
   selection, and it's what both the table and the charts use (charts fade
@@ -446,29 +467,11 @@ revisiting one.
   so the list and the bar trailed what had arrived.
 - After making important decision dump it here
 
-## Known limits (notes, not fixed yet)
+## Known limits
 
-From the architecture audit; numbers measured on the test corpora.
-
-- **Browser memory and rendering (H2).** The page keeps every feature row:
-  ~1.8 KB of JSON each on average (470k cached rows), mostly the hex ML
-  bitmaps (`ml_features`, `ml_units`), so ~0.8 GB for a 450k-file site before
-  compression. The default filter is "all" and `renderTable()` builds one
-  HTML string for every row (the live list appends them all too). This, not
-  the server, is the ceiling for big sites. Plan: score ML when a batch
-  arrives and drop the bitmaps (nothing needs them after scoring, not even
-  the threshold control); paginate or virtualize the table; default to the
-  anomalies filter above some file count.
-- **Phase 2 is sequential (M3).** `processChunk()` keeps one request in
-  flight, so a scan's time is about batches x round trip. The server holds no
-  per-scan state, so 2-4 concurrent batches would be safe. Keep the order of
-  results (duplicate_of takes the first file with an MD5 in scan order) and
-  the bisect retry of a failed batch.
-- **Phase 1 lists everything in one request (M4).** 453,627 files took ~10 s
-  and all paths sit in memory; a host with a short max_execution_time and
-  set_time_limit disabled can't list a big tree at all. Plan: page the
-  listing (per top-level directory, or a resumable cursor) and start phase 2
-  on the first page.
+- **Charts draw every file.** They are off until opened, but on a site of
+  hundreds of thousands of files the dots cost time and memory; sample or
+  cap them if that becomes a problem.
 
 ## Style
 

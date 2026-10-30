@@ -97,7 +97,7 @@ function buildSamples(corpora, ctx, { keepHex = 500 } = {}) {
     const dropped = { htaccess: 0, notCode: 0, notShells: 0, conflicts: 0 };
     for (const c of corpora) {
         const raw = contentOnly(parseRows(fs.readFileSync(c.cache, 'utf8')));
-        const scored = ctx.analyzeData(raw, constant(ctx, 'Z_THRESHOLD'));
+        const scored = ctx.analyzeData(raw.map(ctx.withMlScore), constant(ctx, 'Z_THRESHOLD'));
         raw.forEach((d, i) => {
             if (!d.ml_features) return;
             if (d.is_htaccess) { dropped.htaccess++; return; }

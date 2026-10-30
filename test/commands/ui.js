@@ -39,6 +39,10 @@ function buildSandbox(box) {
     const checksums = path.join(box, 'checksums.txt');
     page = "<?php define('_WHITELIST_', false); define('_BLACKLIST_', false); define('_CHECKSUMS_URL_', " + phpString(checksums) + ");" + page.slice('<?php'.length);
     fs.writeFileSync(path.join(box, 'www', 'main.php'), page);
+    // The same page with small listing pages, several batches at once, a
+    // short table and an early switch to "Only Anomalies" (testPagedParallel())
+    fs.writeFileSync(path.join(box, 'www', 'paged.php'), "<?php define('LIST_PAGE_FILES', 7); define('MAX_PARALLEL', 3); " +
+        "define('TABLE_PAGE_ROWS', 50); define('ANOMALIES_ONLY_ABOVE', 100);" + page.slice('<?php'.length));
     const corpora = loadCorpora();
     fs.cpSync(path.join(corpus('blackarch-webshells', corpora).dir, 'php'), path.join(DATA, 'shells'), { recursive: true });
     const wp = path.join(corpus('wordpress-7.2-alpha', corpora).dir, 'wp-includes');
@@ -167,6 +171,51 @@ async function testRefreshDownloads() {
         await js('window._asked'));
 }
 
+// What a scan found, for comparing two scans of the sandbox
+const RESULT = 'JSON.stringify(analyzedData.map(d => [d.path, d.threatScore, d.isAnomaly, d.duplicate_of, d.verified, d.mlScore]).sort())';
+
+// paged.php, with a stand-in for fetch() that answers some batches the way a
+// busy host does (503) and one the way a crash on one file does (500), and
+// counts the requests running at once. Cancelling a scan and starting another
+// must leave nothing of the first. The result must equal main.php's plain scan.
+async function testPagedParallel(port, reference) {
+    await send('Page.navigate', { url: `http://127.0.0.1:${port}/paged.php` });
+    await waitFor('document.readyState === "complete" && typeof startChunkedScan === "function"');
+    await js(`(() => {
+        const real = window.fetch;
+        window._io = { running: 0, most: 0, process: 0, busy: 0, failed: 0 };
+        window.fetch = (url, opts) => {
+            const action = opts.body.get('ajax_action');
+            if (action === 'process' && ++_io.process % 4 === 0) { _io.busy++; return Promise.resolve(new Response('<html>busy</html>', { status: 503, headers: { 'Retry-After': '0' } })); }
+            if (action === 'process' && _io.process === 6) { _io.failed++; return Promise.resolve(new Response('<html>error</html>', { status: 500 })); }
+            _io.running++; _io.most = Math.max(_io.most, _io.running);
+            return real(url, opts).finally(() => { _io.running--; });
+        };
+        document.getElementById('chunkSizeInput').value = 5;
+        document.querySelector('input[name="dir"]').value = ${JSON.stringify(DATA)};
+        startChunkedScan();
+        return true;
+    })()`);
+    await waitFor('document.querySelectorAll("#result tr[data-path]").length > 0');
+    await js('cancelChunkedScan(); startChunkedScan(); true');
+    check('paged, parallel scan with busy and failing replies finished', await waitFor('analyzedData.length > 0 && document.getElementById("ajaxProgress").style.display === "none"', 120000));
+    const io = await js('_io');
+    check('same results as one listing page and one batch at a time', await js(RESULT) === reference, await js('analyzedData.length') + ' files');
+    check('several batches ran at once, busy replies were retried', io.most > 1 && io.most <= 3 && io.busy > 0 && io.failed === 1, JSON.stringify(io));
+    check('busy host reported once, no file skipped', await js(`_eventLog.filter(e => /host is busy/.test(e.message)).length === 1 && !_eventLog.some(e => /^Skipped/.test(e.message))`));
+    check('scan of more than ANOMALIES_ONLY_ABOVE files switched to "Only Anomalies"',
+        await js('currentFilterMode === "anomalies" && document.getElementById("severityFilter").value === "anomalies"'));
+    check('the page keeps one scored copy per file, without the ML bitmaps',
+        await js('rawFileData === analyzedData && lastScanFeatures === analyzedData && analyzedData.every(d => !("ml_features" in d) && !("ml_units" in d))'));
+    await js('document.getElementById("zThreshold").value = "2"; applyThreshold(); true'); await sleep(200);
+    check('still one copy after moving the threshold', await js('rawFileData === analyzedData && lastScanFeatures === analyzedData'));
+    await js('document.getElementById("severityFilter").value = "all"; applySeverityFilter(); true'); await sleep(200);
+    const total = await js('analyzedData.filter(d => shouldShowFile(d)).length');
+    check('table draws TABLE_PAGE_ROWS rows with a "Show more" button', await tableRows() === 50 && await js('!!document.getElementById("showMoreRows")'), total + ' files');
+    await js('document.querySelector("#showMoreRows button").click(); true'); await sleep(200);
+    check('"Show more" adds the next rows', await tableRows() === Math.min(100, total));
+}
+
 async function testHostileFileName() {
     await js(`(() => { document.getElementById('searchInput').value = 'alert'; applySearch(); return true; })()`); await sleep(200);
     const link = await js(`(() => { const el = document.querySelector('#result .file-link'); if (!el) return null; el.scrollIntoView({block: 'center'}); const r = el.getBoundingClientRect(); return { x: r.left + 5, y: r.top + 5, text: el.textContent }; })()`);
@@ -221,6 +270,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
         ({ send, js, waitFor, mouse, click, pressEscape, setViewport, dialogs, errors } = page);
 
         await testScanAndCharts();
+        const reference = await js(RESULT);
         if (args.screenshot) await screenshots(args.screenshot);
         await testBrushSelection(await tableRows());
         await testTimeline();
@@ -230,6 +280,7 @@ by CHROME_BIN. Without a browser it prints SKIP and passes, unless
         await testVerified();
         await testHostileFileName();
         await testRefreshDownloads();
+        await testPagedParallel(port, reference);
         check('no JavaScript errors on the page', errors.length === 0, errors.join(' | ').slice(0, 300));
         console.log(fails ? fails + ' FAILED' : 'all passed');
         return fails ? 1 : 0;

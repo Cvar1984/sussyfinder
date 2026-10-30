@@ -33,7 +33,7 @@ async function build(minScore) {
             continue;
         }
         benign += rows.length;
-        ctx.analyzeData(rows, z).forEach(d => {
+        ctx.analyzeData(rows.map(ctx.withMlScore), z).forEach(d => {
             if (!/^[0-9a-f]{32}$/.test(d.md5) || /\s/.test(c.family) || /[\r\n]/.test(d.path)) return;
             if (d.isAnomaly || d.threatScore >= minScore) listed.set(d.md5 + ' ' + d.path, `${d.md5} ${c.family} ${d.path}`);
         });

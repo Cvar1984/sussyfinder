@@ -34,19 +34,20 @@ function webCheck(t) {
     const microMd5 = md5(fs.readFileSync(path.join(ROOT, path.relative(t.repo, micro))));
     const latin1 = '%2Fwork%2Ffixture%2Fcaf%E9.php';
     const wire = p => encodeURIComponent(encodeURIComponent(p));
-    // comma-separated (%2C); a path that doesn't exist must come back as a warning, not vanish
+    // comma-separated (%2C); a path that doesn't exist comes back as a "gone" row, not vanish
     const paths = [wire(micro), wire('/work/fixture/it\'s "odd".php'), encodeURIComponent(latin1), wire('/work/fixture/missing.php')].join('%2C');
     const proc = json(curl(['--data', 'ajax_action=process', '--data', 'paths=' + paths]));
     const feats = proc && proc.features || [];
-    const procOk = feats.length === 3 && feats[0].md5 === microMd5 &&
+    const procOk = feats.length === 4 && feats[0].md5 === microMd5 &&
         feats[1].matched_tokens.includes('@concat_name') && feats[2].path === latin1 &&
-        proc.warnings.some(w => w.indexOf('Skipped /work/fixture/missing.php') === 0);
+        feats[3].gone === true && feats[3].path === '%2Fwork%2Ffixture%2Fmissing.php';
     // actionScan() sends each directory once and [dir index, name] per file;
-    // joined back, the fixture's paths are its own, names byte for byte
+    // joined back, the fixture's paths are its own, names byte for byte. The
+    // fixture fits one listing page, so "next" is null.
     const pairs = fixtureScan ? (fixtureScan.readable || []).concat(fixtureScan.not_readable || []) : [];
     const joined = [];
     for (let i = 0; i < pairs.length; i += 2) joined.push({ path: fixtureScan.dirs[pairs[i]] + '/' + pairs[i + 1], name: pairs[i + 1] });
-    const fixtureOk = !!fixtureScan && fixtureScan.total === LISTING_WANT.length &&
+    const fixtureOk = !!fixtureScan && fixtureScan.next === null && joined.length === LISTING_WANT.length &&
         JSON.stringify(joined.map(j => j.name).sort()) === JSON.stringify(LISTING_WANT) &&
         joined.every(j => j.path.startsWith('/work/fixture/'));
     // The Refresh button's action answers even when there is no cache (/var/www/html is read-only here)
@@ -59,12 +60,13 @@ function webCheck(t) {
             '--data', 'ajax_action=scan', '--data', 'dir=/work/fixture', url], { maxBuffer: 1 << 26 });
         const zipped = raw[0] === 0x1f && raw[1] === 0x8b;
         const body = json((zipped ? zlib.gunzipSync(raw) : raw).toString());
-        gzip = body && fixtureScan && body.total === fixtureScan.total ? (zipped ? 'gzip' : 'plain') : 'BROKEN';
+        gzip = body && fixtureScan && JSON.stringify(body.readable) === JSON.stringify(fixtureScan.readable) ? (zipped ? 'gzip' : 'plain') : 'BROKEN';
     } catch (e) { gzip = 'BROKEN'; }
     const csrfOk = !!noHeader && noHeader.error === 'forbidden';
+    const scanned = scan && scan.readable ? (scan.readable.length + scan.not_readable.length) / 2 : 0;
     return {
-        ok: jsOk && !!scan && scan.total > 0 && fixtureOk && procOk && csrfOk && clearOk && gzip !== 'BROKEN',
-        text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scan ? scan.total + ' files' : 'FAIL'} (${gzip}), fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
+        ok: jsOk && scanned > 0 && fixtureOk && procOk && csrfOk && clearOk && gzip !== 'BROKEN',
+        text: `page ${jsOk ? 'OK' : 'BROKEN'}, scan ${scanned ? scanned + ' files' : 'FAIL'} (${gzip}), fixture scan ${fixtureOk ? 'OK' : 'FAIL'}, ` +
             `process ${procOk ? 'OK' : 'FAIL'}, clear cache ${clearOk ? 'OK' : 'FAIL'}, CSRF check ${csrfOk ? 'OK' : 'FAIL'}` + (proc ? ` (${proc.warnings.length} warnings)` : ''),
     };
 }

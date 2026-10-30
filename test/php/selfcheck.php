@@ -22,11 +22,42 @@ foreach (explode("\0", file_get_contents($SUSSY_CASES)) as $src) {
 }
 
 $GLOBALS['phpWarnings'] = array();
-$listing = getSortedByPattern($SUSSY_FIXTURE, $pattern);
+$listing = listFiles($SUSSY_FIXTURE, $pattern, '', 0);
 $names = array();
 foreach ($listing['file_readable'] as $file) {
     $names[] = rawurlencode(basename($file));
 }
+// Paged listing: a file per page, followed to the end, lists what one page
+// does, each file once; a made-up "after" only skips names, never leaves the
+// directory; a file gone before it is read stays in the results
+$paged = array();
+$after = '';
+$pages = 0;
+do {
+    $page = listFiles($SUSSY_FIXTURE, $pattern, $after, 1);
+    $paged = array_merge($paged, $page['file_readable'], $page['file_not_readable']);
+    $after = $page['next'];
+} while ($after !== null && ++$pages < 100);
+$full = array_merge($listing['file_readable'], $listing['file_not_readable']);
+sort($paged);
+sort($full);
+$inside = true;
+foreach (array('..', '../..', '%2Fetc', '%2E%2E%2F%2E%2E', 'out', 'out/etc', 'sub/../..', 'zzz') as $cursor) {
+    $page = listFiles($SUSSY_FIXTURE, $pattern, $cursor, 1);
+    foreach (array_merge($page['file_readable'], $page['file_not_readable']) as $file) {
+        $inside = $inside && strpos($file, realpath($SUSSY_FIXTURE) . '/') === 0;
+    }
+}
+$seen = array();
+$gone = scanReadablePaths(array($SUSSY_FIXTURE . '/missing.php'), array(), array(), $tokenNeedles, $seen);
+$limits = array();
+foreach (array(0, 2, 10, 100) as $limit) {
+    ini_set('max_execution_time', $limit);
+    $limits[] = listSeconds();
+}
+$paging = array('equal' => $paged === $full && count($full) > 1, 'pages' => $pages + 1, 'inside' => $inside,
+    'gone' => count($gone) == 1 && $gone[0]['gone'] === true && $gone[0]['is_unreadable'] === true, 'seconds' => $limits);
+
 $outsideWarned = false;
 foreach ($GLOBALS['phpWarnings'] as $warning) {
     if (strpos($warning, 'outside the scanned directory') !== false) {
@@ -103,4 +134,4 @@ $cache[] = is_string(tempDir()) && is_writable(tempDir());
 $cache[] = cacheDirIsOwn($openDir);
 @rmdir($openDir);
 
-echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes, 'checksums' => $checksums, 'cache' => $cache));
+echo jsonEncode(array('php' => PHP_VERSION, 'cases' => $cases, 'listing' => $names, 'outside_warned' => $outsideWarned, 'models' => $models, 'units' => $unitProbes, 'checksums' => $checksums, 'cache' => $cache, 'paging' => $paging));

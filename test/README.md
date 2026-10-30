@@ -16,6 +16,7 @@ test/run all              # unit tests, benchmark and browser test: run before a
 | `test/run bench` | Detection benchmark on the local php: the PHP self-check, then detection and false-positive rates on the benchmark samples. `--list` names misses and false positives | php, benchmark samples |
 | `test/run matrix` | `bench` plus a page/AJAX check on every PHP version × php.ini profile, in Docker, ending in one table | Docker, benchmark samples |
 | `test/run ui` | The page in headless Chrome with real mouse and keyboard events | php, Chrome or Chromium (`CHROME_BIN`) |
+| `test/run perf` | Scan time and browser memory through the real page, on a copy of benign releases | php, Chrome or Chromium, checked-out corpora |
 | `test/run train` | Trains and cross-validates the ML model; `--write` updates `ml-model.json` | php, every sample (`setup --all`) |
 | `test/run all` | `unit`, `bench` and `ui` (with `--matrix`, `matrix` too), with a summary | as above |
 
@@ -29,7 +30,7 @@ test/
 ├── README.md           this index
 ├── commands/           one file per command; each declares its name, help, options and run()
 │   ├── index.js        the command list, in the order test/run shows it
-│   ├── setup.js  unit.js  bench.js  matrix.js  ui.js  train.js  checksums.js  all.js
+│   ├── setup.js  unit.js  bench.js  matrix.js  ui.js  perf.js  train.js  checksums.js  all.js
 ├── lib/                what the commands share; no command-line handling
 │   ├── cli.js          parses test/run's arguments, prints help, cleans up
 │   ├── paths.js        where everything is
@@ -42,7 +43,7 @@ test/
 │   ├── benchmark.js    extraction + scoring + rates per target (bench, matrix)
 │   ├── targets.js      local php or Docker containers, php.ini profiles
 │   ├── webcheck.js     the page/AJAX check inside a container
-│   ├── browser.js      headless Chrome over the DevTools protocol (ui)
+│   ├── browser.js      headless Chrome over the DevTools protocol (ui, perf)
 │   └── ml.js           the ML pipeline: features, samples, folds, training, quantization
 ├── php/                PHP-side jobs that main.php is included into (PHP 4.3-safe)
 │   ├── extract.php     feature rows for every file in some directories

@@ -78,6 +78,10 @@ settingDefault('_MHR_URL_', 'https://hash.cymru.com/v2/submitHashes');
 settingDefault('CACHE_DIR', tempDir() === false ? '' : tempDir() . '/sussyfinder-' . substr(md5(__FILE__), 0, 12));
 
 settingDefault('TIME_LIMIT', 3600);          // seconds a request may run
+settingDefault('LIST_PAGE_FILES', 20000);    // files per listing request (also capped at listSeconds()); 0: all in one
+settingDefault('MAX_PARALLEL', 3);           // batches the page analyses at once, at most (it starts at 1 and backs off when the host is busy)
+settingDefault('TABLE_PAGE_ROWS', 500);      // rows the table draws at a time ("Show more" for the rest); 0: all
+settingDefault('ANOMALIES_ONLY_ABOVE', 10000); // scans of more files start on the "Only Anomalies" filter; 0: never
 settingDefault('HTTP_CONNECT_TIMEOUT', 10);  // seconds
 settingDefault('HTTP_TIMEOUT', 30);          // seconds
 settingDefault('MHR_BATCH', 1000);           // hashes per MHR request (the API's limit)
@@ -567,33 +571,31 @@ function postPathList($key)
 // =============================================================================
 
 /**
- * Collect the files under $directory whose name matches $pattern into
- * $entries. Each directory is read fully and closed before recursing, so depth
- * isn't capped by open file handles. Symlinked directories are followed only
- * when they resolve inside $root (a "root -> /" link would otherwise walk the
- * whole filesystem); symlinked files are listed like regular files. FIFOs,
- * sockets and devices are skipped: opening a FIFO blocks forever. Anything
- * that can't be scanned is reported as a warning rather than skipped silently.
+ * Walk $dir for listFiles(), in byte order of names so a page can resume
+ * where the previous one stopped: names before $after[0] are skipped, and the
+ * entry named $after[0] is resumed inside (when more components follow) or
+ * skipped (it was the last one handled). Each directory is read fully and
+ * closed before recursing, so depth isn't capped by open file handles.
+ * Symlinked directories aren't followed: one pointing inside the scanned
+ * directory is listed at its real path anyway, and one pointing outside (a
+ * "root -> /" link would walk the whole filesystem) is warned about. That
+ * also rules out loops, which a page couldn't remember across requests.
+ * Symlinked files are listed like regular files. FIFOs, sockets and devices
+ * are skipped: opening a FIFO blocks forever. Anything that can't be scanned
+ * is reported as a warning rather than skipped silently.
  *
- * @param string $directory
- * @param string $pattern regex matched against each file's name
- * @param string $root realpath of the scanned directory, "/"-separated
- * @param array $entries 'file_readable' / 'file_not_readable' lists, filled in place
- * @param array $visited realpath => true, filled in place
- * @return void
+ * @param string $dir absolute, "/"-separated
+ * @param string $rel $dir relative to the scanned directory: "" or ending in "/"
+ * @param array $after path components to resume after, array() for none
+ * @param array $page the page being filled (see listFiles()), updated in place
+ * @return bool false when the page filled up before $dir was done
  */
-function recursiveScan($directory, $pattern, $root, &$entries, &$visited)
+function listWalk($dir, $rel, $after, &$page)
 {
-    $realPath = realpath($directory);
-    if (!$realPath || isset($visited[$realPath])) {
-        return; // symlink loop or already scanned
-    }
-    $visited[$realPath] = true;
-
-    $handle = @opendir($realPath);
+    $handle = @opendir($dir);
     if (!$handle) {
-        trigger_error('Cannot list directory ' . $realPath . ' (files inside it are not scanned)', E_USER_WARNING);
-        return;
+        trigger_error('Cannot list directory ' . $dir . ' (files inside it are not scanned)', E_USER_WARNING);
+        return true;
     }
     $names = array();
     while (($name = readdir($handle)) !== false) {
@@ -602,52 +604,87 @@ function recursiveScan($directory, $pattern, $root, &$entries, &$visited)
         }
     }
     closedir($handle);
+    sort($names, SORT_STRING);
 
     foreach ($names as $name) {
-        $entryPath = str_replace(DIRECTORY_SEPARATOR, '/', $realPath . '/' . $name);
+        $resume = array();
+        if ($after) {
+            $order = strcmp($name, $after[0]);
+            if ($order < 0) {
+                continue; // listed by an earlier page
+            }
+            if ($order == 0) {
+                $resume = array_slice($after, 1);
+            }
+            $after = array();
+            if ($order == 0 && !$resume) {
+                continue; // the last entry the previous page handled
+            }
+        }
+        // A page holds at least one entry, so the listing always moves on
+        if (!$resume && $page['max'] > 0 && $page['handled'] > 0 && ($page['count'] >= $page['max'] || time() >= $page['deadline'])) {
+            return false;
+        }
+        $entryPath = rtrim($dir, '/') . '/' . $name;
         if (is_dir($entryPath)) {
             if (is_link($entryPath)) {
                 $target = str_replace(DIRECTORY_SEPARATOR, '/', realpath($entryPath));
-                if (strpos($target . '/', rtrim($root, '/') . '/') !== 0) {
+                if (strpos($target . '/', rtrim($page['root'], '/') . '/') !== 0) {
                     trigger_error('Not following symlink ' . $entryPath . ' -> ' . $target . ' (outside the scanned directory)', E_USER_WARNING);
-                    continue;
                 }
+            } elseif (!listWalk($entryPath, $rel . $name . '/', $resume, $page)) {
+                return false;
             }
-            recursiveScan($entryPath, $pattern, $root, $entries, $visited);
-        } elseif (!preg_match($pattern, $name) || !is_file($entryPath)) {
-            continue;
-        } elseif (is_readable($entryPath)) {
-            $entries['file_readable'][] = $entryPath;
-        } else {
-            $entries['file_not_readable'][] = $entryPath;
+        } elseif (preg_match($page['pattern'], $name) && is_file($entryPath)) {
+            $page[is_readable($entryPath) ? 'file_readable' : 'file_not_readable'][] = $entryPath;
+            $page['count']++;
         }
+        $page['handled']++;
+        $page['last'] = $rel . $name;
     }
+    return true;
+}
+
+/** @return int seconds a listing page may take: well inside max_execution_time, whether or not set_time_limit() could raise it */
+function listSeconds()
+{
+    $limit = (int) ini_get('max_execution_time');
+    return $limit > 0 ? max(1, min(10, (int) ($limit * 0.4))) : 10;
 }
 
 /**
- * List the files under $path whose name matches $pattern, readable ones
- * newest first.
+ * List the files under $path whose name matches $pattern, a page at a time.
+ * A page ends after $maxFiles files or listSeconds(), whichever comes first,
+ * so a big tree is listed in several requests however short the host's time
+ * limit, and the server keeps nothing between them: 'next' names where the
+ * next page starts. It is only ever compared with the names a directory
+ * holds, never opened, so it can't reach outside $path.
  *
  * @param string $path directory to scan
  * @param string $pattern complete regex, matched against each file's name
- * @return array 'file_readable' and 'file_not_readable' path lists
+ * @param string $after the previous page's 'next', '' for the first page
+ * @param int $maxFiles files per page, 0 for every file in one
+ * @return array 'file_readable' (newest first) and 'file_not_readable' path
+ *  lists, and 'next', null after the last page
  */
-function getSortedByPattern($path, $pattern)
+function listFiles($path, $pattern, $after, $maxFiles)
 {
-    $entries = array('file_readable' => array(), 'file_not_readable' => array());
+    $page = array('file_readable' => array(), 'file_not_readable' => array());
     $root = realpath($path);
     if ($root === false || !is_dir($root)) {
         trigger_error('Not a directory: ' . $path, E_USER_WARNING);
-        return $entries;
+        return $page + array('next' => null);
     }
     if (@preg_match($pattern, '') === false) {
         trigger_error('Invalid file name pattern: ' . $pattern, E_USER_WARNING);
-        return $entries;
+        return $page + array('next' => null);
     }
-    $visited = array();
-    recursiveScan($root, $pattern, str_replace(DIRECTORY_SEPARATOR, '/', $root), $entries, $visited);
-    @array_multisort(array_map('filemtime', $entries['file_readable']), SORT_DESC, $entries['file_readable']);
-    return $entries;
+    $page += array('root' => str_replace(DIRECTORY_SEPARATOR, '/', $root), 'pattern' => $pattern, 'max' => $maxFiles,
+        'deadline' => time() + listSeconds(), 'count' => 0, 'handled' => 0, 'last' => '');
+    $done = listWalk($page['root'], '', $after === '' ? array() : array_map('rawurldecode', explode('/', $after)), $page);
+    @array_multisort(array_map('filemtime', $page['file_readable']), SORT_DESC, $page['file_readable']);
+    return array('file_readable' => $page['file_readable'], 'file_not_readable' => $page['file_not_readable'],
+        'next' => $done ? null : implode('/', array_map('rawurlencode', explode('/', $page['last']))));
 }
 
 /**
@@ -1387,6 +1424,7 @@ function featureRow($path, $fields)
         'duplicate_of'   => false,
         'error'          => null,
         'is_unreadable'  => true,
+        'gone'           => false,
     );
     foreach ($fields as $key => $value) {
         $row[$key] = $value;
@@ -1415,11 +1453,14 @@ function scanReadablePaths($paths, $whitelistMD5Sums, $blacklistMD5Sums, $tokenN
     }
     $rows = array();
     foreach ($paths as $filePath) {
-        if (!file_exists($filePath) || !is_readable($filePath)) {
-            trigger_error('Skipped ' . $filePath . ': it no longer exists or is not readable', E_USER_WARNING);
+        // A file that went between listing and now stays in the results: when
+        // a batch is retried after a reply was lost, the first attempt may
+        // already have deleted it as blacklisted.
+        if (!file_exists($filePath)) {
+            $rows[] = featureRow($filePath, array('gone' => true, 'matched_tokens' => array('GONE')));
             continue;
         }
-        $content = file_get_contents($filePath);
+        $content = is_readable($filePath) ? file_get_contents($filePath) : false;
         if ($content === false) {
             $rows[] = scanUnreadablePath($filePath);
             continue;
@@ -2106,24 +2147,26 @@ function mhrCredentials()
 }
 
 /**
- * List the files to analyse (phase 1). A big site has hundreds of thousands,
- * so each path isn't sent whole: "dirs" holds every directory once, and
+ * List one page of the files to analyse (phase 1; listFiles()): the page
+ * starts phase 2 on it while asking for the next one ("after" = this reply's
+ * "next"), until "next" is null. A big site has hundreds of thousands, so each
+ * path isn't sent whole: "dirs" holds every directory of the page once, and
  * "readable" / "not_readable" are flat [dir index, name, dir index, name, ...]
- * lists in scan order, joined by the page as dirs[i] + '/' + name.
- * Directories keep "/" unencoded, so a joined path is the usual encoded form
- * (453,627 files: 61 MB of JSON as whole rawurlencode()d paths, 25 MB so).
+ * lists, joined by the page as dirs[i] + '/' + name. Directories keep "/"
+ * unencoded, so a joined path is the usual encoded form (453,627 files: 61 MB
+ * of JSON as whole rawurlencode()d paths, 25 MB so).
  *
  * @return array
  */
 function actionScan()
 {
-    $result = getSortedByPattern(inputValue('dir', getcwd()), $GLOBALS['pattern']);
+    $result = listFiles(inputValue('dir', getcwd()), $GLOBALS['pattern'], (string) inputValue('after', ''), LIST_PAGE_FILES);
     $dirs = array();
     $index = array();
     $lists = array('readable' => $result['file_readable'], 'not_readable' => $result['file_not_readable']);
     foreach ($lists as $key => $paths) {
         $flat = array();
-        foreach ($paths as $path) { // absolute, with "/" separators (recursiveScan())
+        foreach ($paths as $path) { // absolute, with "/" separators (listWalk())
             $cut = strrpos($path, '/');
             $dir = (string) substr($path, 0, $cut);
             if (!isset($index[$dir])) {
@@ -2135,8 +2178,7 @@ function actionScan()
         }
         $lists[$key] = $flat;
     }
-    return array('dirs' => $dirs, 'readable' => $lists['readable'], 'not_readable' => $lists['not_readable'],
-        'total' => count($result['file_readable']) + count($result['file_not_readable']));
+    return array('dirs' => $dirs, 'readable' => $lists['readable'], 'not_readable' => $lists['not_readable'], 'next' => $result['next']);
 }
 
 /**
@@ -2776,6 +2818,9 @@ if (isset($_POST['ajax_action'])) {
             'const ML_MODEL = ' . (_ML_ ? mlModelJson(_ML_MODEL_URL_) : 'null') . ";\n" .
             'const mhrEnabled = ' . jsonEncode((bool) _MHR_) . ";\n" .
             'const MHR_BATCH = ' . jsonEncode(MHR_BATCH) . ";\n" .
+            'const MAX_PARALLEL = ' . jsonEncode(max(1, (int) MAX_PARALLEL)) . ";\n" .
+            'const TABLE_PAGE_ROWS = ' . jsonEncode((int) TABLE_PAGE_ROWS) . ";\n" .
+            'const ANOMALIES_ONLY_ABOVE = ' . jsonEncode((int) ANOMALIES_ONLY_ABOVE) . ";\n" .
             'const serverWarnings = ' . jsonEncode(array_values($GLOBALS['phpWarnings'])) . ";</script>\n";
         ?>
         <!-- Warning banner for critical errors & failed deletions -->
@@ -3059,6 +3104,42 @@ if (isset($_POST['ajax_action'])) {
                 return ml;
             }
 
+            /**
+             * A feature row as the scoring takes it: its ML score worked out once
+             * (null for .htaccess files, which the model wasn't trained on) and
+             * the hex bitmaps left out. They are most of a row's size (about 1.5
+             * of 2.4 KB) and nothing needs them once scored, so a big site's
+             * results fit in the browser.
+             * @param {Object} d row from the server, with ml_features / ml_units
+             * @return {Object} a copy with mlScore and without the bitmaps
+             */
+            function withMlScore(d) {
+                const r = { ...d, mlScore: d.is_htaccess ? null : mlScoreUnits(d) };
+                delete r.ml_features;
+                delete r.ml_units;
+                return r;
+            }
+
+            /**
+             * duplicate_of for every row: the newest file with an MD5 is the
+             * original (on equal times, the first path in alphabetical order) and
+             * the others name it. Worked out over all rows at once, so it doesn't
+             * depend on the order batches or listing pages came back in.
+             * @param {Array} rows feature rows, updated in place
+             */
+            function markDuplicates(rows) {
+                const original = new Map();
+                rows.forEach(d => {
+                    if (d.is_unreadable) return;
+                    const o = original.get(d.md5);
+                    if (!o || d.mtime > o.mtime || (d.mtime === o.mtime && d.path < o.path)) original.set(d.md5, d);
+                });
+                rows.forEach(d => {
+                    const o = d.is_unreadable ? d : original.get(d.md5);
+                    d.duplicate_of = o === d ? false : o.path;
+                });
+            }
+
             function medianOf(sorted) {
                 const m = sorted.length >> 1;
                 return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
@@ -3103,7 +3184,8 @@ if (isset($_POST['ajax_action'])) {
             }
 
             // Everything about a row that doesn't depend on the Z-threshold (the
-            // expensive part); isAnomaly and mlOnly are set by flagAnomalies()
+            // expensive part); isAnomaly and mlOnly are set by flagAnomalies().
+            // Rows come from withMlScore(), or are scored rows being rescored.
             function scoreRows(rawData) {
                 const valid = rawData.filter(d => !d.is_unreadable);
                 const tokens = valid.map(d => d.total_tokens);
@@ -3150,9 +3232,8 @@ if (isset($_POST['ajax_action'])) {
                         };
                     }
 
-                    // The ML model was trained on PHP, so .htaccess files aren't scored.
-                    // Its points are added after the rule multipliers, never multiplied.
-                    const ml = d.is_htaccess ? null : mlScoreUnits(d);
+                    // ML points are added after the rule multipliers, never multiplied
+                    const ml = d.mlScore;
                     const mlPts = mlPoints(ml);
                     const ruleScore = calculateThreatScore(d, weights);
                     let threatScore = Math.round((ruleScore + mlPts) * 100) / 100;
@@ -3264,10 +3345,14 @@ if (isset($_POST['ajax_action'])) {
                     (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + label + '</span> ';
             }
 
-            // Score features with the current Z-threshold and show them
+            // Score features with the current Z-threshold and show them. The
+            // scored rows are kept as the scan's rows from then on (rescoring a
+            // scored row is the same as scoring the raw one), so the page holds
+            // one copy of each file.
             function reanalyze(features) {
                 currentThreshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
                 analyzedData = analyzeData(features, currentThreshold);
+                window.rawFileData = window.lastScanFeatures = analyzedData;
                 renderTable(analyzedData);
             }
 
@@ -3282,14 +3367,34 @@ if (isset($_POST['ajax_action'])) {
             }
 
             // Every AJAX call goes through here: fields is {name: value}, the result
-            // the parsed JSON (a SyntaxError when the reply isn't JSON, e.g. a host's
-            // security rule answered with an HTML page). The custom header is the
-            // server's CSRF check (another site can't send it).
+            // the parsed JSON. It fails with a TypeError when the request never got
+            // an answer, an HttpError for any other status than 200, and a
+            // SyntaxError when a 200 reply isn't JSON (e.g. a host's security rule
+            // answered with an HTML page). The custom header is the server's CSRF
+            // check (another site can't send it).
             function postAction(fields) {
                 var body = new URLSearchParams();
                 Object.keys(fields).forEach(function (name) { body.set(name, fields[name]); });
                 return fetch('', { method: 'POST', body: body, headers: { 'X-Sussy-Request': '1' } })
-                    .then(function (r) { return r.json(); });
+                    .then(function (r) {
+                        if (r.ok) return r.json();
+                        throw new HttpError(r.status, r.headers.get('Retry-After'));
+                    });
+            }
+
+            function HttpError(status, retryAfter) {
+                this.name = 'HttpError';
+                this.message = 'HTTP ' + status;
+                this.status = status;
+                this.retryAfter = retryAfter;
+            }
+            HttpError.prototype = Object.create(Error.prototype);
+
+            // The host is busy, not the batch at fault: the account's process or
+            // request limit (429, 503, 508 on CloudLinux), a proxy in front of PHP
+            // (502, 504), or no answer at all. Retried whole, later, never split.
+            function isOverloaded(err) {
+                return err instanceof TypeError || (err instanceof HttpError && [429, 502, 503, 504, 508].indexOf(err.status) !== -1);
             }
 
             // Paths arrive percent-encoded (byte-exact even when not valid UTF-8);
@@ -3518,7 +3623,10 @@ if (isset($_POST['ajax_action'])) {
                 let status = '';
                 let verbosity = '';
 
-                if (d.is_unreadable) {
+                if (d.gone) {
+                    color = '#f72f2f';
+                    badge = badgeHtml('GONE', '#8b0000', 'Deleted or moved during the scan. If its batch was retried, the first attempt may have deleted it as blacklisted.');
+                } else if (d.is_unreadable) {
                     color = '#f72f2f';
                     badge = badgeHtml('NOT READABLE', '#8b0000');
                 } else if (d.is_blacklisted) {
@@ -3599,17 +3707,33 @@ if (isset($_POST['ajax_action'])) {
                 else if (currentSort === 'residual') filtered.sort((a, b) => (b.residual || 0) - (a.residual || 0));
                 else if (currentSort === 'ml') filtered.sort((a, b) => (b.mlScore || 0) - (a.mlScore || 0));
 
-                let html = '';
-                if (filtered.length === 0) {
-                    html = '<tr><td style="color:#888;text-align:center;padding:15px;">No files match the current search or filters.</td></tr>';
-                } else {
-                    html = filtered.map(rowHtml).join('');
-                }
-                document.getElementById('result').innerHTML = html;
+                _tableRows = filtered;
+                _tableDrawn = 0;
                 _rowByPath = new Map();
                 _linkedRow = null;
-                document.querySelectorAll('#result tr[data-path]').forEach(tr => _rowByPath.set(tr.getAttribute('data-path'), tr));
+                document.getElementById('result').innerHTML = filtered.length === 0
+                    ? '<tr><td style="color:#888;text-align:center;padding:15px;">No files match the current search or filters.</td></tr>' : '';
+                showMoreRows();
                 syncCharts(data);
+            }
+
+            // The table draws TABLE_PAGE_ROWS rows at a time: a big site's
+            // hundreds of thousands at once would stall the browser. Search,
+            // filters, sorting, the charts and Copy still cover every row.
+            let _tableRows = [], _tableDrawn = 0;
+            function showMoreRows() {
+                const more = document.getElementById('showMoreRows');
+                if (more) more.remove();
+                const next = TABLE_PAGE_ROWS > 0 ? Math.min(_tableRows.length, _tableDrawn + TABLE_PAGE_ROWS) : _tableRows.length;
+                const result = document.getElementById('result');
+                result.insertAdjacentHTML('beforeend', _tableRows.slice(_tableDrawn, next).map(rowHtml).join(''));
+                const trs = result.querySelectorAll('tr[data-path]');
+                for (let i = _tableDrawn; i < trs.length; i++) _rowByPath.set(trs[i].getAttribute('data-path'), trs[i]);
+                _tableDrawn = next;
+                if (next < _tableRows.length) {
+                    result.insertAdjacentHTML('beforeend', `<tr id="showMoreRows"><td style="text-align:center;padding:10px;color:#aaa;">
+                        Showing ${next} of ${_tableRows.length} files. <button type="button" onclick="showMoreRows()">Show ${Math.min(TABLE_PAGE_ROWS, _tableRows.length - next)} more</button></td></tr>`);
+                }
             }
 
             function copyResults() {
@@ -3617,7 +3741,8 @@ if (isset($_POST['ajax_action'])) {
                     .filter(d => shouldShowFile(d))
                     .map(d => {
                         let line = d.path;
-                        if (d.is_unreadable) line += ' (NOT_READABLE)';
+                        if (d.gone) line += ' (GONE)';
+                        else if (d.is_unreadable) line += ' (NOT_READABLE)';
                         else if (d.is_blacklisted) line += ' (BLACKLIST)';
                         else if (d.mhr_hit) line += ' (MHR HIT ' + d.mhr_detection_rate + '%)';
                         else if (d.mlOnly) line += ' (flagged by ML ' + Math.round(d.mlScore * 100) + '%)';
@@ -3648,6 +3773,7 @@ if (isset($_POST['ajax_action'])) {
             }
 
             function applySeverityFilter() {
+                if (_scan) _scan.filterTouched = true;
                 currentFilterMode = document.getElementById('severityFilter').value;
                 renderTable(analyzedData);
             }
@@ -3658,7 +3784,7 @@ if (isset($_POST['ajax_action'])) {
                 if (!isNaN(val) && val >= 0) {
                     currentThreshold = val;
                     if (typeof rawFileData !== 'undefined') {
-                        analyzedData = flagAnomalies(analyzedData, currentThreshold);
+                        analyzedData = window.rawFileData = window.lastScanFeatures = flagAnomalies(analyzedData, currentThreshold);
                         renderTable(analyzedData);
                         if (insightsVisible) renderInsights(analyzedData);
                     }
@@ -3728,16 +3854,20 @@ if (isset($_POST['ajax_action'])) {
                     const tokens = valid.map(d => Number(d.total_tokens) || 0);
                     const mtimes = valid.map(d => Number(d.mtime) || 0);
 
+                    // A loop, not Math.min.apply: that passes every value as an
+                    // argument, past the stack's limit on a big site
+                    const min = a => a.reduce((m, x) => x < m ? x : m, Infinity);
+                    const max = a => a.reduce((m, x) => x > m ? x : m, -Infinity);
                     avgSize = sizes.reduce((a, b) => a + b, 0) / sizes.length;
-                    minSize = Math.min.apply(null, sizes);
-                    maxSize = Math.max.apply(null, sizes);
+                    minSize = min(sizes);
+                    maxSize = max(sizes);
 
                     avgTokens = tokens.reduce((a, b) => a + b, 0) / tokens.length;
-                    minTokens = Math.min.apply(null, tokens);
-                    maxTokens = Math.max.apply(null, tokens);
+                    minTokens = min(tokens);
+                    maxTokens = max(tokens);
 
-                    minMtime = Math.min.apply(null, mtimes);
-                    maxMtime = Math.max.apply(null, mtimes);
+                    minMtime = min(mtimes);
+                    maxMtime = max(mtimes);
                 }
 
                 function makeCard(label, value, sub, cls, filterType) {
@@ -4460,9 +4590,13 @@ if (isset($_POST['ajax_action'])) {
             }
 
             // ── Chunked AJAX scan ────────────────────────────────────────────
-            var _scanCancelled = false;
-            // md5 => path of the first file seen with it, for duplicate_of across batches
-            var _firstPathByMd5 = new Map();
+            // The listing comes a page at a time ('scan', listFiles()), and
+            // each page's files go out in batches ('process') as soon as it
+            // arrives, up to MAX_PARALLEL at once. Results are applied in
+            // batch order whatever order they come back in. _scan is the
+            // running scan; a reply for any other (cancelled, or replaced by
+            // a new scan) is dropped.
+            var _scan = null;
 
             function getChunkSize() {
                 var el = document.getElementById('chunkSizeInput');
@@ -4473,62 +4607,87 @@ if (isset($_POST['ajax_action'])) {
                 return val;
             }
 
-
             function startChunkedScan() {
                 var dirInput = document.querySelector('input[name="dir"]');
                 var dir = dirInput ? dirInput.value.trim() : '';
                 if (!dir) { logWarning('Enter a directory path first.', 'error'); return; }
 
-                var chunkSize = getChunkSize();
-                _scanCancelled = false;
-                _firstPathByMd5 = new Map();
+                var scan = _scan = {
+                    dir: dir, chunkSize: getChunkSize(),
+                    after: '', listing: false, listDone: false, listed: 0, listRetries: 0,
+                    chunks: [], sent: 0,      // batches listed, and how many have gone out
+                    results: new Map(),       // batch index => its rows, until applied
+                    applied: 0,               // batches applied, in order
+                    inFlight: 0, limit: 1, warm: false, clean: 0, busyWarned: false,
+                    features: [], firstByMd5: new Map(),
+                    filterTouched: false, live: [], liveRows: 0, liveHidden: 0, liveFrame: 0,
+                };
                 _chartSelection = null;
-                var allFeatures = [];
-
                 resetWarningPanel();
 
                 document.getElementById('ajaxProgress').style.display = 'block';
                 document.getElementById('ajaxBar').style.width = '0%';
-                document.getElementById('ajaxStatus').textContent = 'Phase 1: Scanning directory\u2026';
+                document.getElementById('ajaxStatus').textContent = 'Listing files…';
                 document.getElementById('ajaxSubStatus').textContent = '';
                 document.getElementById('result').innerHTML = '';
-                analyzedData = [];
+                analyzedData = window.rawFileData = window.lastScanFeatures = []; // the last scan's rows can go
+                pumpScan(scan);
+            }
 
-                postAction({ ajax_action: 'scan', dir: dir })
-                    .then(function(data) {
-                        if (_scanCancelled) { return; }
+            // Start whatever the scan can start now: the next listing page when
+            // few batches are left to send (which also bounds the paths held
+            // here), and batches while fewer than scan.limit requests are out
+            function pumpScan(scan) {
+                if (scan !== _scan) return;
+                if (!scan.listDone && !scan.listing && scan.inFlight < scan.limit && scan.chunks.length - scan.sent < 2 * scan.limit) {
+                    listNextPage(scan);
+                }
+                while (scan.inFlight < scan.limit && scan.sent < scan.chunks.length) {
+                    sendChunk(scan, scan.sent++);
+                }
+                showScanProgress(scan);
+                if (scan.listDone && scan.applied === scan.chunks.length && scan.inFlight === 0) finishScan(scan);
+            }
+
+            function listNextPage(scan) {
+                scan.listing = true;
+                scan.inFlight++;
+                postAction({ ajax_action: 'scan', dir: scan.dir, after: scan.after })
+                    .then(function (data) {
+                        if (scan !== _scan) return;
                         reportServerWarnings(data);
-                        // actionScan(): each directory once in "dirs", the files as
-                        // flat [dir index, name, ...] lists in scan order
-                        var dirs        = data.dirs || [];
-                        var readable    = data.readable    || [];
-                        var notReadable = data.not_readable || [];
-                        var total       = data.total || (readable.length + notReadable.length) / 2;
-
-                        document.getElementById('ajaxStatus').textContent =
-                            'Phase 2: Processing ' + total + ' files\u2026 (chunk size: ' + chunkSize + ')';
-
-                        // A chunk is a slice of those lists; its paths are joined when it is sent
-                        var chunks = [];
-                        [[readable, false], [notReadable, true]].forEach(function (pair) {
-                            for (var i = 0; i < pair[0].length; i += 2 * chunkSize) {
-                                chunks.push({ list: pair[0], from: i, to: i + 2 * chunkSize, dirs: dirs, isNotReadable: pair[1] });
-                            }
-                        });
-
-                        return processChunk(chunks, 0, allFeatures, total, chunkSize);
+                        addListedPage(scan, data);
+                        scan.listRetries = 0;
+                        if (data.next === null || data.next === undefined) scan.listDone = true;
+                        else scan.after = data.next;
                     })
-                    .then(function() {
-                        if (_scanCancelled) { return; }
-                        document.getElementById('ajaxProgress').style.display = 'none';
-                        window.rawFileData = allFeatures;
-                        window.lastScanFeatures = allFeatures;
-                        reanalyze(allFeatures);
+                    .catch(function (err) {
+                        if (scan !== _scan) return;
+                        if (isOverloaded(err) && scan.listRetries < 5) {
+                            return hostBusy(scan, err, scan.listRetries++);
+                        }
+                        logWarning('Listing failed, so files after ' + (scan.after ? decodePath(scan.after) : 'the start') +
+                            ' are not scanned: ' + err.message, 'error');
+                        scan.listDone = true;
                     })
-                    .catch(function(err) {
-                        document.getElementById('ajaxProgress').style.display = 'none';
-                        logWarning('AJAX scan error: ' + err.message, 'error');
+                    .then(function () {
+                        if (scan !== _scan) return;
+                        scan.listing = false;
+                        scan.inFlight--;
+                        pumpScan(scan);
                     });
+            }
+
+            // A listing page as batches: each is a slice of the page's flat
+            // [dir index, name, ...] lists, its paths joined when it is sent
+            function addListedPage(scan, data) {
+                var dirs = data.dirs || [];
+                [[data.readable || [], false], [data.not_readable || [], true]].forEach(function (pair) {
+                    scan.listed += pair[0].length / 2;
+                    for (var i = 0; i < pair[0].length; i += 2 * scan.chunkSize) {
+                        scan.chunks.push({ list: pair[0], from: i, to: i + 2 * scan.chunkSize, dirs: dirs, isNotReadable: pair[1] });
+                    }
+                });
             }
 
             // The encoded paths of a chunk (dir + '/' + name, as actionScan() split them)
@@ -4540,117 +4699,154 @@ if (isset($_POST['ajax_action'])) {
                 return paths;
             }
 
-            // One 'process' request for a batch of paths (see postAction() for failures)
-            function fetchProcessBatch(paths, isNotReadable) {
+            function sendChunk(scan, idx) {
+                var chunk = scan.chunks[idx];
+                scan.chunks[idx] = null; // the page's lists can go once every batch of it is out
+                scan.inFlight++;
+                processBatch(scan, chunkPaths(chunk), chunk.isNotReadable, 0)
+                    .then(function (rows) {
+                        if (scan !== _scan) return;
+                        scan.inFlight--;
+                        scan.results.set(idx, rows);
+                        while (scan.results.has(scan.applied)) {
+                            applyRows(scan, scan.results.get(scan.applied));
+                            scan.results.delete(scan.applied++);
+                        }
+                        pumpScan(scan);
+                    });
+            }
+
+            // One 'process' request for a batch of paths; resolves to its rows,
+            // or [] when they couldn't be analysed (the reason is logged). A busy
+            // host gets the batch again later, whole. Any other failure usually
+            // means one path tripped something server-side (a WAF/security rule,
+            // an open_basedir restriction, a crash on one file) that failed the
+            // whole request, so the batch is split in half and each half retried,
+            // down to single files: a batch of 500 with one bad file costs a
+            // handful of requests instead of 500.
+            function processBatch(scan, paths, isNotReadable, attempt) {
                 return postAction({
                     ajax_action: 'process',
                     is_not_readable: isNotReadable ? '1' : '0',
                     paths: paths.join(','),
                     ml: (typeof ML_MODEL !== 'undefined' && ML_MODEL) ? '1' : '0', // no model: skip ML features
-                });
+                })
+                    .then(function (data) {
+                        if (scan !== _scan) return [];
+                        reportServerWarnings(data);
+                        // The first batch goes alone (it fills the server's download
+                        // cache), then one more at a time per 10 that went through
+                        if (attempt === 0 && scan.limit < MAX_PARALLEL && (!scan.warm || ++scan.clean >= 10)) {
+                            scan.limit++;
+                            scan.clean = 0;
+                        }
+                        scan.warm = true;
+                        return data.features || [];
+                    })
+                    .catch(function (err) {
+                        if (scan !== _scan) return [];
+                        if (isOverloaded(err) && attempt < 5) {
+                            return hostBusy(scan, err, attempt).then(function () { return processBatch(scan, paths, isNotReadable, attempt + 1); });
+                        }
+                        if (paths.length === 1 || isOverloaded(err)) {
+                            logWarning((paths.length === 1 ? 'Skipped ' + decodePath(paths[0]) : 'Skipped ' + paths.length + ' files') + ' — ' + err.message, 'error');
+                            return [];
+                        }
+                        var mid = Math.ceil(paths.length / 2);
+                        return processBatch(scan, paths.slice(0, mid), isNotReadable, 0).then(function (left) {
+                            return processBatch(scan, paths.slice(mid), isNotReadable, 0).then(function (right) { return left.concat(right); });
+                        });
+                    });
             }
 
-            // Batches arrive in scan order, so the first file with an MD5 is the
-            // original and later ones are its duplicates
-            function applyProcessResult(data, allFeatures) {
-                reportServerWarnings(data);
-                const batch = data.features || [];
-                batch.forEach(function(f) {
-                    f.pathRaw = f.path; // encoded form, sent back as-is
-                    f.path = decodePath(f.path);
-                    f.duplicate_of = false;
-                    if (!f.is_unreadable) {
-                        if (_firstPathByMd5.has(f.md5)) f.duplicate_of = _firstPathByMd5.get(f.md5);
-                        else _firstPathByMd5.set(f.md5, f.path);
+            // The host refused for being busy: fewer requests at once from now
+            // on, and a wait (its Retry-After, else 1, 2, 4... s, at most 30)
+            function hostBusy(scan, err, attempt) {
+                scan.limit = Math.max(1, Math.floor(scan.limit / 2));
+                scan.clean = 0;
+                var seconds = parseInt(err.retryAfter, 10);
+                var ms = Math.min(30000, isNaN(seconds) ? 1000 * Math.pow(2, attempt) * (0.75 + Math.random() / 2) : seconds * 1000);
+                if (!scan.busyWarned) {
+                    scan.busyWarned = true;
+                    logWarning('The host is busy (' + err.message + '): sending fewer requests at once and retrying.', 'warning');
+                }
+                return new Promise(function (resolve) { setTimeout(resolve, ms); });
+            }
+
+            // Rows of a batch, in scan order: the ML score worked out and the
+            // bitmaps dropped (withMlScore()), and a provisional duplicate_of
+            // (the final one is set by markDuplicates() when the scan ends)
+            function applyRows(scan, batch) {
+                var rows = batch.map(function (f) {
+                    var d = withMlScore(f);
+                    d.pathRaw = d.path; // encoded form, sent back as-is
+                    d.path = decodePath(d.path);
+                    d.duplicate_of = false;
+                    if (!d.is_unreadable) {
+                        if (scan.firstByMd5.has(d.md5)) d.duplicate_of = scan.firstByMd5.get(d.md5);
+                        else scan.firstByMd5.set(d.md5, d.path);
                     }
-                    allFeatures.push(f);
+                    scan.features.push(d);
+                    return d;
                 });
-                appendLiveRows(batch);
+                if (ANOMALIES_ONLY_ABOVE > 0 && scan.features.length > ANOMALIES_ONLY_ABOVE && currentFilterMode === 'all' && !scan.filterTouched) {
+                    scan.filterTouched = true;
+                    document.getElementById('severityFilter').value = currentFilterMode = 'anomalies';
+                    logWarning('Showing only anomalies: this scan has more than ' + ANOMALIES_ONLY_ABOVE + ' files. Pick "All Files" to list them all.', 'warning');
+                }
+                appendLiveRows(scan, rows);
             }
 
             // During a scan each batch is listed as it arrives, every file scored
             // on its own: analyzeData() of the one file, whose statistics are then
             // neutral, so the outliers among all files are flagged when the scan
-            // ends and the whole table is redrawn, sorted
-            function appendLiveRows(batch) {
+            // ends and the whole table is redrawn, sorted. Up to TABLE_PAGE_ROWS
+            // rows are drawn, then only flagged ones; the rows are added once per
+            // frame, however many batches came in meanwhile.
+            function appendLiveRows(scan, batch) {
                 const threshold = parseFloat(document.getElementById('zThreshold').value) || Z_THRESHOLD;
-                const rows = batch.map(f => analyzeData([f], threshold)[0]).filter(d => shouldShowFile(d));
-                if (rows.length) document.getElementById('result').insertAdjacentHTML('beforeend', rows.map(rowHtml).join(''));
+                batch.forEach(function (f) {
+                    const d = analyzeData([f], threshold)[0];
+                    if (!shouldShowFile(d)) return;
+                    if (TABLE_PAGE_ROWS > 0 && scan.liveRows >= TABLE_PAGE_ROWS && !d.isAnomaly) { scan.liveHidden++; return; }
+                    scan.liveRows++;
+                    scan.live.push(rowHtml(d));
+                });
+                if (scan.live.length && !scan.liveFrame) {
+                    scan.liveFrame = requestAnimationFrame(function () {
+                        scan.liveFrame = 0;
+                        if (scan !== _scan) return;
+                        document.getElementById('result').insertAdjacentHTML('beforeend', scan.live.join(''));
+                        scan.live = [];
+                    });
+                }
             }
 
-            // Progress counts the files that have come back, so the bar keeps up
-            // with what the list shows
-            function showScanProgress(received, total, chunk, chunks) {
-                var pct = total > 0 ? Math.round(Math.min(received, total) / total * 100) : 100;
+            // Progress counts the files that have come back of those listed so
+            // far, so the bar keeps up with what the list shows
+            function showScanProgress(scan) {
+                var received = scan.features.length, listed = scan.listed;
+                var pct = listed > 0 ? Math.round(Math.min(received, listed) / listed * 100) : 0;
                 document.getElementById('ajaxBar').style.width = pct + '%';
+                document.getElementById('ajaxStatus').textContent = scan.listDone
+                    ? 'Analysing ' + listed + ' files…'
+                    : 'Listing and analysing files… (' + listed + ' listed so far)';
                 document.getElementById('ajaxSubStatus').textContent =
-                    'Chunk ' + chunk + '/' + chunks + ' \u2014 ' + received + '/' + total + ' files (' + pct + '%)';
+                    received + '/' + listed + ' files (' + pct + '%), ' + scan.inFlight + ' request(s) running' +
+                    (scan.liveHidden ? ', ' + scan.liveHidden + ' more listed when the scan ends' : '');
             }
 
-            // A batch that fails to parse as JSON usually means exactly one
-            // path in it tripped something server-side (a WAF/security rule,
-            // an open_basedir restriction, etc.) that blocked the whole
-            // request \u2014 not that every file in the batch is a problem.
-            // Bisect the batch and retry each half, splitting again on
-            // failure, down to individual files if needed \u2014 so a batch of
-            // 500 with one bad file costs a handful of requests instead of
-            // 500 individual ones.
-            function retryProcessBisect(paths, isNotReadable, allFeatures) {
-                return fetchProcessBatch(paths, isNotReadable)
-                    .then(function(data) { applyProcessResult(data, allFeatures); })
-                    .catch(function(err) {
-                        if (!(err instanceof SyntaxError) || paths.length <= 1) {
-                            if (paths.length === 1) {
-                                logWarning('Skipped ' + paths[0] + ' \u2014 ' + err.message, 'error');
-                            } else {
-                                logWarning('Failed to process ' + paths.length + ' file(s): ' + err.message, 'error');
-                            }
-                            return;
-                        }
-                        var mid = Math.ceil(paths.length / 2);
-                        var left = paths.slice(0, mid);
-                        var right = paths.slice(mid);
-                        return retryProcessBisect(left, isNotReadable, allFeatures)
-                            .then(function() { return retryProcessBisect(right, isNotReadable, allFeatures); });
-                    });
-            }
-
-            function processChunk(chunks, idx, allFeatures, totalFiles, chunkSize) {
-                if (_scanCancelled || idx >= chunks.length) { return Promise.resolve(); }
-
-                var chunk = chunks[idx];
-                var paths = chunkPaths(chunk);
-                showScanProgress(allFeatures.length, totalFiles, idx + 1, chunks.length);
-
-                return fetchProcessBatch(paths, chunk.isNotReadable)
-                    .then(function(data) {
-                        if (_scanCancelled) { return; }
-                        applyProcessResult(data, allFeatures);
-                    })
-                    .catch(function(err) {
-                        // A small obstacle (one bad path, one bad chunk) should
-                        // never stop the entire scan \u2014 always fall through to
-                        // the next chunk below, regardless of what happens here.
-                        if (_scanCancelled) { return; }
-                        if (err instanceof SyntaxError && paths.length > 1) {
-                            logWarning(
-                                'Chunk ' + (idx + 1) + '/' + chunks.length + ' returned an invalid response \u2014 retrying its ' + paths.length + ' file(s) in smaller batches',
-                                'warning'
-                            );
-                            return retryProcessBisect(paths, chunk.isNotReadable, allFeatures);
-                        }
-                        // A network-level failure would fail identically on every
-                        // retry, so there's nothing to gain from splitting it up.
-                        logWarning(
-                            'Chunk ' + (idx + 1) + '/' + chunks.length + ' failed (' + paths.length + ' file(s) skipped): ' + err.message,
-                            'error'
-                        );
-                    })
-                    .then(function() {
-                        if (_scanCancelled) { return; }
-                        showScanProgress(allFeatures.length, totalFiles, idx + 1, chunks.length);
-                        return processChunk(chunks, idx + 1, allFeatures, totalFiles, chunkSize);
-                    });
+            // Every batch is in: the statistics need every file, so all rows are
+            // scored again together. The scored rows replace the raw ones.
+            function finishScan(scan) {
+                _scan = null;
+                document.getElementById('ajaxStatus').textContent = 'Scoring ' + scan.features.length + ' files…';
+                document.getElementById('ajaxBar').style.width = '100%';
+                setTimeout(function () { // after the status is painted
+                    markDuplicates(scan.features);
+                    reanalyze(scan.features);
+                    document.getElementById('ajaxProgress').style.display = 'none';
+                }, 50);
             }
 
             // Delete the server's download cache (cacheClear()): the next scan pulls
@@ -4667,8 +4863,10 @@ if (isset($_POST['ajax_action'])) {
                     .catch(function (err) { logWarning('Could not clear the download cache: ' + err.message, 'error'); });
             }
 
+            // Requests already sent still run on the server, deleting what they find blacklisted
             function cancelChunkedScan() {
-                _scanCancelled = true;
+                if (_scan && _scan.inFlight) logWarning('Scan cancelled. The ' + _scan.inFlight + ' request(s) already sent still finish on the server.', 'warning');
+                _scan = null;
                 document.getElementById('ajaxProgress').style.display = 'none';
             }
             // ────────────────────────────────────────────────────────────────

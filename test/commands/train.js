@@ -104,7 +104,7 @@ function printInjected(injected, models, ctx) {
     injected.forEach(x => { x.cvScore = ml.scorerUnits(models[x.fold], unitFloor)(x); });
     // Rule scores as a scan would see the file: where the host lives
     const rows = injected.map(x => Object.assign({}, x.row, { path: x.host.id }));
-    ctx.analyzeData(rows, constant(ctx, 'Z_THRESHOLD')).forEach((d, i) => { injected[i].ruleScore = d.ruleScore; });
+    ctx.analyzeData(rows.map(ctx.withMlScore), constant(ctx, 'Z_THRESHOLD')).forEach((d, i) => { injected[i].ruleScore = d.ruleScore; });
     const clean = injected.map(x => ({ ruleScore: x.shell.ruleScore, cvScore: x.shell.cvScore }));
     const tests = [
         [`rules (score >= ${anomalyScore})`, d => d.ruleScore >= anomalyScore],
@@ -129,7 +129,7 @@ async function checkDir(dir, model, ctx) {
     const tmp = path.join(tempDir('check'), 'rows.jsonl');
     const rows = contentOnly(parseRows(fs.readFileSync(await ml.extractTo(path.resolve(dir), tmp), 'utf8')))
         .filter(d => d.ml_features && !d.is_htaccess);
-    const scored = ctx.analyzeData(rows, constant(ctx, 'Z_THRESHOLD'));
+    const scored = ctx.analyzeData(rows.map(ctx.withMlScore), constant(ctx, 'Z_THRESHOLD'));
     const score = ml.scorerUnits(model, constant(ctx, 'ML_UNIT_FLOOR')), threshold = constant(ctx, 'ML_THRESHOLD');
     const rules = scored.filter(d => d.isAnomaly && !d.mlOnly).length;
     const flagged = rows.map(d => ({ d, s: score({ bits: ml.decodeBits(d.ml_features), unitBits: (d.ml_units || []).map(ml.decodeBits) }) })).filter(x => x.s >= threshold);
