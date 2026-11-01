@@ -58,7 +58,7 @@ async function runBenchmark(targets, args, work) {
         const ctx = loadScoring({ weights: summary.weights, roles: summary.roles, model: args['no-ml'] ? null : readModel() });
         const threshold = args.threshold ? parseFloat(args.threshold) : constant(ctx, 'Z_THRESHOLD');
         const anomalyScore = constant(ctx, 'ANOMALY_SCORE'), criticalScore = constant(ctx, 'CRITICAL_SCORE');
-        const scored = ctx.analyzeData(rows, threshold);
+        const scored = ctx.analyzeData(rows.map(ctx.withMlScore), threshold);
         const notCode = scored.filter(d => inShellCorpus(d) && !isShellSample(d));
         const mal = scored.filter(isMal), ben = scored.filter(d => !inShellCorpus(d));
         if (notCode.length) console.log(`not counted        ${notCode.length} shell-corpus file(s) that aren't shells (no server code, or in not-shells.txt): ${notCode.map(d => d.rel.split('/').pop()).join(', ')}`);
@@ -94,7 +94,7 @@ async function runBenchmark(targets, args, work) {
             work, phpWork: t.work, repo: t.repo, name: 'inject-' + (t.container || 'local'),
         });
         const benign = rows.filter(d => !inShellCorpus(d));
-        const scored = ctx.analyzeData(benign.concat(contentOnly(injected)), threshold).slice(benign.length);
+        const scored = ctx.analyzeData(benign.concat(contentOnly(injected)).map(ctx.withMlScore), threshold).slice(benign.length);
         const tp = scored.filter(d => d.isAnomaly).length;
         console.log(`injected           detected ${tp}/${pairs.length} (${pct(tp, pairs.length)})   each shell inserted into a legitimate file`);
         return { tp, n: pairs.length, scored };

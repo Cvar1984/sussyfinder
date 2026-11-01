@@ -111,7 +111,7 @@ function jsTests() {
         const rows = Array.from({ length: 60 }, (_, i) => ({
             path: '/x/' + i + '.php', size: 100 + i * 37 % 900, mtime: 1e9 + (i % 7) * 86400 * (i % 5 ? 1 : 400),
             ctime: 1e9 + (i % 7) * 86400, owner: i % 19 ? 1 : 2, entropy: 4 + (i % 9) / 3, total_tokens: 20 + i,
-            matched_tokens: i % 4 ? ['substr'] : ['eval', '$_get'], ml_features: null, is_htaccess: false,
+            matched_tokens: i % 4 ? ['substr'] : ['eval', '$_get'], mlScore: null, is_htaccess: false,
             is_unreadable: i === 5, is_blacklisted: false, duplicate_of: false, md5: 'm' + i,
         }));
         const strip = list => JSON.stringify(list.map(d => [d.isAnomaly, d.mlOnly, d.threatScore]));
@@ -119,6 +119,38 @@ function jsTests() {
             assert(strip(ctx.flagAnomalies(ctx.analyzeData(rows, 3.5), t)) === strip(ctx.analyzeData(rows, t)), 'threshold ' + t);
         }
         assert(new Set(ctx.analyzeData(rows, 0.5).map(d => d.isAnomaly)).size === 2, 'the sample has anomalies and normal rows');
+        // The page keeps only the scored rows and rescores those (an MHR hit, the end of a scan)
+        const fields = list => JSON.stringify(list.map(d => [d.isAnomaly, d.mlOnly, d.threatScore, d.ruleScore, d.zScores, d.rareOwner, d.entropy]));
+        assert(fields(ctx.analyzeData(ctx.analyzeData(rows, 2), 2)) === fields(ctx.analyzeData(rows, 2)), 'rescoring scored rows changes them');
+    });
+
+    test('withMlScore: the ML score worked out once, the bitmaps dropped, the same threat score', () => {
+        const w = Float64Array.from({ length: 2048 }, (_, i) => Math.sin(i * 12.9898) * 1.5);
+        const ctx = loadScoring({ model: ml.quantize({ w, b: 0.3 }) });
+        let hex = ''; for (let i = 0; i < 512; i++) hex += ((i * 5 + 3) % 16).toString(16);
+        const raw = { path: 'a.php', size: 900, mtime: 1e9, ctime: 1e9, owner: 1, entropy: 5, total_tokens: 80, matched_tokens: ['eval'],
+            ml_features: hex, ml_units: [hex.split('').reverse().join('')], is_htaccess: false, is_unreadable: false, is_blacklisted: false, duplicate_of: false, md5: 'x' };
+        const r = ctx.withMlScore(raw);
+        assert(!('ml_features' in r) && !('ml_units' in r) && raw.ml_features === hex, 'bitmaps dropped from the copy only');
+        assert(r.mlScore === ctx.mlScoreUnits(raw) && r.mlScore !== null, 'mlScore ' + r.mlScore);
+        assert(ctx.withMlScore(Object.assign({}, raw, { is_htaccess: true })).mlScore === null, '.htaccess has no ML score');
+        assert(ctx.analyzeData([r], 3.5)[0].mlPoints === ctx.mlPoints(r.mlScore), 'ML points from mlScore');
+    });
+
+    test('markDuplicates: the newest copy is the original (then the first path), whatever the order', () => {
+        const ctx = loadScoring({ weights: {} });
+        const rows = () => [
+            { path: 'b/x.php', md5: 'A', mtime: 200 }, { path: 'a/x.php', md5: 'A', mtime: 200 }, { path: 'c/x.php', md5: 'A', mtime: 100 },
+            { path: 'd/y.php', md5: 'B', mtime: 50 }, { path: 'e/y.php', md5: 'B', mtime: 90 },
+            { path: 'f/z.php', md5: 'C', mtime: 10 }, { path: 'gone.php', md5: 'N/A', mtime: 0, is_unreadable: true },
+        ];
+        const want = JSON.stringify({ 'b/x.php': 'a/x.php', 'a/x.php': false, 'c/x.php': 'a/x.php', 'd/y.php': 'e/y.php', 'e/y.php': false, 'f/z.php': false, 'gone.php': false });
+        for (let seed = 0; seed < 20; seed++) {
+            const list = rows().sort((a, b) => ((a.path.charCodeAt(0) * (seed + 3)) % 7) - ((b.path.charCodeAt(0) * (seed + 3)) % 7));
+            ctx.markDuplicates(list);
+            const got = JSON.stringify(Object.fromEntries(list.sort((a, b) => rows().findIndex(r => r.path === a.path) - rows().findIndex(r => r.path === b.path)).map(d => [d.path, d.duplicate_of])));
+            assert(got === want, `order ${seed}: ${got}`);
+        }
     });
 
     test('scoring block constants', () => {
@@ -136,7 +168,7 @@ function jsTests() {
     test('a verified release file scores below VERIFIED_MAX and isn\'t flagged, unless the blacklist or MHR names it', () => {
         const ctx = loadScoring();
         const file = (path, extra) => Object.assign({ path, matched_tokens: ['eval', 'base64_decode', '$_post'], total_tokens: 400, size: 9000,
-            mtime: 1e9, ctime: 1e9, owner: 1, entropy: 6, md5: 'x', is_blacklisted: false, is_htaccess: false, duplicate_of: false }, extra);
+            mtime: 1e9, ctime: 1e9, owner: 1, entropy: 6, md5: 'x', mlScore: null, is_blacklisted: false, is_htaccess: false, duplicate_of: false }, extra);
         const verified = { verified: 'acme release file a.php' };
         const rows = ctx.analyzeData([file('plain.php', {}), file('verified.php', verified),
             file('verified-more.php', Object.assign({}, verified, { matched_tokens: ['eval', 'system', 'base64_decode', '$_post', '$_get'] })),

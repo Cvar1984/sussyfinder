@@ -61,7 +61,7 @@ const CASES = [
     ['<% if user %><p>Hello</p><% end %>', [], ['@foreign_code']], // an ERB/EJS template is not ASP
 ];
 
-// --- Listing fixture: the names getSortedByPattern must return (rawurlencoded) ---
+// --- Listing fixture: the names listFiles() must return (rawurlencoded) ---
 // It also holds what must NOT be listed or must not hang the scan: a FIFO
 // named .php, a "root -> /" symlink (not followed, but warned about), and
 // non-PHP names.
@@ -161,6 +161,14 @@ function check(out, models) {
     const listed = (out.listing || []).slice().sort();
     if (JSON.stringify(listed) !== JSON.stringify(LISTING_WANT)) failures.push(`listing: got [${listed.join(', ')}]`);
     if (out.outside_warned !== true) failures.push('listing: no warning for the symlink leading outside');
+    // listFiles() a file per page: the same files, at least a page each;
+    // made-up cursors stay inside; a vanished file comes back
+    // "gone"; listSeconds() for max_execution_time 0, 2, 10, 100
+    const pg = out.paging || {};
+    if (pg.equal !== true || !(pg.pages >= LISTING_WANT.length)) failures.push(`paged listing: ${JSON.stringify(pg)}`);
+    if (pg.inside !== true) failures.push('paged listing: a made-up cursor listed a file outside the directory');
+    if (pg.gone !== true) failures.push('a file gone before it was read is not reported as gone');
+    if (JSON.stringify(pg.seconds) !== '[10,1,4,10]') failures.push(`listSeconds(): want [10,1,4,10], got ${JSON.stringify(pg.seconds)}`);
     models.want.forEach((ok, i) => { if ((out.models || [])[i] !== ok) failures.push(`ml-model.json check: ${models.names[i]} should be ${ok ? 'accepted' : 'refused'}`); });
     // mlFeatureUnits() segmentation, in selfcheck.php's probe order: inline-only
     // code is one vector (the whole file), functions+class around a main body

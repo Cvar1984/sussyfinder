@@ -10,7 +10,8 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 
 ## Features
 
-* **Recursive directory scanning** with symlink loop protection; symlinked directories leading outside the scanned directory are reported, not followed, and directories that can't be listed are reported instead of skipped silently
+* **Recursive directory scanning** for big sites: the file list comes a page at a time, each page within the host's time limit, and analysis starts on the first page while the rest is listed. Symlinked directories aren't followed (those inside the scanned directory are scanned at their real path; those leading outside are reported), and directories that can't be listed are reported instead of skipped silently
+* **Built for shared hosting** – several batches are analysed at once (at most `MAX_PARALLEL`), starting with one; when the host answers that it is busy (429, 503, 508, …) the page sends fewer at once and retries the batch later instead of splitting it up. When a request gets no answer at all (a reset connection, `NS_ERROR_NET_RESET`, a proxy or host cutting long requests off), the listing asks for pages half as big and half as long, and a batch is retried once, then split until the one file the server dies on is found and skipped by name
 * **Token-based detection** – scans PHP tokens for known obfuscation, shell execution, file I/O, and credential-related functions (method names like `$pdo->exec()` and text inside strings/comments are ignored)
 * **Structural detection** – catches what name matching can't: calls through variables or superglobals (`$_GET['a']($_GET['b'])`), function names hidden in strings (`'ba'.'se64_decode'`, `"\x73ystem"`), `preg_replace` with `/e`, backtick shell execution, payloads after `__halt_compiler()`, and giant single-line blobs
 * **MD5 hash whitelist & blacklist** – skip known-good files (e.g., from common frameworks) and auto-delete known-bad files
@@ -21,7 +22,23 @@ It combines token-based pattern matching, statistical anomaly detection (Shannon
 * **Interactive web interface** with:
 
   * Sort by modification time, suspicious token count, Z-score, or residual
-  * Filter to show only anomalies
+  * Filter to show only anomalies (a scan of more than 10,000 files starts on this filter)
+  * The table draws 500 rows at a time and the next ones as you scroll down (infinite scroll); search, filters, sorting, the charts and Copy cover every row
+  * Search: press <kbd>/</kbd> anywhere to jump to the search box (<kbd>Esc</kbd> clears it). Words must all match, in the path or a matched token; the **?** button lists the rest:
+
+    | Query | Finds |
+    |---|---|
+    | `eval base64`, `eval OR assert`, `eval -vendor` | both words, either one, `eval` but not `vendor` |
+    | `"wp-content/uploads"`, `/\.(jpe?g\|png)$/` | exact text with spaces; a regular expression |
+    | `path:` `name:` `token:` `ext:` `md5:` `owner:` `dup:` | one property: path, file name, matched token, last extension, hash, owner id, a duplicate's original |
+    | `score:>=15` `rules:>8` `ml:>80` `size:>100k` `entropy:>5.5` `tokens:<20` `hits:3..10` | numbers, with `>`, `>=`, `<`, `<=` or a range `a..b`; `ml` is in % |
+    | `date:7d`, `date:2025-06`, `date:>=2025-01-01`, `date:2025-06-15T14..2025-06-15T16` | changed in the last 7 days (`h`, `w` too); in a year, month, day, hour or minute; after or before it; a range |
+    | `near:"/path/to/shell.php"`, `near:is:blacklisted`, `near:(is:critical ext:php)~6h` | files in the folder of that file, or of any file the query finds, or whose mtime or ctime is within an hour of one of theirs (`~30m`, `~6h`, `~2d`, `~1w` sets the window); `-near:…` is everything else. ctime counts because an intruder can backdate a file's mtime with `touch` but not its ctime, and a file they edited and set back still has a new ctime. A time shared by more than 5% of the files (at least 200: a deploy, an update, a restore) is left out, and the search box's tooltip says so. Searching `near:` switches the filter to All Files, since the files around a shell are mostly not flagged |
+    | `dir:"/path/to/folder"`, `(eval OR assert) -vendor` | files in exactly that folder; parentheses group |
+    | `is:critical -is:verified` | `anomaly` `critical` `blacklisted` `verified` `duplicate` `htaccess` `unreadable` `gone` `mhr` `ml` `mlonly` `rare` `entropy` |
+
+    A term that doesn't make sense (a broken regex, `score:>x`) outlines the box in red and its tooltip says why. When the severity filter hides files the search finds, the table says how many and offers to show them.
+  * To see what else an intruder dropped or touched, search `near:is:blacklisted -is:blacklisted -is:verified`: everything around every blacklisted file, minus those files and official release files (`near:"/path/to/one.php"` for one file; combine it with `ext:php` and the rest). A blacklisted file is deleted by the scan that finds it, so this works in that scan's results. A blacklisted file is deleted by the scan that finds it, so this works in that scan's results (a later scan no longer has the file to look around).
   * One-click copy of results (with full details)
   * Click a file path to copy it; the 📋 icon copies its MD5 hash
   * Linked charts: drag a box on the Threat Matrix or Entropy chart, or click a timeline bar, to select those files (Ctrl/⌘ adds more); the table then shows only the selection, and Esc clears it. Charts fade whatever the table's filters hide, hovering a file in a chart highlights its table row (and the other way round), and the Threat Matrix zooms with the wheel, pans with Shift+drag and resets on double-click
@@ -453,7 +470,7 @@ test/run setup            # fetch the benchmark samples (once)
 test/run all              # unit + bench + ui, with a summary: run before a commit
 ```
 
-* `test/run unit`: unit tests in a few seconds, with no samples and no Docker. In PHP, it checks the structural detectors on snippets (calls through variables, names hidden in strings, `preg_replace` with `/e`, ASP/JSP/Perl in PHP-named files and more). It also checks which names the directory listing returns (a FIFO, a symlink leading outside, a non-UTF-8 name) and which `ml-model.json` files `main.php` accepts. In JS, it checks labelling, feature decoding, fold and cap stability, training, that the trainer's scorer equals `main.php`'s `mlScore()`, and that moving the Z-threshold re-flags exactly like a full rescore.
+* `test/run unit`: unit tests in a few seconds, with no samples and no Docker. In PHP, it checks the structural detectors on snippets (calls through variables, names hidden in strings, `preg_replace` with `/e`, ASP/JSP/Perl in PHP-named files and more). It also checks which names the directory listing returns (a FIFO, a symlink leading outside, a non-UTF-8 name), that listing a page at a time returns the same files and that a made-up resume point stays inside the directory, and which `ml-model.json` files `main.php` accepts. In JS, it checks labelling, feature decoding, fold and cap stability, training, that the trainer's scorer equals `main.php`'s `mlScore()`, and that moving the Z-threshold re-flags exactly like a full rescore.
 * `test/run bench`: the PHP self-check, then the real feature extraction and the real client-side scoring from `main.php` over the benchmark set (the samples marked `benchmark = true` in `.gitmodules`: webshells mixed with legitimate code). It prints detection and false-positive rates. Timestamps are zeroed because the corpora were copied at different times, so the ctime/mtime and owner signals aren't measured. Files in the webshell corpus with no server code at all aren't counted as missed shells; the run lists them by name. Its `ml only` line is in-sample for the model, so use `test/run train` for held-out rates. Options:
   * `--list`: print missed webshells and false positives
   * `--tokens`: print per-token webshell vs. benign counts, for tuning weights
@@ -466,7 +483,8 @@ test/run all              # unit + bench + ui, with a summary: run before a comm
   * `minimal`: no `json_encode`, no `json_decode` and no cURL (as on PHP < 5.2)
 
   Each also gets a page/AJAX check. It ends with a table and lists files that match differently than on the newest PHP. `test/run setup --docker` pulls the images.
-* `test/run ui`: drives the page in headless Chrome with real mouse and keyboard events. It covers chart selection, hover linking, filters, the threshold control, zoom, HiDPI sizing and resizing, and checks that a file named `a');alert(1);('.php` runs no script and that a file on a local checksum list scans as verified. It scans a temporary copy of the samples with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips when there is none (`--require-browser` makes that a failure).
+* `test/run ui`: drives the page in headless Chrome with real mouse and keyboard events. It covers chart selection, hover linking, filters, the threshold control, zoom, HiDPI sizing and resizing, and checks that a file named `a');alert(1);('.php` runs no script and that a file on a local checksum list scans as verified. It runs search queries against the same conditions written out, and checks <kbd>/</kbd> and <kbd>Esc</kbd> and the infinite scroll. A second scan with tiny listing pages, three batches at once, fake busy (503) and failing (500) replies and a cancel-and-rescan must find exactly what a plain scan found. It scans a temporary copy of the samples with the whitelist and blacklist off, so nothing is deleted. It finds Chrome or Chromium on `PATH` or through `CHROME_BIN`, and skips when there is none (`--require-browser` makes that a failure).
+* `test/run perf`: times a scan through the real page in headless Chrome and measures the browser memory its results take, on a copy of whole benign releases (`--files`, `--latency`, `--define MAX_PARALLEL=1`, `--main` for an older `main.php`).
 * `test/run train`: see [Accuracy](#accuracy).
 * `test/run checksums`: builds `checksums.txt` from the benign corpora (see [Vendor Checksums](#vendor-checksums)); `--write` saves it. Rerun it after retraining the model or changing the rules, since which release files come near the anomaly bar depends on both.
 
@@ -510,6 +528,10 @@ define('_ML_MODEL_URL_', '/srv/ml-model.json');  // offline copy of the model
 | `_MHR_URL_` | `https://hash.cymru.com/v2/submitHashes` | MHR endpoint |
 | `_CHECKSUMS_URL_`, `_WP_CORE_CHECKSUMS_URL_`, `_WP_PLUGIN_CHECKSUMS_URL_` | this repository, `api.wordpress.org`, `downloads.wordpress.org` | where the vendor checksums come from; the WordPress ones are templates with `{version}`, `{locale}`, `{slug}` (each may be a local file) |
 | `TIME_LIMIT` | `3600` | seconds a request may run |
+| `LIST_PAGE_FILES` | `20000` | files per listing request; a page also ends after 40% of `max_execution_time` (1–10 s). `0`: the whole list in one request |
+| `MAX_PARALLEL` | `3` | batches analysed at once, at most; `1` sends one at a time |
+| `TABLE_PAGE_ROWS` | `500` | rows the table draws at a time, the next ones as you scroll; `0`: all at once |
+| `ANOMALIES_ONLY_ABOVE` | `10000` | a scan of more files starts on the "Only Anomalies" filter; `0`: never |
 | `CACHE_DIR` | a `sussyfinder-…` folder in the system temp folder | where downloaded lists, checksums and the model are kept until deleted (`''`: no cache) |
 | `HTTP_CONNECT_TIMEOUT`, `HTTP_TIMEOUT` | `10`, `30` | download timeouts in seconds |
 | `MHR_BATCH` | `1000` | hashes per MHR request |
