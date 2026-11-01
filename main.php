@@ -2773,21 +2773,6 @@ if (isset($_POST['ajax_action'])) {
             }
 
             /* Copy MD5 button */
-            .near-btn {
-                cursor: pointer;
-                margin-left: 4px;
-                font-size: 11px;
-                opacity: 0.7;
-            }
-
-            .near-btn:hover {
-                opacity: 1;
-            }
-
-            #result tr.row-near td {
-                outline: 1px solid #ffaa00;
-            }
-
             .copy-hash-btn {
                 cursor: pointer;
                 color: #4a8bc2;
@@ -2925,7 +2910,7 @@ if (isset($_POST['ajax_action'])) {
                     <td><code onclick="searchFor(this.textContent)">size:>100k entropy:>5.5</code></td><td>size (k, m, g), entropy</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">tokens:<20 hits:3..10</code></td><td>tokens; matched tokens; <code>a..b</code> is a range</td>
                     <td><code onclick="searchFor(this.textContent)">date:7d</code></td><td>changed in the last 7 days (also <code>h</code>, <code>w</code>)</td></tr>
-                <tr><td><code>near:"/path/to/file.php"</code> <code onclick="searchFor(this.textContent)">near:is:blacklisted~6h</code></td><td>files in the folder of that file, or of any file a query finds, or changed within an hour of one (<code>~30m</code>, <code>~6h</code>, <code>~2d</code> sets the window); the 🧭 on a row</td>
+                <tr><td><code>near:"/path/to/file.php"</code> <code onclick="searchFor(this.textContent)">near:is:blacklisted~6h</code></td><td>files in the folder of that file, or of any file a query finds, or changed within an hour of one (<code>~30m</code>, <code>~6h</code>, <code>~2d</code> sets the window)</td>
                     <td><code>dir:"/path/to/folder"</code> <code onclick="searchFor(this.textContent)">date:2025-06-15T14..2025-06-15T16</code></td><td>exactly that folder; a time range (hour or minute)</td></tr>
                 <tr><td><code onclick="searchFor(this.textContent)">date:2025-06 date:>=2025-01-01</code></td><td>a year, month or day; before or after it</td>
                     <td><code onclick="searchFor(this.textContent)">is:critical -is:verified</code></td><td>anomaly, critical, blacklisted, verified, duplicate, htaccess, unreadable, gone, mhr, ml, mlonly, rare, entropy</td></tr>
@@ -3493,11 +3478,10 @@ if (isset($_POST['ajax_action'])) {
             // onclick="f('...')": the browser undoes HTML escaping before running
             // inline JS, so a file name could break out of the string literal
             document.addEventListener('click', function (e) {
-                var el = e.target.closest ? e.target.closest('[data-copy], [data-vt], [data-near], [data-filter-path]') : null;
+                var el = e.target.closest ? e.target.closest('[data-copy], [data-vt], [data-filter-path]') : null;
                 if (!el) return;
                 if (el.hasAttribute('data-copy')) copyText(el.getAttribute('data-copy'));
                 else if (el.hasAttribute('data-vt')) checkVT(el.getAttribute('data-vt'));
-                else if (el.hasAttribute('data-near')) searchNear(el.getAttribute('data-near'));
                 else filterByPath(el.getAttribute('data-filter-path'));
             });
 
@@ -3827,24 +3811,6 @@ if (isset($_POST['ajax_action'])) {
                 return '"' + text.replace(/["\\]/g, '\\$&') + '"';
             }
 
-            // A row's 🧭: the files near it, newest first, the file itself marked.
-            // Every filter is cleared so nothing near it is hidden.
-            function searchNear(path) {
-                document.getElementById('severityFilter').value = currentFilterMode = 'all';
-                document.getElementById('sortSelect').value = currentSort = 'mtime';
-                document.getElementById('searchTokensOnly').checked = searchTokensOnly = false;
-                _chartSelection = null;
-                document.getElementById('searchInput').value = currentSearch = 'near:' + quoteQuery(path);
-                renderTable(analyzedData);
-                // The table draws a page at a time; draw down to the file
-                while (!_rowByPath.has(path) && _tableDrawn < _tableRows.length) showMoreRows();
-                const tr = _rowByPath.get(path);
-                if (tr) {
-                    tr.classList.add('row-near');
-                    tr.scrollIntoView({ block: 'center' });
-                }
-            }
-
             // An example in the syntax list, clicked: search for it
             function searchFor(query) {
                 document.getElementById('searchInput').value = query;
@@ -4064,8 +4030,7 @@ if (isset($_POST['ajax_action'])) {
                     md5Btn = `<span class="copy-hash-btn" data-copy="${escapeHtml(d.md5)}" title="Copy MD5 hash">📋</span>`;
                     vtBadge = `<span class="vt-badge" data-vt="${escapeHtml(d.md5)}" title="check on VirusTotal">VT</span>`;
                 }
-                const nearBtn = `<span class="near-btn" data-near="${escapeHtml(d.path)}" title="Files near this one: in the same folder, or changed within ${NEAR_HOURS} h of it">🧭</span>`;
-                let mainLine = badge + fileLink + md5Btn + vtBadge + nearBtn;
+                let mainLine = badge + fileLink + md5Btn + vtBadge;
                 if (status) mainLine += ' (' + status + ')';
 
                 return `<tr data-path="${escapeHtml(d.path)}">

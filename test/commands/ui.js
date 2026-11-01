@@ -305,17 +305,7 @@ async function testSearch() {
     check('a search the filter hides says how many and offers them', await js(`/^804 more file\\(s\\) match the search but are hidden by the "Only Anomalies" filter/.test(document.getElementById('hiddenMatches').textContent.trim())`));
     await js('document.querySelector("#hiddenMatches button").click(); true');
     check('"Show them" switches to All Files', await js('currentFilterMode === "all" && !document.getElementById("hiddenMatches")'));
-    // The compass on a file the first page of the table doesn't reach
-    await js('searchNear("/site/core/f650.php"); true'); await sleep(200);
-    check('the 🧭 draws the table down to its file and marks it', await js(`_rowByPath.has('/site/core/f650.php') && _rowByPath.get('/site/core/f650.php').classList.contains('row-near')`),
-        await tableRows() + ' rows drawn');
     await js('analyzedData = _realRows; clearFilters(); true');
-    // A row's compass: the files near it, newest first, the file itself marked
-    await js('clearFilters(); document.getElementById("searchInput").value = ""; applySearch(); true');
-    await js(`document.querySelector('#result tr[data-path] .near-btn[data-near=' + JSON.stringify(${JSON.stringify(target)}) + ']').click(); true`); await sleep(300);
-    check('the 🧭 on a row searches near:"its path", sorted by time, and marks it', await js(`currentSearch === 'near:' + quoteQuery(${JSON.stringify(target)}) &&
-        currentSort === 'mtime' && document.querySelector('#result tr.row-near') === _rowByPath.get(${JSON.stringify(target)})`), await tableRows() + ' rows');
-    await js('clearFilters(); document.getElementById("sortSelect").value = currentSort = "threat"; renderTable(analyzedData); true');
     await js(`document.getElementById('searchInput').value = '/(/ score:>x'; applySearch(); true`);
     check('a broken regex or number marks the search box and says why', await js(`document.getElementById('searchInput').classList.contains('search-error') &&
         /regular expression/.test(document.getElementById('searchInput').title) && /isn.t a number/.test(document.getElementById('searchInput').title)`));
